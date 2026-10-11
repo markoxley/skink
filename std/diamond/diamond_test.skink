@@ -1,0 +1,29 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/diamond/diamond_test.skink
+// Purpose: Regression test for comp_error.md #25 — diamond imports must
+//          be deduplicated. This module imports mid (which itself imports
+//          ./shared) AND shared directly via a different path spelling,
+//          which previously merged shared's declarations twice and errored
+//          with `variable "shared.X" already declared in this scope`.
+//
+// Licensed under the Apache License, Version 2.0.
+
+module diamond_test
+
+import "testing"
+import "std/diamond/mid"
+import "std/diamond/shared"
+
+// TestDiamondImportsDeduped verifies that a module imported both directly
+// and transitively is merged once — this file would not even compile
+// before the resolver canonicalized load paths.
+pub fn TestDiamondImportsDeduped() {
+    testing.AssertEqualInt(52, mid.MidFn(), "mid.MidFn via transitive shared")
+    testing.AssertEqualInt(42, shared.SharedFn(), "shared.SharedFn direct")
+    testing.AssertEqualInt(10, shared.SharedVal, "shared.SharedVal direct")
+}

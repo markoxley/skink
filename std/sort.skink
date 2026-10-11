@@ -1,0 +1,326 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/sort.skink
+// Purpose: In-place sorting for slices of ints, floats, strings, and
+//          generic types using quicksort with median-of-three pivot.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+module sort
+
+import "std/libc"
+
+// SortInts sorts a slice of ints in ascending order using quicksort.
+pub fn SortInts(arr: []int) {
+    n := len(arr)
+    if n < 2 {
+        return
+    }
+    quickSortInts(arr, 0, n - 1)
+}
+
+// quickSortInts recursively sorts an int slice between low and high.
+fn quickSortInts(arr: []int, low: int, high: int) {
+    for low < high {
+        // Median-of-three pivot selection to avoid O(n²) on sorted input.
+        mid := low + (high - low) / 2
+        if arr[mid] < arr[low] {
+            tmp := arr[low]
+            arr[low] = arr[mid]
+            arr[mid] = tmp
+        }
+        if arr[high] < arr[low] {
+            tmp := arr[low]
+            arr[low] = arr[high]
+            arr[high] = tmp
+        }
+        if arr[high] < arr[mid] {
+            tmp := arr[mid]
+            arr[mid] = arr[high]
+            arr[high] = tmp
+        }
+        // Median is now at mid; swap it to high as the pivot
+        tmp := arr[mid]
+        arr[mid] = arr[high]
+        arr[high] = tmp
+        pi := partitionInts(arr, low, high)
+        // Tail-call optimization: recurse on smaller partition
+        if pi - low < high - pi {
+            quickSortInts(arr, low, pi - 1)
+            low = pi + 1
+        } else {
+            quickSortInts(arr, pi + 1, high)
+            high = pi - 1
+        }
+    }
+}
+
+// partitionInts partitions an int slice around a pivot and returns its index.
+fn partitionInts(arr: []int, low: int, high: int) -> int {
+    // Lomuto partition: pivot is the last element (already placed by median-of-three).
+    pivot := arr[high]
+    i := low - 1
+    for j := low; j < high; j = j + 1 {
+        if arr[j] <= pivot {
+            // Move element to the "less than or equal" partition.
+            i = i + 1
+            tmp := arr[i]
+            arr[i] = arr[j]
+            arr[j] = tmp
+        }
+    }
+    // Place the pivot in its final sorted position.
+    tmp := arr[i + 1]
+    arr[i + 1] = arr[high]
+    arr[high] = tmp
+    return i + 1
+}
+
+// SortFloats sorts a slice of floats in ascending order.
+pub fn SortFloats(arr: []float) {
+    n := len(arr)
+    if n < 2 {
+        return
+    }
+    quickSortFloats(arr, 0, n - 1)
+}
+
+// quickSortFloats recursively sorts a float slice between low and high.
+fn quickSortFloats(arr: []float, low: int, high: int) {
+    for low < high {
+        // Median-of-three pivot selection to avoid O(n²) on sorted input.
+        mid := low + (high - low) / 2
+        if arr[mid] < arr[low] {
+            tmp := arr[low]
+            arr[low] = arr[mid]
+            arr[mid] = tmp
+        }
+        if arr[high] < arr[low] {
+            tmp := arr[low]
+            arr[low] = arr[high]
+            arr[high] = tmp
+        }
+        if arr[high] < arr[mid] {
+            tmp := arr[mid]
+            arr[mid] = arr[high]
+            arr[high] = tmp
+        }
+        tmp := arr[mid]
+        arr[mid] = arr[high]
+        arr[high] = tmp
+        pi := partitionFloats(arr, low, high)
+        if pi - low < high - pi {
+            quickSortFloats(arr, low, pi - 1)
+            low = pi + 1
+        } else {
+            quickSortFloats(arr, pi + 1, high)
+            high = pi - 1
+        }
+    }
+}
+
+// partitionFloats partitions a float slice around a pivot and returns its index.
+fn partitionFloats(arr: []float, low: int, high: int) -> int {
+    // Lomuto partition scheme with the last element as pivot.
+    pivot := arr[high]
+    i := low - 1
+    for j := low; j < high; j = j + 1 {
+        if arr[j] <= pivot {
+            i = i + 1
+            tmp := arr[i]
+            arr[i] = arr[j]
+            arr[j] = tmp
+        }
+    }
+    // Place pivot in its final sorted position.
+    tmp := arr[i + 1]
+    arr[i + 1] = arr[high]
+    arr[high] = tmp
+    return i + 1
+}
+
+// SortStrings sorts a slice of strings in ascending lexicographic order.
+pub fn SortStrings(arr: []string) {
+    n := len(arr)
+    if n < 2 {
+        return
+    }
+    quickSortStrings(arr, 0, n - 1)
+}
+
+// quickSortStrings recursively sorts a string slice between low and high.
+fn quickSortStrings(arr: []string, low: int, high: int) {
+    for low < high {
+        // Median-of-three pivot selection to avoid O(n²) on sorted input.
+        mid := low + (high - low) / 2
+        if strLess(arr[mid], arr[low]) {
+            tmp := arr[low]
+            arr[low] = arr[mid]
+            arr[mid] = tmp
+        }
+        if strLess(arr[high], arr[low]) {
+            tmp := arr[low]
+            arr[low] = arr[high]
+            arr[high] = tmp
+        }
+        if strLess(arr[high], arr[mid]) {
+            tmp := arr[mid]
+            arr[mid] = arr[high]
+            arr[high] = tmp
+        }
+        tmp := arr[mid]
+        arr[mid] = arr[high]
+        arr[high] = tmp
+        pi := partitionStrings(arr, low, high)
+        if pi - low < high - pi {
+            quickSortStrings(arr, low, pi - 1)
+            low = pi + 1
+        } else {
+            quickSortStrings(arr, pi + 1, high)
+            high = pi - 1
+        }
+    }
+}
+
+// partitionStrings partitions a string slice around a pivot and returns its index.
+fn partitionStrings(arr: []string, low: int, high: int) -> int {
+    // Lomuto partition scheme using lexicographic comparison.
+    pivot := arr[high]
+    i := low - 1
+    for j := low; j < high; j = j + 1 {
+        if strLess(arr[j], pivot) {
+            i = i + 1
+            tmp := arr[i]
+            arr[i] = arr[j]
+            arr[j] = tmp
+        }
+    }
+    // Place pivot in its final sorted position.
+    tmp := arr[i + 1]
+    arr[i + 1] = arr[high]
+    arr[high] = tmp
+    return i + 1
+}
+
+// strLess returns true if string a is lexicographically less than b.
+fn strLess(a: string, b: string) -> bool {
+    // Compare byte-by-byte up to the shorter length.
+    lenA := int(libc.strlen(a))
+    lenB := int(libc.strlen(b))
+    minLen := lenA
+    if lenB < minLen {
+        minLen = lenB
+    }
+    for i := 0; i < minLen; i = i + 1 {
+        if a[i] < b[i] {
+            return true
+        }
+        if a[i] > b[i] {
+            return false
+        }
+    }
+    // If all compared bytes are equal, the shorter string comes first.
+    return lenA < lenB
+}
+
+// Sort sorts a slice using the provided comparator function.
+// The comparator should return true if a should come before b.
+// Uses quicksort with median-of-three pivot selection.
+pub fn Sort<T>(arr: []T, less: fn(T, T) -> bool) {
+    n := len(arr)
+    if n < 2 {
+        return
+    }
+    quickSortGeneric<T>(arr, 0, n - 1, less)
+}
+
+// quickSortGeneric recursively sorts a generic slice between low and high.
+fn quickSortGeneric<T>(arr: []T, low: int, high: int, less: fn(T, T) -> bool) {
+    for low < high {
+        // Median-of-three pivot selection to avoid O(n²) on sorted input.
+        mid := low + (high - low) / 2
+        if less(arr[mid], arr[low]) {
+            tmp := arr[low]
+            arr[low] = arr[mid]
+            arr[mid] = tmp
+        }
+        if less(arr[high], arr[low]) {
+            tmp := arr[low]
+            arr[low] = arr[high]
+            arr[high] = tmp
+        }
+        if less(arr[high], arr[mid]) {
+            tmp := arr[mid]
+            arr[mid] = arr[high]
+            arr[high] = tmp
+        }
+        tmp := arr[mid]
+        arr[mid] = arr[high]
+        arr[high] = tmp
+        pi := partitionGeneric<T>(arr, low, high, less)
+        if pi - low < high - pi {
+            quickSortGeneric<T>(arr, low, pi - 1, less)
+            low = pi + 1
+        } else {
+            quickSortGeneric<T>(arr, pi + 1, high, less)
+            high = pi - 1
+        }
+    }
+}
+
+// partitionGeneric partitions a generic slice around a pivot and returns its index.
+fn partitionGeneric<T>(arr: []T, low: int, high: int, less: fn(T, T) -> bool) -> int {
+    // Lomuto partition scheme using a user-supplied comparator.
+    pivot := arr[high]
+    i := low - 1
+    for j := low; j < high; j = j + 1 {
+        if less(arr[j], pivot) {
+            i = i + 1
+            tmp := arr[i]
+            arr[i] = arr[j]
+            arr[j] = tmp
+        }
+    }
+    // Place pivot in its final sorted position.
+    tmp := arr[i + 1]
+    arr[i + 1] = arr[high]
+    arr[high] = tmp
+    return i + 1
+}
+
+// IsSorted reports whether the slice is sorted according to less.
+pub fn IsSorted<T>(arr: []T, less: fn(T, T) -> bool) -> bool {
+    n := len(arr)
+    for i := 1; i < n; i = i + 1 {
+        if less(arr[i], arr[i - 1]) {
+            return false
+        }
+    }
+    return true
+}
+
+// Reverse reverses the elements of arr in place.
+pub fn Reverse<T>(arr: []T) {
+    n := len(arr)
+    // Swap elements from the outside in, stopping at the midpoint.
+    for i := 0; i < n / 2; i = i + 1 {
+        tmp := arr[i]
+        arr[i] = arr[n - 1 - i]
+        arr[n - 1 - i] = tmp
+    }
+}

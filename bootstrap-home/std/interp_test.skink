@@ -1,0 +1,490 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/interp_test.skink
+// Purpose: Tests for string interpolation and array printing.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Tests for string interpolation and array printing.
+
+module interp_test
+
+import "std/str"
+import "testing"
+
+// TestInterpBasic checks basic string interpolation with a variable.
+pub fn TestInterpBasic() {
+    name := "World"
+    result := "Hello, {name}!"
+    if !str.Equal(result, "Hello, World!") {
+        testing.Errorf("Interpolation basic: expected 'Hello, World!', got '" + result + "'")
+    }
+}
+
+// TestInterpInt checks interpolation with an integer.
+pub fn TestInterpInt() {
+    age := 42
+    result := "Age: {age}"
+    if !str.Equal(result, "Age: 42") {
+        testing.Errorf("Interpolation int: expected 'Age: 42', got '" + result + "'")
+    }
+}
+
+// TestInterpFloat checks interpolation with a float.
+pub fn TestInterpFloat() {
+    score := 3.14
+    result := "Score: {score}"
+    // %g format may produce "3.14" or "3.14000"
+    if !str.StartsWith(result, "Score: 3.14") {
+        testing.Errorf("Interpolation float: expected 'Score: 3.14...', got '" + result + "'")
+    }
+}
+
+// TestInterpBool checks interpolation with a boolean.
+pub fn TestInterpBool() {
+    active := true
+    result := "Active: {active}"
+    if !str.Equal(result, "Active: true") {
+        testing.Errorf("Interpolation bool: expected 'Active: true', got '" + result + "'")
+    }
+}
+
+// TestInterpExpr checks interpolation with an expression.
+pub fn TestInterpExpr() {
+    x := 10
+    result := "Result: {x + 5}"
+    if !str.Equal(result, "Result: 15") {
+        testing.Errorf("Interpolation expr: expected 'Result: 15', got '" + result + "'")
+    }
+}
+
+// TestInterpMultiple checks multiple interpolations in one string.
+pub fn TestInterpMultiple() {
+    name := "Ada"
+    age := 30
+    result := "Name: {name}, Age: {age}"
+    if !str.Equal(result, "Name: Ada, Age: 30") {
+        testing.Errorf("Interpolation multiple: expected 'Name: Ada, Age: 30', got '" + result + "'")
+    }
+}
+
+// TestInterpFormatPlaceholder checks that "{}" is NOT treated as interpolation.
+pub fn TestInterpFormatPlaceholder() {
+    result := "Value: {}"
+    if !str.Equal(result, "Value: {}") {
+        testing.Errorf("Format placeholder should not be interpolated: got '" + result + "'")
+    }
+}
+
+// TestInterpTemplateSyntax checks that "{{.name}}" is NOT treated as interpolation.
+pub fn TestInterpTemplateSyntax() {
+    result := "Hello {{.name}}"
+    if !str.Equal(result, "Hello {{.name}}") {
+        testing.Errorf("Template syntax should not be interpolated: got '" + result + "'")
+    }
+}
+
+// TestInterpJSONString checks that JSON-like content is NOT interpolated.
+pub fn TestInterpJSONString() {
+    result := "{\"key\": \"value\"}"
+    if !str.Equal(result, "{\"key\": \"value\"}") {
+        testing.Errorf("JSON string should not be interpolated: got '" + result + "'")
+    }
+}
+
+// TestArrayPrintInt checks that printing an int array produces readable output.
+pub fn TestArrayPrintInt() {
+    nums := []int{1, 2, 3}
+    result := "{nums}"
+    if !str.Equal(result, "[1, 2, 3]") {
+        testing.Errorf("Array print int: expected '[1, 2, 3]', got '" + result + "'")
+    }
+}
+
+// TestArrayPrintString checks that printing a string array produces readable output.
+pub fn TestArrayPrintString() {
+    strs := []string{"hello", "world"}
+    result := "{strs}"
+    if !str.Equal(result, "[hello, world]") {
+        testing.Errorf("Array print string: expected '[hello, world]', got '" + result + "'")
+    }
+}
+
+// TestArrayPrintEmpty checks that printing an empty array produces "[]".
+pub fn TestArrayPrintEmpty() {
+    empty := []int{}
+    result := "{empty}"
+    if !str.Equal(result, "[]") {
+        testing.Errorf("Array print empty: expected '[]', got '" + result + "'")
+    }
+}
+
+// TestInterpNegativeInt checks interpolation with a negative integer.
+pub fn TestInterpNegativeInt() {
+    n := -42
+    result := "Value: {n}"
+    if !str.Equal(result, "Value: -42") {
+        testing.Errorf("Interpolation negative int: expected 'Value: -42', got '" + result + "'")
+    }
+}
+
+// TestInterpZero checks interpolation with zero.
+pub fn TestInterpZero() {
+    n := 0
+    result := "Count: {n}"
+    if !str.Equal(result, "Count: 0") {
+        testing.Errorf("Interpolation zero: expected 'Count: 0', got '" + result + "'")
+    }
+}
+
+// TestInterpFalseBool checks interpolation with false boolean.
+pub fn TestInterpFalseBool() {
+    ok := false
+    result := "OK: {ok}"
+    if !str.Equal(result, "OK: false") {
+        testing.Errorf("Interpolation false bool: expected 'OK: false', got '" + result + "'")
+    }
+}
+
+// TestInterpNegativeFloat checks interpolation with a negative float.
+pub fn TestInterpNegativeFloat() {
+    f := -3.14
+    result := "Temp: {f}"
+    if !str.StartsWith(result, "Temp: -3.14") {
+        testing.Errorf("Interpolation negative float: expected 'Temp: -3.14...', got '" + result + "'")
+    }
+}
+
+// TestInterpStringConcatExpr checks interpolation with a string concatenation expression.
+// Note: double quotes inside {expr} are not supported because the lexer
+// treats the entire string literal as one token. Use a variable instead.
+pub fn TestInterpStringConcatExpr() {
+    first := "Hello"
+    second := "World"
+    sep := ", "
+    result := "Greeting: {first + sep + second}"
+    if !str.Equal(result, "Greeting: Hello, World") {
+        testing.Errorf("Interpolation string concat expr: expected 'Greeting: Hello, World', got '" + result + "'")
+    }
+}
+
+// TestInterpArithmeticExpr checks interpolation with arithmetic.
+pub fn TestInterpArithmeticExpr() {
+    a := 10
+    b := 3
+    result := "Sum: {a + b}, Product: {a * b}"
+    if !str.Equal(result, "Sum: 13, Product: 30") {
+        testing.Errorf("Interpolation arithmetic: expected 'Sum: 13, Product: 30', got '" + result + "'")
+    }
+}
+
+// TestInterpNestedInterp checks that interpolation works with a string variable
+// that itself was produced by interpolation.
+pub fn TestInterpNestedInterp() {
+    name := "Ada"
+    greeting := "Hello, {name}!"
+    result := "Message: {greeting}"
+    if !str.Equal(result, "Message: Hello, Ada!") {
+        testing.Errorf("Interpolation nested: expected 'Message: Hello, Ada!', got '" + result + "'")
+    }
+}
+
+// TestInterpAtStart checks interpolation at the start of a string.
+pub fn TestInterpAtStart() {
+    x := 42
+    result := "{x} is the answer"
+    if !str.Equal(result, "42 is the answer") {
+        testing.Errorf("Interpolation at start: expected '42 is the answer', got '" + result + "'")
+    }
+}
+
+// TestInterpAtEnd checks interpolation at the end of a string.
+pub fn TestInterpAtEnd() {
+    x := 42
+    result := "The answer is {x}"
+    if !str.Equal(result, "The answer is 42") {
+        testing.Errorf("Interpolation at end: expected 'The answer is 42', got '" + result + "'")
+    }
+}
+
+// TestInterpOnlyExpr checks a string that is just a single interpolation.
+pub fn TestInterpOnlyExpr() {
+    x := 42
+    result := "{x}"
+    if !str.Equal(result, "42") {
+        testing.Errorf("Interpolation only expr: expected '42', got '" + result + "'")
+    }
+}
+
+// TestInterpAdjacentExprs checks two adjacent interpolations with no text between.
+pub fn TestInterpAdjacentExprs() {
+    a := "Hello"
+    b := "World"
+    result := "{a}{b}"
+    if !str.Equal(result, "HelloWorld") {
+        testing.Errorf("Interpolation adjacent: expected 'HelloWorld', got '" + result + "'")
+    }
+}
+
+// TestInterpEmptyString checks interpolation with an empty string variable.
+pub fn TestInterpEmptyString() {
+    s := ""
+    result := "Value: [{s}]"
+    if !str.Equal(result, "Value: []") {
+        testing.Errorf("Interpolation empty string: expected 'Value: []', got '" + result + "'")
+    }
+}
+
+// TestInterpWithEscapedQuotes checks interpolation in a string with escaped quotes.
+pub fn TestInterpWithEscapedQuotes() {
+    name := "Ada"
+    result := "She said \"Hi, {name}!\""
+    if !str.Equal(result, "She said \"Hi, Ada!\"") {
+        testing.Errorf("Interpolation escaped quotes: expected 'She said \"Hi, Ada!\"', got '" + result + "'")
+    }
+}
+
+// TestInterpInt64 checks interpolation with an int64 value.
+pub fn TestInterpInt64() {
+    big := int64(9223372036854775807)
+    result := "Big: {big}"
+    if !str.Equal(result, "Big: 9223372036854775807") {
+        testing.Errorf("Interpolation int64: expected 'Big: 9223372036854775807', got '" + result + "'")
+    }
+}
+
+// TestInterpFloatZero checks interpolation with zero float.
+pub fn TestInterpFloatZero() {
+    f := 0.0
+    result := "Zero: {f}"
+    if !str.Equal(result, "Zero: 0") {
+        testing.Errorf("Interpolation float zero: expected 'Zero: 0', got '" + result + "'")
+    }
+}
+
+// TestInterpMultiplicationExpr checks a more complex expression.
+pub fn TestInterpMultiplicationExpr() {
+    width := 5
+    height := 3
+    result := "Area: {width * height}"
+    if !str.Equal(result, "Area: 15") {
+        testing.Errorf("Interpolation multiplication: expected 'Area: 15', got '" + result + "'")
+    }
+}
+
+// TestInterpSubtractionExpr checks subtraction in interpolation.
+pub fn TestInterpSubtractionExpr() {
+    total := 100
+    used := 30
+    result := "Remaining: {total - used}"
+    if !str.Equal(result, "Remaining: 70") {
+        testing.Errorf("Interpolation subtraction: expected 'Remaining: 70', got '" + result + "'")
+    }
+}
+
+// TestInterpDivisionExpr checks integer division in interpolation.
+pub fn TestInterpDivisionExpr() {
+    a := 20
+    b := 4
+    result := "Quotient: {a / b}"
+    if !str.Equal(result, "Quotient: 5") {
+        testing.Errorf("Interpolation division: expected 'Quotient: 5', got '" + result + "'")
+    }
+}
+
+// TestInterpParenExpr checks interpolation with parenthesized expression.
+pub fn TestInterpParenExpr() {
+    a := 3
+    b := 4
+    result := "Result: {(a + b) * 2}"
+    if !str.Equal(result, "Result: 14") {
+        testing.Errorf("Interpolation paren expr: expected 'Result: 14', got '" + result + "'")
+    }
+}
+
+// TestInterpNoInterp checks that a plain string with no braces is unchanged.
+pub fn TestInterpNoInterp() {
+    result := "just a plain string"
+    if !str.Equal(result, "just a plain string") {
+        testing.Errorf("No interpolation: string should be unchanged, got '" + result + "'")
+    }
+}
+
+// TestInterpSingleBrace checks that a single unmatched brace is left as-is.
+pub fn TestInterpSingleBrace() {
+    result := "open { but no close"
+    if !str.Equal(result, "open { but no close") {
+        testing.Errorf("Single brace: should be unchanged, got '" + result + "'")
+    }
+}
+
+// TestInterpOnlyTextNoExpr checks a string with text but no valid expressions.
+pub fn TestInterpOnlyTextNoExpr() {
+    result := "Hello, World!"
+    if !str.Equal(result, "Hello, World!") {
+        testing.Errorf("Plain text: should be unchanged, got '" + result + "'")
+    }
+}
+
+// TestArrayPrintSingle checks printing a single-element array.
+pub fn TestArrayPrintSingle() {
+    single := []int{42}
+    result := "{single}"
+    if !str.Equal(result, "[42]") {
+        testing.Errorf("Array print single: expected '[42]', got '" + result + "'")
+    }
+}
+
+// TestArrayPrintLarge checks printing a larger array.
+pub fn TestArrayPrintLarge() {
+    nums := []int{10, 20, 30, 40, 50, 60, 70, 80, 90, 100}
+    result := "{nums}"
+    if !str.Equal(result, "[10, 20, 30, 40, 50, 60, 70, 80, 90, 100]") {
+        testing.Errorf("Array print large: got '" + result + "'")
+    }
+}
+
+// TestArrayPrintFloat checks printing a float array.
+pub fn TestArrayPrintFloat() {
+    vals := []float{1.5, 2.5, 3.5}
+    result := "{vals}"
+    if !str.Equal(result, "[1.5, 2.5, 3.5]") {
+        testing.Errorf("Array print float: expected '[1.5, 2.5, 3.5]', got '" + result + "'")
+    }
+}
+
+// TestArrayPrintBool checks printing a bool array.
+pub fn TestArrayPrintBool() {
+    flags := []bool{true, false, true}
+    result := "{flags}"
+    if !str.Equal(result, "[true, false, true]") {
+        testing.Errorf("Array print bool: expected '[true, false, true]', got '" + result + "'")
+    }
+}
+
+// TestArrayPrintInInterp checks array interpolation within a larger string.
+pub fn TestArrayPrintInInterp() {
+    nums := []int{1, 2, 3}
+    label := "Items"
+    result := "{label}: {nums}"
+    if !str.Equal(result, "Items: [1, 2, 3]") {
+        testing.Errorf("Array in interpolation: expected 'Items: [1, 2, 3]', got '" + result + "'")
+    }
+}
+
+// TestInterpThreeExprs checks three interpolations in one string.
+pub fn TestInterpThreeExprs() {
+    a := 1
+    b := 2
+    c := 3
+    result := "{a}, {b}, {c}"
+    if !str.Equal(result, "1, 2, 3") {
+        testing.Errorf("Three interpolations: expected '1, 2, 3', got '" + result + "'")
+    }
+}
+
+// TestInterpStringWithBracesAndExpr checks a mix of literal braces and expressions.
+pub fn TestInterpStringWithBracesAndExpr() {
+    x := 42
+    // "{{x}}" should be literal, "{x}" should be interpolated
+    result := "Literal: {{x}}, Interpolated: {x}"
+    if !str.Equal(result, "Literal: {{x}}, Interpolated: 42") {
+        testing.Errorf("Mixed braces and expr: expected 'Literal: {{x}}, Interpolated: 42', got '" + result + "'")
+    }
+}
+
+// TestInterpWhitespaceInExpr checks that whitespace inside braces prevents interpolation.
+pub fn TestInterpWhitespaceInExpr() {
+    // Whitespace after { should prevent interpolation (starts with space)
+    result := "Value: { x}"
+    if !str.Equal(result, "Value: { x}") {
+        testing.Errorf("Whitespace in expr: should NOT interpolate '{ x}', got '" + result + "'")
+    }
+}
+
+// TestInterpFieldAccess checks interpolation with struct field access.
+pub fn TestInterpFieldAccess() {
+    // Using a simple variable since struct field access in interpolation
+    // is tested separately. This verifies basic identifier works.
+    val := 99
+    result := "Field: {val}"
+    if !str.Equal(result, "Field: 99") {
+        testing.Errorf("Interp field access: expected 'Field: 99', got '" + result + "'")
+    }
+}
+
+// TestInterpLargeInt checks interpolation with a large integer.
+pub fn TestInterpLargeInt() {
+    n := 2000000000
+    result := "Large: {n}"
+    if !str.Equal(result, "Large: 2000000000") {
+        testing.Errorf("Interp large int: expected 'Large: 2000000000', got '" + result + "'")
+    }
+}
+
+// TestArrayPrintStringWithCommas checks that string elements containing commas
+// are printed correctly (no special escaping).
+pub fn TestArrayPrintStringWithCommas() {
+    strs := []string{"a,b", "c,d"}
+    result := "{strs}"
+    if !str.Equal(result, "[a,b, c,d]") {
+        testing.Errorf("Array print strings with commas: expected '[a,b, c,d]', got '" + result + "'")
+    }
+}
+
+// TestArrayPrintStringEmpty checks printing an array with an empty string element.
+pub fn TestArrayPrintStringEmpty() {
+    strs := []string{"", "hello", ""}
+    result := "{strs}"
+    if !str.Equal(result, "[, hello, ]") {
+        testing.Errorf("Array print with empty strings: expected '[, hello, ]', got '" + result + "'")
+    }
+}
+
+// TestInterpStringVarInArray checks that string variables work in arrays
+// and the array can be interpolated.
+pub fn TestInterpStringVarInArray() {
+    a := "foo"
+    b := "bar"
+    arr := []string{a, b}
+    result := "{arr}"
+    if !str.Equal(result, "[foo, bar]") {
+        testing.Errorf("Interp string var in array: expected '[foo, bar]', got '" + result + "'")
+    }
+}
+
+// TestInterpNegativeResult checks interpolation of an expression that yields a negative.
+pub fn TestInterpNegativeResult() {
+    a := 5
+    b := 10
+    result := "Diff: {a - b}"
+    if !str.Equal(result, "Diff: -5") {
+        testing.Errorf("Interp negative result: expected 'Diff: -5', got '" + result + "'")
+    }
+}
+
+// TestInterpModuloExpr checks modulo in interpolation.
+pub fn TestInterpModuloExpr() {
+    a := 17
+    b := 5
+    result := "Remainder: {a % b}"
+    if !str.Equal(result, "Remainder: 2") {
+        testing.Errorf("Interp modulo: expected 'Remainder: 2', got '" + result + "'")
+    }
+}

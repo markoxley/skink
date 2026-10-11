@@ -1,0 +1,228 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/csv.skink
+// Purpose: Comma-separated value (CSV) reading and writing for the
+//          Skink standard library, supporting quoted fields and
+//          configurable separators.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+module csv
+
+import "std/str"
+import "std/errors"
+import "std/libc"
+import "std/fs"
+
+// Record represents a single CSV row as a slice of field strings.
+pub struct Record {
+    fields: []string
+
+    // Len returns the number of fields in this record.
+    pub fn Len(self: Record) -> int {
+        return len(self.fields)
+    }
+
+    // Get returns the field at the given index, or an error if out of range.
+    pub fn Get(self: Record, idx: int) -> (string, errors.Error) {
+        if idx < 0 || idx >= len(self.fields) {
+            return "", errors.New("index out of range")
+        }
+        return self.fields[idx], errors.New("")
+    }
+
+    // Fields returns the record's fields as a slice of strings, so
+    // `for col in rec.Fields()` works as shown in the book.
+    pub fn Fields(self: Record) -> []string {
+        return self.fields
+    }
+
+}
+
+// NewRecord creates a Record from a slice of field strings.
+pub fn NewRecord(fields: []string) -> Record {
+    return Record{fields: fields}
+}
+
+// Reader parses CSV text with configurable separator and quoted-field support.
+pub struct Reader {
+    data: string
+    pos: int
+    separator: int
+
+    // Read parses the next CSV row and returns it as a Record.
+    // Returns an EOF error when all rows have been consumed.
+    pub fn Read(self: *Reader) -> (Record, errors.Error) {
+        if self.pos >= str.Len(self.data) {
+            // Signal end of input to callers
+            return Record{}, errors.New("EOF")
+        }
+        var fields []string
+        currentB := str.NewBuilder(32)
+        inQuotes := false
+
+        for self.pos < str.Len(self.data) {
+            c := self.data[self.pos]
+            self.pos = self.pos + 1
+
+            if c == 34 { // '"'
+                if inQuotes {
+                    // check for escaped quotes (doubled "")
+                    if self.pos < str.Len(self.data) && self.data[self.pos] == 34 {
+                        str.WriteByte(&currentB, 34)
+                        self.pos = self.pos + 1
+                    } else {
+                        // Closing quote
+                        inQuotes = false
+                    }
+                } else {
+                    // Opening quote
+                    inQuotes = true
+                }
+            } else {
+                if c == self.separator && !inQuotes {
+                    // End of field; flush current builder to fields
+                    current := str.String(currentB)
+                    str.Reset(&currentB)
+                    fields = append(fields, current)
+                } else {
+                    if c == 10 && !inQuotes { // '\n'
+                        // End of row (Unix-style)
+                        break
+                    }
+                    if c == 13 && !inQuotes { // '\r'
+                        // Handle CRLF: skip the following \n if present
+                        if self.pos < str.Len(self.data) && self.data[self.pos] == 10 {
+                            self.pos = self.pos + 1
+                        }
+                        break
+                    }
+                    // Regular character within a field
+                    str.WriteByte(&currentB, int(c))
+                }
+            }
+        }
+
+        if inQuotes {
+            // Unterminated quoted field is a parse error
+            str.Free(&currentB)
+            return Record{fields: fields}, errors.New("unclosed quote in CSV")
+        }
+        // Flush the last field
+        current := str.String(currentB)
+        str.Free(&currentB)
+        fields = append(fields, current)
+        return Record{fields: fields}, errors.New("")
+    }
+}
+
+// Writer serializes records to CSV text with quoted-field escaping.
+// Writers created by NewFileWriter also carry a destination path so
+// Flush()/Close() persist the accumulated output to that file.
+pub struct Writer {
+    output: string
+    separator: int
+    path: string
+
+    // Write appends a Record to the writer's output, quoting fields that
+    // contain the separator, quotes, or newlines.
+    pub fn Write(self: *Writer, rec: Record) {
+        for i := 0; i < len(rec.fields); i = i + 1 {
+            if i > 0 {
+                // Convert separator int to a single-char string safely
+                sepBuf := libc.malloc(2)
+                sepBuf[0] = self.separator
+                sepBuf[1] = 0
+                self.output = str.Concat(self.output, sepBuf)
+                libc.free(sepBuf)
+            }
+            field := rec.fields[i]
+            // Check if the field needs quoting
+            needsQuotes := false
+            for j := 0; j < str.Len(field); j = j + 1 {
+                fc := field[j]
+                if fc == self.separator || fc == 34 || fc == 10 || fc == 13 {
+                    needsQuotes = true
+                    break
+                }
+            }
+            if needsQuotes {
+                // Wrap in quotes and double any embedded quotes
+                quoted := "\""
+                for j := 0; j < str.Len(field); j = j + 1 {
+                    if field[j] == 34 {
+                        quoted = str.Concat(quoted, "\"\"")
+                    } else {
+                        quoted = str.Concat(quoted, str.Substr(field, j, 1))
+                    }
+                }
+                quoted = str.Concat(quoted, "\"")
+                self.output = str.Concat(self.output, quoted)
+            } else {
+                self.output = str.Concat(self.output, field)
+            }
+        }
+        // Each record ends with a newline
+        self.output = str.Concat(self.output, "\n")
+    }
+
+    // String returns the accumulated CSV output.
+    pub fn String(self: Writer) -> string {
+        return self.output
+    }
+
+    // Flush writes the accumulated CSV output to the destination file
+    // (no-op for writers created with NewWriter).
+    pub fn Flush(self: *Writer) -> errors.Error {
+        if str.Len(self.path) == 0 {
+            return errors.New("")
+        }
+        return fs.WriteAll(self.path, self.output)
+    }
+
+    // Close flushes and closes the file writer.
+    pub fn Close(self: *Writer) -> errors.Error {
+        return self.Flush()
+    }
+}
+
+// NewReader creates a Reader for the given CSV text with a comma separator.
+pub fn NewReader(data: string) -> Reader {
+    // Default separator is comma (ASCII 44)
+    return Reader{data: data, pos: 0, separator: 44}
+}
+
+// NewFileReader creates a Reader over the contents of a CSV file.
+pub fn NewFileReader(path: string) -> (Reader, errors.Error) {
+    data, err := fs.ReadAll(path)
+    if err.message != "" {
+        return Reader{data: "", pos: 0, separator: 44}, err
+    }
+    return Reader{data: data, pos: 0, separator: 44}, errors.New("")
+}
+
+// NewWriter creates a Writer with a comma separator and empty output.
+pub fn NewWriter() -> Writer {
+    // Default separator is comma (ASCII 44)
+    return Writer{output: "", separator: 44, path: ""}
+}
+
+// NewFileWriter creates a Writer whose Flush/Close writes to `path`.
+pub fn NewFileWriter(path: string) -> (Writer, errors.Error) {
+    return Writer{output: "", separator: 44, path: path}, errors.New("")
+}

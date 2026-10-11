@@ -1,0 +1,114 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/yaml_config.skink
+// Purpose: Demonstrates YAML parsing, value extraction, and serialization.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/yaml"
+import "std/io"
+import "std/strconv"
+
+// Sample YAML configuration for a web application.
+const yamlData = `server:
+  host: localhost
+  port: 8080
+  timeout: 30
+database:
+  type: postgres
+  host: db.example.com
+  port: 5432
+  pool_size: 10
+logging:
+  level: info
+  file: /var/log/app.log
+features:
+  - auth
+  - caching
+  - metrics`
+
+pub fn main() {
+    io.PrintLine("=== YAML Config Demo ===")
+    io.PrintLine("")
+
+    // --- Parsing YAML ---
+    io.PrintLine("--- Parsing YAML ---")
+    root, err := yaml.Unmarshal(yamlData)
+    if err.message != "" {
+        io.PrintErrorLine("Parse error: " + err.message)
+        return
+    }
+
+    // Access nested configuration objects
+    server := yaml.ObjectGet(root, "server")
+    host := yaml.AsString(yaml.ObjectGet(server, "host"))
+    port := yaml.AsNumber(yaml.ObjectGet(server, "port"))
+    io.PrintLine("Server: " + host + ":" + strconv.FormatFloat(port, 0))
+
+    database := yaml.ObjectGet(root, "database")
+    dbType := yaml.AsString(yaml.ObjectGet(database, "type"))
+    dbHost := yaml.AsString(yaml.ObjectGet(database, "host"))
+    dbPort := yaml.AsNumber(yaml.ObjectGet(database, "port"))
+    poolSize := yaml.AsNumber(yaml.ObjectGet(database, "pool_size"))
+    io.PrintLine("Database: " + dbType + " at " + dbHost + ":" + strconv.FormatFloat(dbPort, 0))
+    io.PrintLine("  Pool size: " + strconv.FormatFloat(poolSize, 0))
+
+    logging := yaml.ObjectGet(root, "logging")
+    level := yaml.AsString(yaml.ObjectGet(logging, "level"))
+    logFile := yaml.AsString(yaml.ObjectGet(logging, "file"))
+    io.PrintLine("Logging: " + level + " -> " + logFile)
+
+    // Access array values
+    features := yaml.ObjectGet(root, "features")
+    featCount := yaml.ArrayLen(features)
+    io.Print("Features: ")
+    for i := 0; i < featCount; i = i + 1 {
+        feat := yaml.AsString(yaml.ArrayGet(features, i))
+        if i > 0 {
+            io.PrintString(", ")
+        }
+        io.PrintString(feat)
+    }
+    io.PrintLine("")
+    io.PrintLine("")
+
+    // --- Building YAML ---
+    io.PrintLine("--- Building YAML ---")
+    var keys []string
+    var vals []yaml.Value
+
+    keys = append(keys, "name")
+    vals = append(vals, yaml.FromString("Skink App"))
+
+    keys = append(keys, "version")
+    vals = append(vals, yaml.FromString("1.0.0"))
+
+    keys = append(keys, "debug")
+    vals = append(vals, yaml.FromBool(true))
+
+    keys = append(keys, "max_connections")
+    vals = append(vals, yaml.FromNumber(100.0))
+
+    config := yaml.FromObject(keys, vals)
+    output := yaml.MarshalValue(config)
+    io.PrintLine("Generated YAML:")
+    io.PrintLine(output)
+}

@@ -1,0 +1,522 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//
+// Purpose: grammar-aware compiler fuzzing. Complements
+//          compiler_fuzz_test.skink (token soup + depth) with two deeper
+//          strategies:
+//            1. TestFuzzStructured — generates mostly well-formed
+//               random programs (vars, typed exprs, ifs, fors, slices,
+//               structs, helper fns, defer, switch) and runs them
+//               through -emit-ll so the FULL emitter is exercised, not
+//               just the parser/checker.
+//            2. TestFuzzCorpusMutations — mutates real repo sources
+//               (line delete/dup/swap/truncate/replace/insert) and
+//               type-checks the results.
+//          Any diagnostic or successful compile is a valid outcome; a
+//          signal death (rc -1) or hang (rc 124) is a bug. Deliberately
+//          invalid statements are injected ~15% of the time to hit
+//          checker error paths mid-emission.
+
+module compiler_fuzzgen_test
+
+import "testing"
+import "std/rand"
+import "std/str"
+import "std/strconv"
+import "std/os"
+import "std/io"
+import "std/fs"
+
+// cfgBin returns the compiler binary to invoke (SKINK_BIN, or ./skink).
+fn cfgBin() -> string {
+    b := os.Getenv("SKINK_BIN")
+    if str.Len(b) > 0 {
+        return b
+    }
+    return "./skink"
+}
+
+// cfgEnvInt reads an int env var, returning def when unset/invalid.
+// Lets ad-hoc deep fuzz runs scale iterations without changing the
+// in-suite runtime budget: SKINK_FUZZ_N / SKINK_FUZZ_SEED.
+fn cfgEnvInt(name: string, def: int) -> int {
+    v := os.Getenv(name)
+    if str.Len(v) == 0 {
+        return def
+    }
+    n, ok := strconv.ParseInt(v)
+    if !ok || n <= 0 {
+        return def
+    }
+    return n
+}
+
+// cfgCompile runs `timeout 10 skink (-emit-ll|-check) path` and returns
+// the child status. -1 = signal death, 124 = hang.
+fn cfgCompile(path: string, emitLL: bool) -> int {
+    var args []string
+    args = append(args, "timeout")
+    args = append(args, "10")
+    args = append(args, cfgBin())
+    if emitLL {
+        args = append(args, "-emit-ll")
+    } else {
+        args = append(args, "-check")
+    }
+    args = append(args, path)
+    _, rc := os.ExecWithOutput(args)
+    return rc
+}
+
+// cfgTokens mirrors the token pool from compiler_fuzz_test for line
+// fragments injected by the mutator.
+var cfgTokens = []string{
+    "fn", "var", "if", "else", "for", "while", "return", "struct",
+    "(", ")", "{", "}", "[", "]", ",", ":", ".", "=", ":=",
+    "+", "-", "*", "/", "==", "!=", "&&", "||", "<-",
+    "x", "y", "0", "1", "\"s\"", "true", "spawn", "select",
+}
+
+// cfgFrag returns a short random token fragment.
+fn cfgFrag() -> string {
+    s := ""
+    n := 3 + rand.Intn(10)
+    i := 0
+    for i < n {
+        s = s + cfgTokens[rand.Intn(len(cfgTokens))] + " "
+        i = i + 1
+    }
+    return s
+}
+
+// cfgCtx tracks in-scope variables per type so generated expressions
+// stay (mostly) type-correct. Passed by value: child blocks get a copy
+// so their declarations cannot leak into the parent scope.
+struct cfgCtx {
+    ints:  []string
+    strs:  []string
+    bools: []string
+    flts:  []string
+    slcs:  []string
+    fns:   []string
+}
+
+var cfgVN = 0
+
+// cfgName mints a fresh identifier with the given prefix.
+fn cfgName(p: string) -> string {
+    cfgVN = cfgVN + 1
+    return p + strconv.Itoa(cfgVN)
+}
+
+fn cfgPick(pool: []string) -> string {
+    return pool[rand.Intn(len(pool))]
+}
+
+// cfgInt returns a random int expression. depth bounds recursion.
+fn cfgInt(ctx: cfgCtx, d: int) -> string {
+    if d <= 0 || rand.Intn(4) == 0 {
+        if len(ctx.ints) > 0 && rand.Intn(3) == 0 {
+            return cfgPick(ctx.ints)
+        }
+        return strconv.Itoa(rand.Intn(100))
+    }
+    k := rand.Intn(6)
+    if k == 0 && len(ctx.slcs) > 0 {
+        return "len(" + cfgPick(ctx.slcs) + ")"
+    }
+    if k == 1 && len(ctx.fns) > 0 {
+        return cfgPick(ctx.fns) + "(" + cfgInt(ctx, d-1) + ", " + cfgInt(ctx, d-1) + ")"
+    }
+    op := cfgPick([]string{"+", "-", "*", "%"})
+    return "(" + cfgInt(ctx, d-1) + " " + op + " " + cfgInt(ctx, d-1) + ")"
+}
+
+// cfgStr returns a random string expression.
+fn cfgStr(ctx: cfgCtx, d: int) -> string {
+    if d <= 0 || rand.Intn(3) == 0 {
+        if len(ctx.strs) > 0 && rand.Intn(3) == 0 {
+            return cfgPick(ctx.strs)
+        }
+        return "\"s" + strconv.Itoa(rand.Intn(50)) + "\""
+    }
+    if rand.Intn(2) == 0 {
+        return "str.Concat(" + cfgStr(ctx, d-1) + ", " + cfgStr(ctx, d-1) + ")"
+    }
+    return "strconv.Itoa(" + cfgInt(ctx, d-1) + ")"
+}
+
+// cfgBool returns a random bool expression.
+fn cfgBool(ctx: cfgCtx, d: int) -> string {
+    if d <= 0 || rand.Intn(3) == 0 {
+        if len(ctx.bools) > 0 && rand.Intn(3) == 0 {
+            return cfgPick(ctx.bools)
+        }
+        if rand.Intn(2) == 0 {
+            return "true"
+        }
+        return "false"
+    }
+    k := rand.Intn(4)
+    if k == 0 {
+        cmp := cfgPick([]string{"<", ">", "<=", ">=", "==", "!="})
+        return "(" + cfgInt(ctx, d-1) + " " + cmp + " " + cfgInt(ctx, d-1) + ")"
+    }
+    if k == 1 {
+        op := cfgPick([]string{"==", "!="})
+        return "(" + cfgStr(ctx, d-1) + " " + op + " " + cfgStr(ctx, d-1) + ")"
+    }
+    if k == 2 {
+        return "!" + cfgBool(ctx, d-1)
+    }
+    op := cfgPick([]string{"&&", "||"})
+    return "(" + cfgBool(ctx, d-1) + " " + op + " " + cfgBool(ctx, d-1) + ")"
+}
+
+// cfgFlt returns a random float expression (never a division —
+// generated programs are only compiled, but keeping / out avoids
+// depending on float literal rendering edge cases).
+fn cfgFlt(ctx: cfgCtx, d: int) -> string {
+    if d <= 0 || rand.Intn(3) == 0 {
+        if len(ctx.flts) > 0 && rand.Intn(3) == 0 {
+            return cfgPick(ctx.flts)
+        }
+        return strconv.Itoa(rand.Intn(9)) + "." + strconv.Itoa(rand.Intn(9))
+    }
+    op := cfgPick([]string{"+", "-", "*"})
+    return "(" + cfgFlt(ctx, d-1) + " " + op + " " + cfgFlt(ctx, d-1) + ")"
+}
+
+// cfgExpr returns an expression of the requested scalar type.
+fn cfgExpr(typ: string, ctx: cfgCtx, d: int) -> string {
+    if typ == "string" {
+        return cfgStr(ctx, d)
+    }
+    if typ == "bool" {
+        return cfgBool(ctx, d)
+    }
+    if typ == "float" {
+        return cfgFlt(ctx, d)
+    }
+    return cfgInt(ctx, d)
+}
+
+// cfgStmt emits one statement at the given indent and returns the
+// (possibly extended) ctx. ctx is taken and returned by value so block
+// scopes compose naturally.
+fn cfgStmt(ctx: cfgCtx, d: int, ind: string) -> (string, cfgCtx) {
+    k := rand.Intn(10)
+    if d <= 0 {
+        k = rand.Intn(3)
+    }
+    if k == 0 {
+        // Fresh variable of a random type.
+        typ := cfgPick([]string{"int", "string", "bool", "float"})
+        n := cfgName("v")
+        if typ == "int" {
+            ctx.ints = append(ctx.ints, n)
+        } else if typ == "string" {
+            ctx.strs = append(ctx.strs, n)
+        } else if typ == "bool" {
+            ctx.bools = append(ctx.bools, n)
+        } else {
+            ctx.flts = append(ctx.flts, n)
+        }
+        return ind + n + " := " + cfgExpr(typ, ctx, d) + "\n", ctx
+    }
+    if k == 1 {
+        // Fresh slice variable (or an append on an existing one).
+        if len(ctx.slcs) > 0 && rand.Intn(2) == 0 {
+            s := cfgPick(ctx.slcs)
+            return ind + s + " = append(" + s + ", " + cfgInt(ctx, d) + ")\n", ctx
+        }
+        n := cfgName("sl")
+        ctx.slcs = append(ctx.slcs, n)
+        return ind + "var " + n + " []int\n", ctx
+    }
+    if k == 2 {
+        // Assignment to an existing variable.
+        pool := cfgPick([]string{"int", "string", "bool"})
+        if pool == "int" && len(ctx.ints) > 0 {
+            n := cfgPick(ctx.ints)
+            return ind + n + " = " + cfgInt(ctx, d) + "\n", ctx
+        }
+        if pool == "string" && len(ctx.strs) > 0 {
+            n := cfgPick(ctx.strs)
+            return ind + n + " = " + cfgStr(ctx, d) + "\n", ctx
+        }
+        if len(ctx.bools) > 0 {
+            n := cfgPick(ctx.bools)
+            return ind + n + " = " + cfgBool(ctx, d) + "\n", ctx
+        }
+        return ind + "io.PrintLine(" + cfgStr(ctx, d) + ")\n", ctx
+    }
+    if k == 3 {
+        // if / if-else. Child blocks see a ctx copy.
+        body, _ := cfgBlock(ctx, d-1, ind + "    ")
+        s := ind + "if " + cfgBool(ctx, d-1) + " {\n" + body + ind + "}\n"
+        if rand.Intn(2) == 0 {
+            ebody, _ := cfgBlock(ctx, d-1, ind + "    ")
+            s = s + ind + "else {\n" + ebody + ind + "}\n"
+        }
+        return s, ctx
+    }
+    if k == 4 {
+        // for-range with the loop var visible to the body.
+        iv := cfgName("i")
+        cctx := ctx
+        cctx.ints = append(cctx.ints, iv)
+        body, _ := cfgBlock(cctx, d-1, ind + "    ")
+        hi := 2 + rand.Intn(8)
+        return ind + "for " + iv + " in 0.." + strconv.Itoa(hi) + " {\n" + body + ind + "}\n", ctx
+    }
+    if k == 5 {
+        // Slice indexing inside a length guard (compile-only, but keeps
+        // the emitted shapes realistic).
+        if len(ctx.slcs) > 0 {
+            s := cfgPick(ctx.slcs)
+            n := cfgName("e")
+            return ind + "if len(" + s + ") > 0 {\n" + ind + "    " + n + " := " + s + "[" + cfgInt(ctx, 0) + "]\n" + ind + "}\n", ctx
+        }
+        return ind + "io.PrintLine(" + cfgStr(ctx, d) + ")\n", ctx
+    }
+    if k == 6 {
+        return ind + "io.PrintLine(" + cfgStr(ctx, d) + ")\n", ctx
+    }
+    if k == 7 {
+        // defer a simple call.
+        return ind + "defer io.PrintLine(\"d\")\n", ctx
+    }
+    if k == 8 {
+        // switch on an int expression.
+        body1, _ := cfgBlock(ctx, 0, ind + "    ")
+        body2, _ := cfgBlock(ctx, 0, ind + "    ")
+        return ind + "switch " + cfgInt(ctx, d-1) + " {\ncase 0:\n" + body1 + "default:\n" + body2 + ind + "}\n", ctx
+    }
+    // ~15% deliberately-invalid statement to hit checker error paths.
+    if rand.Intn(7) == 0 {
+        return ind + cfgPick([]string{
+            "cfgNoSuchFn(1)\n",
+            "v = \"mismatched\"\n",
+            "if 42 {\n}\n",
+            "x := len(7)\n",
+        }), ctx
+    }
+    return ind + "io.PrintLine(" + cfgStr(ctx, d) + ")\n", ctx
+}
+
+// cfgBlock emits n statements and returns the final ctx.
+fn cfgBlock(ctx: cfgCtx, d: int, ind: string) -> (string, cfgCtx) {
+    out := ""
+    n := 1 + rand.Intn(4)
+    i := 0
+    for i < n {
+        s, nctx := cfgStmt(ctx, d, ind)
+        out = out + s
+        ctx = nctx
+        i = i + 1
+    }
+    return out, ctx
+}
+
+// cfgProgram generates one random program source.
+fn cfgProgram() -> string {
+    cfgVN = 0
+    src := "module main\nimport \"std/str\"\nimport \"std/strconv\"\nimport \"std/io\"\n"
+    ctx := cfgCtx{ints: []string{}, strs: []string{}, bools: []string{}, flts: []string{}, slcs: []string{}, fns: []string{}}
+
+    // 0-2 globals visible to main.
+    ng := rand.Intn(3)
+    i := 0
+    for i < ng {
+        n := cfgName("g")
+        src = src + "var " + n + " = " + strconv.Itoa(rand.Intn(10)) + "\n"
+        ctx.ints = append(ctx.ints, n)
+        i = i + 1
+    }
+
+    // 0-2 helper functions fn hfK(a: int, b: int) -> int.
+    nh := rand.Intn(3)
+    i = 0
+    for i < nh {
+        n := cfgName("hf")
+        hctx := cfgCtx{ints: []string{"a", "b"}, strs: []string{}, bools: []string{}, flts: []string{}, slcs: []string{}, fns: []string{}}
+        body, _ := cfgBlock(hctx, 2, "    ")
+        src = src + "fn " + n + "(a: int, b: int) -> int {\n" + body + "    return " + cfgInt(hctx, 1) + "\n}\n"
+        ctx.fns = append(ctx.fns, n)
+        i = i + 1
+    }
+
+    // 0-1 struct, instantiated in main's seed block.
+    haveStruct := false
+    sname := ""
+    if rand.Intn(2) == 0 {
+        haveStruct = true
+        sname = cfgName("Sf")
+        src = src + "struct " + sname + " {\n    fa: int\n    fb: string\n}\n"
+    }
+
+    // Seed main's scope.
+    seed := "    x0 := " + cfgInt(ctx, 1) + "\n"
+    ctx.ints = append(ctx.ints, "x0")
+    seed = seed + "    s0 := " + cfgStr(ctx, 1) + "\n"
+    ctx.strs = append(ctx.strs, "s0")
+    seed = seed + "    b0 := " + cfgBool(ctx, 1) + "\n"
+    ctx.bools = append(ctx.bools, "b0")
+    seed = seed + "    var sl0 []int\n"
+    ctx.slcs = append(ctx.slcs, "sl0")
+    if haveStruct {
+        rn := cfgName("r")
+        seed = seed + "    " + rn + " := " + sname + "{fa: " + cfgInt(ctx, 1) + ", fb: " + cfgStr(ctx, 1) + "}\n"
+        ctx.ints = append(ctx.ints, rn + ".fa")
+        ctx.strs = append(ctx.strs, rn + ".fb")
+    }
+
+    body, _ := cfgBlock(ctx, 3, "    ")
+    return src + "fn main() -> int {\n" + seed + body + "    return 0\n}\n"
+}
+
+// TestFuzzStructured compiles generated mostly-valid programs through
+// the full emitter (-emit-ll). Guards the class of bugs where valid
+// shapes crash the parser/checker/emitter (comp_error.md #91/#95/#96
+// regression class).
+pub fn TestFuzzStructured() {
+    rand.Seed(int64(cfgEnvInt("SKINK_FUZZ_SEED", 9182736)))
+    n := cfgEnvInt("SKINK_FUZZ_N", 10)
+    i := 0
+    for i < n {
+        path := "/tmp/cfg_gen_" + strconv.Itoa(i) + ".skink"
+        src := cfgProgram()
+        io.WriteFile(path, src)
+        rc := cfgCompile(path, true)
+        if rc == -1 || rc == 124 {
+            io.WriteFile("/tmp/cfg_fail_gen_" + strconv.Itoa(cfgEnvInt("SKINK_FUZZ_SEED", 9182736)) + "_" + strconv.Itoa(i) + ".skink", src)
+        }
+        testing.AssertTrue(rc != -1, "compiler crashed (signal) on generated program " + strconv.Itoa(i))
+        testing.AssertTrue(rc != 124, "compiler hung on generated program " + strconv.Itoa(i))
+        i = i + 1
+    }
+}
+
+// cfgCorpus returns small real .skink sources usable as mutation seeds.
+fn cfgCorpus() -> []string {
+    var files []string
+    ents, err := fs.ReadDir("std")
+    if err == nil {
+        for e in ents {
+            if !e.IsDir && str.EndsWith(e.Name, ".skink") {
+                p := "std/" + e.Name
+                sz := fs.FileSize(p)
+                if sz > 0 && sz < 15000 {
+                    files = append(files, p)
+                }
+            }
+        }
+    }
+    sent, serr := fs.ReadDir("samples")
+    if serr == nil {
+        for e in sent {
+            if !e.IsDir && str.EndsWith(e.Name, ".skink") {
+                p := "samples/" + e.Name
+                sz := fs.FileSize(p)
+                if sz > 0 && sz < 20000 {
+                    files = append(files, p)
+                }
+            }
+        }
+    }
+    return files
+}
+
+// cfgMutate applies one random line-level mutation to the source lines.
+fn cfgMutate(lines: []string) -> []string {
+    if len(lines) < 4 {
+        return lines
+    }
+    op := rand.Intn(6)
+    i := rand.Intn(len(lines))
+    if op == 0 {
+        // Delete a span of 1-4 lines.
+        n := 1 + rand.Intn(4)
+        var out []string
+        for idx in 0..len(lines) {
+            if idx < i || idx >= i+n {
+                out = append(out, lines[idx])
+            }
+        }
+        return out
+    }
+    if op == 1 {
+        // Duplicate a line.
+        var out []string
+        for idx in 0..len(lines) {
+            out = append(out, lines[idx])
+            if idx == i {
+                out = append(out, lines[i])
+            }
+        }
+        return out
+    }
+    if op == 2 {
+        // Replace a line with a token fragment.
+        lines[i] = cfgFrag()
+        return lines
+    }
+    if op == 3 {
+        // Truncate the file after line i.
+        var out []string
+        for idx in 0..i+1 {
+            out = append(out, lines[idx])
+        }
+        return out
+    }
+    if op == 4 {
+        // Swap two lines.
+        j := rand.Intn(len(lines))
+        t := lines[i]
+        lines[i] = lines[j]
+        lines[j] = t
+        return lines
+    }
+    // Insert a token-fragment line before line i.
+    var out []string
+    for idx in 0..len(lines) {
+        if idx == i {
+            out = append(out, cfgFrag())
+        }
+        out = append(out, lines[idx])
+    }
+    return out
+}
+
+// TestFuzzCorpusMutations mutates real repo sources and type-checks the
+// results. Mutation of valid programs reaches parser/checker states
+// that pure token soup rarely does (comp_error.md robustness class).
+pub fn TestFuzzCorpusMutations() {
+    rand.Seed(int64(cfgEnvInt("SKINK_FUZZ_SEED", 555777) + 999))
+    n := cfgEnvInt("SKINK_FUZZ_N", 10)
+    corpus := cfgCorpus()
+    testing.AssertTrue(len(corpus) > 5, "corpus files discovered under std/ and samples/")
+    i := 0
+    for i < n {
+        src, rerr := io.ReadFile(corpus[rand.Intn(len(corpus))])
+        if rerr != nil {
+            i = i + 1
+            continue
+        }
+        lines := cfgMutate(str.Split(src, "\n"))
+        path := "/tmp/cfg_mut_" + strconv.Itoa(i) + ".skink"
+        mutated := str.Join(lines, "\n")
+        io.WriteFile(path, mutated)
+        rc := cfgCompile(path, false)
+        if rc == -1 || rc == 124 {
+            // Preserve the failing input under a seed-stamped name —
+            // later iterations overwrite /tmp/cfg_mut_N.skink.
+            io.WriteFile("/tmp/cfg_fail_" + strconv.Itoa(cfgEnvInt("SKINK_FUZZ_SEED", 555777) + 999) + "_" + strconv.Itoa(i) + ".skink", mutated)
+        }
+        testing.AssertTrue(rc != -1, "compiler crashed (signal) on mutation " + strconv.Itoa(i))
+        testing.AssertTrue(rc != 124, "compiler hung on mutation " + strconv.Itoa(i))
+        i = i + 1
+    }
+}

@@ -1,0 +1,422 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/xml.skink
+// Purpose: XML parsing and serialization for the Skink standard library,
+//          supporting elements, attributes, text content, and nested
+//          child nodes through the Node struct.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+module xml
+
+import "std/str"
+import "std/errors"
+import "std/libc"
+
+// Node represents a single XML element with attributes, text content,
+// and a list of child nodes.
+pub struct Node {
+    tag: string
+    attrKeys: []string
+    attrVals: []string
+    text: string
+    children: []Node
+
+    // SetAttr adds or appends an attribute key-value pair to this node.
+    pub fn SetAttr(self: *Node, key: string, val: string) {
+        self.attrKeys = append(self.attrKeys, key)
+        self.attrVals = append(self.attrVals, val)
+    }
+
+    // AddChild appends a child Node to this node's children list.
+    pub fn AddChild(self: *Node, child: Node) {
+        self.children = append(self.children, child)
+    }
+
+    // SetText sets the text content of this node, replacing any existing text.
+    pub fn SetText(self: *Node, t: string) {
+        self.text = t
+    }
+
+    // Tag returns the element's tag name.
+    pub fn Tag(self: Node) -> string {
+        return self.tag
+    }
+
+    // Text returns the element's text content.
+    pub fn Text(self: Node) -> string {
+        return self.text
+    }
+
+    // Children returns the element's child nodes.
+    pub fn Children(self: Node) -> []Node {
+        return self.children
+    }
+
+    // Attr returns the value of the named attribute, or "" if absent.
+    pub fn Attr(self: Node, key: string) -> string {
+        for i := 0; i < len(self.attrKeys); i = i + 1 {
+            if str.Equal(self.attrKeys[i], key) {
+                return self.attrVals[i]
+            }
+        }
+        return ""
+    }
+
+}
+
+// GetElement returns the first descendant of root whose tag matches
+// `tag` (depth-first), or a Node with an empty tag when not found.
+pub fn GetElement(root: Node, tag: string) -> Node {
+    if str.Equal(root.tag, tag) {
+        return root
+    }
+    for i := 0; i < len(root.children); i = i + 1 {
+        found := GetElement(root.children[i], tag)
+        if str.Len(found.tag) > 0 {
+            return found
+        }
+    }
+    return Node{tag: "", attrKeys: nil, attrVals: nil, text: "", children: nil}
+}
+
+// NewNode creates an empty Node with the given tag name and no attributes,
+// text, or children.
+pub fn NewNode(tag: string) -> Node {
+    var emptyKeys []string
+    var emptyVals []string
+    var emptyChildren []Node
+    return Node{tag: tag, attrKeys: emptyKeys, attrVals: emptyVals, text: "", children: emptyChildren}
+}
+
+// --- Marshal ---
+
+// MarshalNode serializes a Node tree into an indented XML string.
+pub fn MarshalNode(root: Node) -> string {
+    return marshalNodeInternal(root, 0)
+}
+
+// marshalNodeInternal recursively serializes a Node with the given indent
+// level (in spaces). Self-closing tags are emitted for empty leaf nodes.
+fn marshalNodeInternal(node: Node, indent: int) -> string {
+    b := str.NewBuilder(64)
+    // Write indentation spaces
+    for i := 0; i < indent; i = i + 1 {
+        str.WriteByte(&b, 32)
+    }
+    str.WriteByte(&b, 60) // <
+    str.Write(&b, node.tag)
+    // Attributes
+    for i := 0; i < len(node.attrKeys); i = i + 1 {
+        str.WriteByte(&b, 32)
+        str.Write(&b, node.attrKeys[i])
+        str.Write(&b, "=\"")
+        escaped := escapeXml(node.attrVals[i])
+        str.Write(&b, escaped)
+        libc.free(escaped)
+        str.WriteByte(&b, 34) // \"
+    }
+    // Self-closing tag for empty leaf nodes
+    if len(node.children) == 0 && str.Len(node.text) == 0 {
+        str.Write(&b, "/>\n")
+        result := str.String(b)
+        str.Free(&b)
+        return result
+    }
+    str.WriteByte(&b, 62) // >
+    // Text content (if any)
+    if str.Len(node.text) > 0 {
+        escaped := escapeXml(node.text)
+        str.Write(&b, escaped)
+        libc.free(escaped)
+    }
+    // Children with increased indentation
+    if len(node.children) > 0 {
+        str.WriteByte(&b, 10) // \n
+        for i := 0; i < len(node.children); i = i + 1 {
+            child := marshalNodeInternal(node.children[i], indent + 2)
+            str.Write(&b, child)
+            libc.free(child)
+        }
+        // Indent closing tag to match opening
+        for i := 0; i < indent; i = i + 1 {
+            str.WriteByte(&b, 32)
+        }
+    }
+    str.Write(&b, "</")
+    str.Write(&b, node.tag)
+    str.Write(&b, ">\n")
+    result := str.String(b)
+    str.Free(&b)
+    return result
+}
+
+// escapeXml replaces the five XML special characters with their entity
+// references: <, >, &, ", '.
+fn escapeXml(s: string) -> string {
+    b := str.NewBuilder(32)
+    n := str.Len(s)
+    for i := 0; i < n; i = i + 1 {
+        c := s[i]
+        if c == 60 { // <
+            str.Write(&b, "&lt;")
+        } else if c == 62 { // >
+            str.Write(&b, "&gt;")
+        } else if c == 38 { // &
+            str.Write(&b, "&amp;")
+        } else if c == 34 { // \"
+            str.Write(&b, "&quot;")
+        } else if c == 39 { // '
+            str.Write(&b, "&apos;")
+        } else {
+            str.WriteByte(&b, int(c))
+        }
+    }
+    result := str.String(b)
+    str.Free(&b)
+    return result
+}
+
+// --- Unmarshal (limited) ---
+
+// Unmarshal parses an XML string into a Node tree. Returns an error if
+// the input contains trailing data after the root element.
+pub fn Unmarshal(s: string) -> (Node, errors.Error) {
+    p := Parser{s: s, pos: 0, len: str.Len(s)}
+    node := p.parseNode()
+    p.skipWhitespace()
+    if p.pos != p.len {
+        return node, errors.New("invalid XML: trailing data")
+    }
+    return node, errors.New("")
+}
+
+// Parser holds the state for XML parsing: input, position, and depth.
+struct Parser {
+    s: string
+    pos: int
+    len: int
+    depth: int
+
+    fn skipWhitespace(self: *Parser) {
+        // Advance past spaces, tabs, newlines, and carriage returns
+        for self.pos < self.len {
+            c := self.s[self.pos]
+            if c == 32 || c == 9 || c == 10 || c == 13 {
+                self.pos = self.pos + 1
+            } else {
+                break
+            }
+        }
+    }
+
+    fn consume(self: *Parser) -> int {
+        if self.pos >= self.len {
+            return 0
+        }
+        c := self.s[self.pos]
+        self.pos = self.pos + 1
+        return int(c)
+    }
+
+    fn parseNode(self: *Parser) -> Node {
+        self.skipWhitespace()
+        if self.pos >= self.len {
+            return NewNode("")
+        }
+        // DoS protection: reject excessively deep nesting
+        if self.depth > 1000 {
+            // Skip past the '<' so the caller doesn't loop forever
+            // calling parseNode on the same position.
+            if self.pos < self.len && self.s[self.pos] == 60 {
+                self.consume()
+            }
+            return NewNode("")
+        }
+        if self.s[self.pos] != 60 { // <
+            return NewNode("")
+        }
+        self.depth = self.depth + 1
+        self.consume() // <
+        // Parse tag name (read until whitespace, '>', or '/')
+        tagB := str.NewBuilder(16)
+        for self.pos < self.len && self.s[self.pos] != 32 && self.s[self.pos] != 9 && self.s[self.pos] != 62 && self.s[self.pos] != 47 {
+            str.WriteByte(&tagB, int(self.s[self.pos]))
+            self.consume()
+        }
+        tagName := str.String(tagB)
+        str.Free(&tagB)
+        node := NewNode(tagName)
+        // Parse attributes until '>' or '/' is encountered
+        for self.pos < self.len && self.s[self.pos] != 62 && self.s[self.pos] != 47 {
+            self.skipWhitespace()
+            if self.pos >= self.len || self.s[self.pos] == 62 || self.s[self.pos] == 47 {
+                break
+            }
+            // Read attribute key
+            keyB := str.NewBuilder(16)
+            for self.pos < self.len && self.s[self.pos] != 61 && self.s[self.pos] != 32 && self.s[self.pos] != 9 && self.s[self.pos] != 62 {
+                str.WriteByte(&keyB, int(self.s[self.pos]))
+                self.consume()
+            }
+            attrKey := str.String(keyB)
+            str.Free(&keyB)
+            if self.pos < self.len && self.s[self.pos] == 61 { // =
+                self.consume()
+                if self.pos < self.len && self.s[self.pos] == 34 { // \"
+                    self.consume()
+                    // Read attribute value until closing quote
+                    valB := str.NewBuilder(16)
+                    for self.pos < self.len && self.s[self.pos] != 34 {
+                        str.WriteByte(&valB, int(self.s[self.pos]))
+                        self.consume()
+                    }
+                    self.consume() // \"
+                    attrVal := str.String(valB)
+                    str.Free(&valB)
+                    node.SetAttr(attrKey, attrVal)
+                }
+            }
+        }
+        // Check for self-closing tag (<tag .../>)
+        if self.pos < self.len && self.s[self.pos] == 47 { // /
+            self.consume() // /
+            if self.pos < self.len && self.s[self.pos] == 62 { // >
+                self.consume() // >
+            }
+            self.depth = self.depth - 1
+            return node
+        }
+        if self.pos < self.len && self.s[self.pos] == 62 { // >
+            self.consume() // >
+        }
+        // Parse content (text or nested children)
+        textB := str.NewBuilder(32)
+        for self.pos < self.len {
+            if self.s[self.pos] == 60 { // <
+                if self.pos + 1 < self.len && self.s[self.pos + 1] == 47 { // </
+                    // Closing tag — stop parsing content
+                    break
+                }
+                // Nested child element
+                if str.LenBuilder(textB) > 0 {
+                    // Flush accumulated text as node text content
+                    text := str.String(textB)
+                    str.Reset(&textB)
+                    node.SetText(trimWhitespace(text))
+                    libc.free(text)
+                }
+                child := self.parseNode()
+                node.children = append(node.children, child)
+            } else {
+                // Accumulate text content
+                str.WriteByte(&textB, int(self.s[self.pos]))
+                self.consume()
+            }
+        }
+        // Flush any remaining text content
+        if str.LenBuilder(textB) > 0 {
+            text := str.String(textB)
+            node.SetText(trimWhitespace(text))
+            libc.free(text)
+        }
+        str.Free(&textB)
+        // Skip closing tag </tag>
+        if self.pos < self.len && self.s[self.pos] == 60 { // <
+            self.consume() // <
+            if self.pos < self.len && self.s[self.pos] == 47 { // /
+                self.consume() // /
+                // Read and discard the closing tag name
+                closeB := str.NewBuilder(16)
+                for self.pos < self.len && self.s[self.pos] != 62 {
+                    str.WriteByte(&closeB, int(self.s[self.pos]))
+                    self.consume()
+                }
+                str.Free(&closeB)
+                if self.pos < self.len && self.s[self.pos] == 62 { // >
+                    self.consume() // >
+                }
+            }
+        }
+        self.depth = self.depth - 1
+        return node
+    }
+}
+
+// trimWhitespace removes leading and trailing whitespace characters
+// (space, tab, newline, carriage return) from s.
+fn trimWhitespace(s: string) -> string {
+    start := 0
+    end := str.Len(s) - 1
+    // Trim leading whitespace
+    for start <= end && (s[start] == 32 || s[start] == 9 || s[start] == 10 || s[start] == 13) {
+        start = start + 1
+    }
+    // Trim trailing whitespace
+    for end >= start && (s[end] == 32 || s[end] == 9 || s[end] == 10 || s[end] == 13) {
+        end = end - 1
+    }
+    return str.Substr(s, start, end - start + 1)
+}
+
+// --- Legacy entry-based API ---
+
+// Entry is a simple key-value pair used by the legacy entry-based XML API.
+pub struct Entry {
+    key: string
+    value: string
+
+    // Key returns the entry's key string (the child element tag name).
+    pub fn Key(self: Entry) -> string {
+        return self.key
+    }
+
+    // Value returns the entry's value string (the child element text content).
+    pub fn Value(self: Entry) -> string {
+        return self.value
+    }
+}
+
+// MarshalEntries builds an XML tree from parallel key and value slices and
+// serializes it. Only the first n pairs are included as child elements.
+pub fn MarshalEntries(root: string, keys: []string, values: []string, n: int) -> string {
+    node := NewNode(root)
+    for i := 0; i < n; i = i + 1 {
+        child := NewNode(keys[i])
+        child.SetText(values[i])
+        node.children = append(node.children, child)
+    }
+    return MarshalNode(node)
+}
+
+// UnmarshalEntries parses an XML string and extracts direct child elements
+// of the root as Entry pairs (tag name → text content).
+pub fn UnmarshalEntries(s: string) -> ([]Entry, errors.Error) {
+    node, err := Unmarshal(s)
+    if err.message != "" {
+        var empty []Entry
+        return empty, err
+    }
+    var entries []Entry
+    for i := 0; i < len(node.children); i = i + 1 {
+        child := node.children[i]
+        e := Entry{key: child.tag, value: child.text}
+        entries = append(entries, e)
+    }
+    return entries, errors.New("")
+}

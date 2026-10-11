@@ -1,0 +1,9 @@
+// expect: return
+module main
+fn f() {
+    return 5
+}
+fn main() -> int {
+    f()
+    return 0
+}

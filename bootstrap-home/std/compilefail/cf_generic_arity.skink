@@ -1,0 +1,8 @@
+// expect: generic
+module main
+fn id<T>(x: T) -> T {
+    return x
+}
+fn main() -> int {
+    return id<int, int>(5)
+}

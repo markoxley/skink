@@ -1,0 +1,128 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/nn_test.skink
+// Purpose: Skink module for nn test.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module nn_test
+
+import "std/nn"
+import "testing"
+
+// TestNetworkCreation verifies that a network can be created.
+pub fn TestNetworkCreation() {
+    n := nn.NewNetwork(2, 3, 1)
+    if n.inputSize != 2 {
+        Errorf("input size should be 2")
+    }
+    if n.hiddenSize != 3 {
+        Errorf("hidden size should be 3")
+    }
+    if n.outputSize != 1 {
+        Errorf("output size should be 1")
+    }
+}
+
+// TestNetworkForward verifies that a forward pass produces output.
+pub fn TestNetworkForward() {
+    n := nn.NewNetwork(2, 3, 1)
+    inputs := make([]float, 2)
+    inputs[0] = 1.0
+    inputs[1] = 0.0
+    output := n.Forward(inputs)
+    if len(output) != 1 {
+        Errorf("output should have 1 element")
+    }
+    // Sigmoid output should be in (0, 1)
+    if output[0] <= 0.0 || output[0] >= 1.0 {
+        Errorf("sigmoid output should be in (0, 1)")
+    }
+}
+
+// TestNetworkTrain verifies that training reduces error over iterations.
+pub fn TestNetworkTrain() {
+    n := nn.NewNetwork(2, 4, 1)
+    n.SetLearningRate(0.5)
+    // Simple AND function training data (easier than XOR)
+    inputs00 := make([]float, 2)
+    inputs00[0] = 0.0
+    inputs00[1] = 0.0
+    target0 := make([]float, 1)
+    target0[0] = 0.0
+
+    inputs11 := make([]float, 2)
+    inputs11[0] = 1.0
+    inputs11[1] = 1.0
+    target1 := make([]float, 1)
+    target1[0] = 1.0
+
+    inputs10 := make([]float, 2)
+    inputs10[0] = 1.0
+    inputs10[1] = 0.0
+    target0b := make([]float, 1)
+    target0b[0] = 0.0
+
+    inputs01 := make([]float, 2)
+    inputs01[0] = 0.0
+    inputs01[1] = 1.0
+    target0c := make([]float, 1)
+    target0c[0] = 0.0
+
+    // Train for many iterations
+    iter := 0
+    for iter < 1000 {
+        n.Train(inputs00, target0)
+        n.Train(inputs11, target1)
+        n.Train(inputs10, target0b)
+        n.Train(inputs01, target0c)
+        iter = iter + 1
+    }
+    // After training, AND(1,1) should be close to 1
+    out11 := n.Predict(inputs11)
+    if out11[0] < 0.7 {
+        Errorf("AND(1,1) should be close to 1")
+    }
+    // AND(0,0) should be close to 0
+    out00 := n.Predict(inputs00)
+    if out00[0] > 0.3 {
+        Errorf("AND(0,0) should be close to 0")
+    }
+}
+
+// TestNetworkPredict verifies that Predict works like Forward.
+pub fn TestNetworkPredict() {
+    n := nn.NewNetwork(2, 3, 1)
+    inputs := make([]float, 2)
+    inputs[0] = 0.5
+    inputs[1] = 0.5
+    output := n.Predict(inputs)
+    if len(output) != 1 {
+        Errorf("predict output should have 1 element")
+    }
+}
+
+// TestSetLearningRate verifies that the learning rate can be set.
+pub fn TestSetLearningRate() {
+    n := nn.NewNetwork(2, 3, 1)
+    n.SetLearningRate(0.01)
+    if n.learningRate != 0.01 {
+        Errorf("learning rate should be 0.01")
+    }
+}

@@ -1,0 +1,10 @@
+// expect: method value
+module main
+struct C { x: int
+    fn Get(self: C) -> int { return self.x }
+}
+fn main() -> int {
+    c := C{x: 7}
+    f := c.Get
+    return f()
+}

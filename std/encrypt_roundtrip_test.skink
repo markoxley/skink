@@ -1,0 +1,38 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/encrypt_roundtrip_test.skink
+// Purpose: Tests for one-shot encrypt.AESEncrypt / AESDecrypt.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module encrypt_roundtrip_test
+
+import "testing"
+import "std/encrypt"
+
+// TestAESRoundTrip verifies AES encrypt then decrypt returns original.
+pub fn TestAESRoundTrip() {
+    key := "0123456789abcdef" // 16 bytes = AES-128
+    pt := "secret message"
+    ct, err := encrypt.AESEncrypt(key, pt)
+    testing.AssertTrue(err.message == "", "encrypt ok")
+    res, derr := encrypt.AESDecrypt(key, ct.Data(), ct.Length())
+    testing.AssertTrue(derr.message == "", "decrypt ok")
+    testing.AssertEqualString(pt, res.Data(), "round trip")
+}

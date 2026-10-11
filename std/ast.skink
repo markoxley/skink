@@ -1,0 +1,751 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/ast.skink
+// Purpose: Defines the abstract syntax tree node structures, kind constants,
+//          and helper constructors used by the Skink parser.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// This module defines the abstract syntax tree structures produced by the
+// parser. Following the pattern used by std/json and std/yaml, we use manual
+// tagged unions (structs with a kind field) rather than native tagged unions.
+//
+// Recursive references use slices ([]Expr, []Stmt, []Type) instead of pointers
+// because slices are heap-allocated and properly reference-counted by the
+// runtime. For single optional references, we use a slice of length 0 (nil)
+// or 1. This avoids the shallow-copy issues with & on structs containing
+// pointers.
+module ast
+
+import "std/str"
+
+// === AST Node Kinds ===
+
+// Statements
+pub const ST_VAR        = 1
+pub const ST_ASSIGN     = 2
+pub const ST_TUPLEASSIGN = 3
+pub const ST_RETURN     = 4
+pub const ST_BREAK      = 5
+pub const ST_CONTINUE   = 6
+pub const ST_IF         = 7
+pub const ST_FOR        = 8
+pub const ST_WHILE      = 9
+pub const ST_UNTIL      = 10
+pub const ST_EXPR       = 11
+pub const ST_BLOCK      = 12
+pub const ST_DEFER      = 13
+pub const ST_MATCH      = 14
+
+// Declarations
+pub const ST_FN         = 20
+pub const ST_STRUCT     = 21
+pub const ST_ENUM       = 22
+pub const ST_CONST      = 23
+pub const ST_VARDECL    = 24
+pub const ST_TYPEALIAS  = 25
+pub const ST_IMPORT     = 26
+pub const ST_MODULE     = 27
+pub const ST_EXTERN     = 28
+pub const ST_TEMPLATE   = 29
+pub const ST_SPAWN      = 30
+pub const ST_SELECT     = 31
+pub const ST_SWITCH     = 32
+pub const ST_RULESET    = 33
+pub const ST_SERVICE    = 34
+
+// Expressions
+pub const EX_IDENT      = 100
+pub const EX_INT        = 101
+pub const EX_FLOAT      = 102
+pub const EX_STRING     = 103
+pub const EX_BOOL       = 104
+pub const EX_NIL        = 105
+pub const EX_PREFIX     = 106
+pub const EX_INFIX      = 107
+pub const EX_CALL       = 108
+pub const EX_INDEX      = 109
+pub const EX_FIELD      = 110
+pub const EX_ARRAY_LIT  = 111
+pub const EX_MAP_LIT    = 112
+pub const EX_SET_LIT    = 113
+pub const EX_STRUCT_LIT = 114
+pub const EX_PAREN      = 115
+pub const EX_SLICE      = 116
+pub const EX_FN_LIT     = 117
+pub const EX_IF_EXPR    = 118
+pub const EX_MATCH_EXPR = 119
+pub const EX_MAKE       = 120
+pub const EX_SIZEOF     = 121
+pub const EX_ALIGNOF    = 122
+pub const EX_RANGE      = 123
+pub const EX_SPREAD     = 124
+pub const EX_ERROR_PROP = 125
+pub const EX_NONNULL    = 126
+pub const EX_AWAIT      = 127
+pub const EX_ASYNC      = 128
+pub const EX_FROM_END   = 129
+pub const EX_TUPLE      = 130
+pub const EX_INTERP     = 131
+
+// Type kinds
+pub const TY_NAMED    = 200
+pub const TY_POINTER  = 201
+pub const TY_ARRAY    = 202
+pub const TY_MAP      = 203
+pub const TY_SET      = 204
+pub const TY_CHAN     = 205
+pub const TY_TENSOR   = 206
+pub const TY_FUNC     = 207
+pub const TY_TUPLE    = 208
+
+// Pattern kinds
+pub const PK_WILDCARD = 0
+pub const PK_VARIANT  = 1
+pub const PK_IDENT    = 2
+pub const PK_INT      = 3
+pub const PK_STRING   = 4
+pub const PK_BOOL     = 5
+pub const PK_NIL      = 6
+pub const PK_RANGE    = 7
+
+// === AST Node Structures ===
+//
+// Convention for single optional references: use a slice of length 0 (nil)
+// or 1. For example, `cond: []Expr` where len(cond)==0 means no condition,
+// and len(cond)==1 means there is one condition expression. Access with
+// `cond[0]` after checking `len(cond) > 0`.
+
+// Stmt is the tagged union for all statement kinds. The `kind` field
+// determines which subset of the remaining fields are populated.
+struct Stmt {
+    kind: int
+    line: int
+    col:  int
+    filePath: string
+
+    // Variable declaration (ST_VAR, ST_VARDECL)
+    varName:  string
+    varType:  []Type   // len 0 or 1
+    varValue: []Expr   // len 0 or 1
+    varNames: []string
+
+    // Assignment (ST_ASSIGN)
+    assignTarget: []Expr  // len 1
+    assignOp:     string
+    assignValue:  []Expr  // len 1
+
+    // Tuple assignment (ST_TUPLEASSIGN)
+    tupleTargets: []Expr
+
+    // Return (ST_RETURN)
+    returnValues: []Expr
+
+    // If/For/While/Until/Block (ST_IF, ST_FOR, ST_WHILE, ST_UNTIL, ST_BLOCK)
+    cond:    []Expr   // len 0 or 1
+    thenBody:  []Stmt
+    elseBody:  []Stmt
+    ifInit:   []Stmt   // len 0 or 1 (for if-init: if x := expr; cond { })
+
+    // For loop specifics
+    forInit: []Stmt   // len 0 or 1
+    forPost: []Stmt   // len 0 or 1
+    forIterVar: string
+    forIterVar2: string  // second variable for "for i, v in collection"
+    forIterExpr: []Expr  // len 0 or 1
+
+    // Match (ST_MATCH)
+    matchSubject: []Expr  // len 0 or 1
+    matchArms:    []MatchArm
+
+    // Defer (ST_DEFER)
+    deferStmt: []Stmt  // len 1
+
+    // Expression statement (ST_EXPR)
+    expr: []Expr  // len 1
+
+    // Spawn (ST_SPAWN)
+    spawnCall: []Expr  // len 1
+
+    // Select/Switch (ST_SELECT, ST_SWITCH)
+    selectCases: []SelectCase
+
+    // Declarations
+    decl: Decl
+}
+
+// SelectCase represents a single case in a select or switch statement.
+struct SelectCase {
+    isDefault: bool
+    cond:      []Expr  // len 0 or 1
+    body:      []Stmt
+    recvVar:   string
+}
+
+// Decl is the tagged union for all top-level and nested declarations
+// (functions, structs, enums, consts, type aliases, imports, modules,
+// templates, rulesets, and services). The `kind` field selects which
+// group of fields is relevant.
+struct Decl {
+    kind: int
+
+    // Function (ST_FN)
+    fnName:       string
+    fnParams:     []Param
+    fnRetTypes:   []Type
+    fnRetNames:   []string  // named return values (empty if unnamed)
+    fnBody:       []Stmt
+    fnGenerics:   []TypeParam
+    fnIsPub:      bool
+    fnIsExtern:   bool
+    fnAttrs:      []string
+    fnReceiver:   []Type  // len 0 or 1
+
+    // Struct (ST_STRUCT)
+    structName:    string
+    structFields:  []Field
+    structMethods: []Decl
+    structGenerics: []TypeParam
+    structIsPub:   bool
+
+    // Enum (ST_ENUM)
+    enumName:     string
+    enumVariants: []Variant
+    enumGenerics: []TypeParam
+    enumIsPub:    bool
+
+    // Const (ST_CONST)
+    constName:  string
+    constValue: []Expr  // len 0 or 1
+    constBlock: []ConstItem
+    constIsPub: bool
+
+    // Type alias (ST_TYPEALIAS)
+    aliasName: string
+    aliasType: []Type  // len 1
+
+    // Import (ST_IMPORT)
+    importPath: string
+    importAlias: string
+
+    // Module (ST_MODULE)
+    moduleName: string
+
+    // Template (ST_TEMPLATE)
+    templateName:    string
+    templateMethods: []Decl
+    templateIsPub:   bool
+    templateGenerics: []TypeParam
+
+    // Ruleset (ST_RULESET)
+    rulesetName: string
+    rulesetRules: []RuleDecl
+    rulesetIsPub: bool
+
+    // Service (ST_SERVICE)
+    serviceName: string
+    serviceForType: string
+    serviceMethods: []Decl
+    serviceIsPub: bool
+}
+
+// RuleDecl represents a single rule within a ruleset declaration.
+struct RuleDecl {
+    name:      string
+    condition: []Expr  // len 1
+    ruleAction:   []Stmt
+    rulePriority: int
+}
+
+// ConstItem represents a single name/value pair inside a const block.
+struct ConstItem {
+    name:  string
+    value: []Expr  // len 1
+}
+
+// Param represents a single function parameter: a name and an optional type.
+struct Param {
+    name: string
+    typ:  []Type  // len 0 or 1
+}
+
+// Field represents a single field in a struct declaration.
+struct Field {
+    name:    string
+    typ:     []Type  // len 1
+    isPub:   bool
+    doc:     string
+}
+
+// Variant represents a single variant in an enum declaration, with
+// optional payload types for tagged-union enums.
+struct Variant {
+    name:     string
+    payloads: []Type
+}
+
+// TypeParam represents a generic type parameter with an optional bound.
+struct TypeParam {
+    name:  string
+    bound: []Type  // len 0 or 1
+}
+
+// Type is the tagged union for all type expressions. The `kind` field
+// selects which subset of fields is populated (named, pointer, array,
+// map, set, chan, tensor, func, or tuple).
+struct Type {
+    kind: int
+
+    // Named type (TY_NAMED)
+    name:      string
+    genericArgs: []Type
+
+    // Pointer/Array/Map/Set/Chan/Tensor (single inner type)
+    elem: []Type  // len 0 or 1
+
+    // Map (TY_MAP)
+    keyType: []Type  // len 0 or 1
+
+    // Function (TY_FUNC)
+    paramTypes: []Type
+    retTypes:   []Type
+
+    // Tuple (TY_TUPLE)
+    tupleTypes: []Type
+}
+
+// Expr is the tagged union for all expression kinds. The `kind` field
+// determines which subset of fields are populated.
+struct Expr {
+    kind: int
+    line: int
+    col:  int
+
+    // Identifier (EX_IDENT)
+    ident:    string
+    genericArgs: []Type
+
+    // Literals (EX_INT, EX_FLOAT, EX_STRING, EX_BOOL)
+    intVal:   int
+    floatVal: float
+    strVal:   string
+    boolVal:  bool
+
+    // Prefix (EX_PREFIX)
+    prefixOp: string
+    prefixRight: []Expr  // len 1
+
+    // Infix (EX_INFIX)
+    infixOp:  string
+    infixLeft:  []Expr  // len 1
+    infixRight: []Expr  // len 1
+
+    // Call (EX_CALL)
+    callFunc: []Expr  // len 1
+    callArgs: []Expr
+
+    // Index (EX_INDEX, EX_FROM_END)
+    indexTarget: []Expr  // len 1
+    indexExpr:   []Expr  // len 1
+    indexFromEnd: bool
+
+    // Field access (EX_FIELD)
+    fieldTarget: []Expr  // len 1
+    fieldName:   string
+
+    // Array literal (EX_ARRAY_LIT)
+    arrayElems: []Expr
+    arrayType:  []Type  // len 0 or 1: element type for []Type{...} literals
+
+    // Map literal (EX_MAP_LIT)
+    mapKeys: []Expr
+    mapVals: []Expr
+
+    // Set literal (EX_SET_LIT)
+    setElems: []Expr
+
+    // Struct literal (EX_STRUCT_LIT)
+    structLitName:   string
+    structLitFields: []StructLitField
+
+    // Paren (EX_PAREN)
+    inner: []Expr  // len 1
+
+    // Slice (EX_SLICE)
+    sliceTarget: []Expr  // len 1
+    sliceLow:    []Expr  // len 0 or 1
+    sliceHigh:   []Expr  // len 0 or 1
+
+    // Function literal (EX_FN_LIT)
+    fnLitParams:   []Param
+    fnLitRetTypes: []Type
+    fnLitBody:     []Stmt
+
+    // If expression (EX_IF_EXPR)
+    ifCond: []Expr  // len 1
+    ifThen: []Expr  // len 1
+    ifElse: []Expr  // len 0 or 1
+
+    // Match expression (EX_MATCH_EXPR)
+    matchExprSubject: []Expr  // len 1
+    matchExprArms:    []MatchArm
+
+    // Make (EX_MAKE)
+    makeType: []Type  // len 1
+    makeSize: []Expr  // len 0 or 1
+
+    // Sizeof/Alignof (EX_SIZEOF, EX_ALIGNOF)
+    sizeofType: []Type  // len 1
+
+    // Range (EX_RANGE)
+    rangeLow:  []Expr  // len 1
+    rangeHigh: []Expr  // len 1
+
+    // Spread (EX_SPREAD)
+    spreadExpr: []Expr  // len 1
+
+    // Error propagation (EX_ERROR_PROP) / Non-null assert (EX_NONNULL)
+    postfixTarget: []Expr  // len 1
+
+    // Await (EX_AWAIT)
+    awaitExpr: []Expr  // len 1
+
+    // Tuple (EX_TUPLE)
+    tupleElems: []Expr
+
+    // Interpolated string (EX_INTERP)
+    interpParts: []InterpPart
+}
+
+// InterpPart is a segment of an interpolated string literal.
+// When isExpr is false, strVal holds a literal string segment.
+// When isExpr is true, expr holds a parsed expression to be
+// converted to a string at runtime.
+struct InterpPart {
+    isExpr: bool
+    strVal: string
+    expr:   []Expr  // len 1 when isExpr is true
+}
+
+// StructLitField represents a single name=value pair in a struct literal.
+struct StructLitField {
+    name:  string
+    value: []Expr  // len 1
+}
+
+// MatchArm represents one arm of a match expression or statement,
+// consisting of a pattern, optional guard, and body.
+struct MatchArm {
+    pattern:    Pattern
+    guard:      []Expr  // len 0 or 1
+    body:       []Stmt
+    isWildcard: bool
+}
+
+// Pattern is the tagged union for match patterns. The `kind` field
+// determines which subset of fields are populated.
+struct Pattern {
+    kind: int
+
+    variantName: string
+    bindings:    []string
+    identName:   string
+    intVal:      int
+    strVal:      string
+    boolVal:     bool
+    rangeLow:    int
+    rangeHigh:   int
+}
+
+// === Helper constructors ===
+
+// newExpr creates a new Expr node with the given kind and source position.
+pub fn newExpr(kind: int, line: int, col: int) -> Expr {
+    return Expr{kind: kind, line: line, col: col}
+}
+
+// newStmt creates a new Stmt node with the given kind and source position.
+pub fn newStmt(kind: int, line: int, col: int) -> Stmt {
+    return Stmt{kind: kind, line: line, col: col}
+}
+
+// newType creates a new Type node with the given kind.
+pub fn newType(kind: int) -> Type {
+    return Type{kind: kind}
+}
+
+// newDecl creates a new Decl node with the given kind and empty string fields.
+pub fn newDecl(kind: int) -> Decl {
+    return Decl{
+        kind: kind,
+        fnName: "",
+        structName: "",
+        enumName: "",
+        constName: "",
+        aliasName: "",
+        importPath: "",
+        importAlias: "",
+        moduleName: "",
+    }
+}
+
+// singleExpr wraps a single Expr in a slice (for optional single reference fields).
+pub fn singleExpr(e: Expr) -> []Expr {
+    var s []Expr
+    s = append(s, e)
+    return s
+}
+
+// singleType wraps a single Type in a slice.
+pub fn singleType(t: Type) -> []Type {
+    var s []Type
+    s = append(s, t)
+    return s
+}
+
+// singleStmt wraps a single Stmt in a slice.
+pub fn singleStmt(s: Stmt) -> []Stmt {
+    var result []Stmt
+    result = append(result, s)
+    return result
+}
+
+// exprOpt returns the first Expr from a slice, or a zero Expr if empty.
+pub fn exprOpt(s: []Expr) -> Expr {
+    if len(s) > 0 {
+        return s[0]
+    }
+    return Expr{}
+}
+
+// typeOpt returns the first Type from a slice, or a zero Type if empty.
+pub fn typeOpt(s: []Type) -> Type {
+    if len(s) > 0 {
+        return s[0]
+    }
+    return Type{}
+}
+
+// stmtOpt returns the first Stmt from a slice, or a zero Stmt if empty.
+pub fn stmtOpt(s: []Stmt) -> Stmt {
+    if len(s) > 0 {
+        return s[0]
+    }
+    return Stmt{}
+}
+
+// hasExpr returns true if the slice has at least one element.
+pub fn hasExpr(s: []Expr) -> bool {
+    return len(s) > 0
+}
+
+// hasType returns true if the slice has at least one element.
+pub fn hasType(s: []Type) -> bool {
+    return len(s) > 0
+}
+
+// hasStmt returns true if the slice has at least one element.
+pub fn hasStmt(s: []Stmt) -> bool {
+    return len(s) > 0
+}
+
+// === Pretty Printing ===
+
+// stmtKindName returns a human-readable name for a statement kind constant.
+pub fn stmtKindName(kind: int) -> string {
+    if kind == ST_VAR { return "VarDecl" }
+    if kind == ST_ASSIGN { return "Assign" }
+    if kind == ST_TUPLEASSIGN { return "TupleAssign" }
+    if kind == ST_RETURN { return "Return" }
+    if kind == ST_BREAK { return "Break" }
+    if kind == ST_CONTINUE { return "Continue" }
+    if kind == ST_IF { return "If" }
+    if kind == ST_FOR { return "For" }
+    if kind == ST_WHILE { return "While" }
+    if kind == ST_UNTIL { return "Until" }
+    if kind == ST_EXPR { return "ExprStmt" }
+    if kind == ST_BLOCK { return "Block" }
+    if kind == ST_DEFER { return "Defer" }
+    if kind == ST_MATCH { return "Match" }
+    if kind == ST_FN { return "FnDecl" }
+    if kind == ST_STRUCT { return "StructDecl" }
+    if kind == ST_ENUM { return "EnumDecl" }
+    if kind == ST_CONST { return "ConstDecl" }
+    if kind == ST_VARDECL { return "VarDecl" }
+    if kind == ST_TYPEALIAS { return "TypeAlias" }
+    if kind == ST_IMPORT { return "Import" }
+    if kind == ST_MODULE { return "Module" }
+    if kind == ST_EXTERN { return "ExternFn" }
+    return "Unknown"
+
+}
+
+// exprKindName returns a human-readable name for an expression kind constant.
+pub fn exprKindName(kind: int) -> string {
+    if kind == EX_IDENT { return "Ident" }
+    if kind == EX_INT { return "IntLit" }
+    if kind == EX_FLOAT { return "FloatLit" }
+    if kind == EX_STRING { return "StringLit" }
+    if kind == EX_BOOL { return "BoolLit" }
+    if kind == EX_NIL { return "NilLit" }
+    if kind == EX_PREFIX { return "Prefix" }
+    if kind == EX_INFIX { return "Infix" }
+    if kind == EX_CALL { return "Call" }
+    if kind == EX_INDEX { return "Index" }
+    if kind == EX_FIELD { return "Field" }
+    if kind == EX_ARRAY_LIT { return "ArrayLit" }
+    if kind == EX_MAP_LIT { return "MapLit" }
+    if kind == EX_SET_LIT { return "SetLit" }
+    if kind == EX_STRUCT_LIT { return "StructLit" }
+    if kind == EX_PAREN { return "Paren" }
+    if kind == EX_SLICE { return "Slice" }
+    if kind == EX_FN_LIT { return "FnLit" }
+    if kind == EX_IF_EXPR { return "IfExpr" }
+    if kind == EX_MATCH_EXPR { return "MatchExpr" }
+    if kind == EX_MAKE { return "Make" }
+    if kind == EX_SIZEOF { return "Sizeof" }
+    if kind == EX_ALIGNOF { return "Alignof" }
+    if kind == EX_RANGE { return "Range" }
+    if kind == EX_SPREAD { return "Spread" }
+    if kind == EX_ERROR_PROP { return "ErrorProp" }
+    if kind == EX_NONNULL { return "NonNull" }
+    if kind == EX_AWAIT { return "Await" }
+    if kind == EX_ASYNC { return "Async" }
+    if kind == EX_FROM_END { return "FromEndIndex" }
+    if kind == EX_TUPLE { return "Tuple" }
+    if kind == EX_INTERP { return "Interp" }
+    return "Unknown"
+
+}
+
+// typeKindName returns a human-readable name for a type kind constant.
+pub fn typeKindName(kind: int) -> string {
+    if kind == TY_NAMED { return "Named" }
+    if kind == TY_POINTER { return "Pointer" }
+    if kind == TY_ARRAY { return "Array" }
+    if kind == TY_MAP { return "Map" }
+    if kind == TY_SET { return "Set" }
+    if kind == TY_CHAN { return "Chan" }
+    if kind == TY_TENSOR { return "Tensor" }
+    if kind == TY_FUNC { return "Func" }
+    if kind == TY_TUPLE { return "Tuple" }
+    return "Unknown"
+
+}
+
+// typeString returns a string representation of a Type.
+pub fn typeString(t: Type) -> string {
+    if t.kind == TY_NAMED {
+        s := t.name
+        n := len(t.genericArgs)
+        if n > 0 {
+            s = str.Concat(s, "<")
+            for i := 0; i < n; i = i + 1 {
+                if i > 0 {
+                    s = str.Concat(s, ", ")
+                }
+                s = str.Concat(s, typeString(t.genericArgs[i]))
+            }
+            s = str.Concat(s, ">")
+        }
+        return s
+    }
+    if t.kind == TY_POINTER {
+        if hasType(t.elem) {
+            return str.Concat("*", typeString(t.elem[0]))
+        }
+        return "*?"
+    }
+    if t.kind == TY_ARRAY {
+        if hasType(t.elem) {
+            return str.Concat("[]", typeString(t.elem[0]))
+        }
+        return "[]?"
+    }
+    if t.kind == TY_MAP {
+        k := "?"
+        v := "?"
+        if hasType(t.keyType) {
+            k = typeString(t.keyType[0])
+        }
+        if hasType(t.elem) {
+            v = typeString(t.elem[0])
+        }
+        return str.Concat(str.Concat(str.Concat("map[", k), "]"), v)
+    }
+    if t.kind == TY_SET {
+        if hasType(t.elem) {
+            return str.Concat("set<", str.Concat(typeString(t.elem[0]), ">"))
+        }
+        return "set<?>"
+    }
+    if t.kind == TY_CHAN {
+        if hasType(t.elem) {
+            return str.Concat("chan<", str.Concat(typeString(t.elem[0]), ">"))
+        }
+        return "chan<?>"
+    }
+    if t.kind == TY_TENSOR {
+        if hasType(t.elem) {
+            return str.Concat("tensor<", str.Concat(typeString(t.elem[0]), ">"))
+        }
+        return "tensor<?>"
+    }
+    if t.kind == TY_FUNC {
+        s := "fn("
+        n := len(t.paramTypes)
+        for i := 0; i < n; i = i + 1 {
+            if i > 0 {
+                s = str.Concat(s, ", ")
+            }
+            s = str.Concat(s, typeString(t.paramTypes[i]))
+        }
+        s = str.Concat(s, ")")
+        rn := len(t.retTypes)
+        if rn > 0 {
+            s = str.Concat(s, " -> ")
+            if rn > 1 {
+                s = str.Concat(s, "(")
+            }
+            for i := 0; i < rn; i = i + 1 {
+                if i > 0 {
+                    s = str.Concat(s, ", ")
+                }
+                s = str.Concat(s, typeString(t.retTypes[i]))
+            }
+            if rn > 1 {
+                s = str.Concat(s, ")")
+            }
+        }
+        return s
+    }
+    if t.kind == TY_TUPLE {
+        s := "("
+        n := len(t.tupleTypes)
+        for i := 0; i < n; i = i + 1 {
+            if i > 0 {
+                s = str.Concat(s, ", ")
+            }
+            s = str.Concat(s, typeString(t.tupleTypes[i]))
+        }
+        s = str.Concat(s, ")")
+        return s
+    }
+    return "?"
+}

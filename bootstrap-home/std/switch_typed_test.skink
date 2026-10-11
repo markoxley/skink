@@ -1,0 +1,93 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/switch_typed_test.skink
+// Purpose: Regression tests for typed switch subjects (B2) — string,
+//          float, int64, bool.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module switch_typed_test
+
+import "testing"
+
+fn classifyStr(s: string) -> int {
+    switch s {
+    case "a":
+        return 1
+    case "b":
+        return 2
+    default:
+        return -1
+    }
+}
+
+fn classifyFloat(f: float) -> int {
+    switch f {
+    case 1.5:
+        return 1
+    case 2.5:
+        return 2
+    default:
+        return -1
+    }
+}
+
+fn classifyI64(v: int64) -> int {
+    switch v {
+    case int64(10):
+        return 1
+    case int64(20):
+        return 2
+    default:
+        return -1
+    }
+}
+
+fn classifyBool(b: bool) -> int {
+    switch b {
+    case true:
+        return 1
+    default:
+        return 0
+    }
+}
+
+// TestSwitchString verifies switch on string subjects.
+pub fn TestSwitchString() {
+    testing.AssertEqualInt(1, classifyStr("a"), "string case a")
+    testing.AssertEqualInt(2, classifyStr("b"), "string case b")
+    testing.AssertEqualInt(-1, classifyStr("z"), "string default")
+}
+
+// TestSwitchFloat verifies switch on float subjects.
+pub fn TestSwitchFloat() {
+    testing.AssertEqualInt(1, classifyFloat(1.5), "float case")
+    testing.AssertEqualInt(-1, classifyFloat(9.9), "float default")
+}
+
+// TestSwitchInt64 verifies switch on int64 subjects.
+pub fn TestSwitchInt64() {
+    testing.AssertEqualInt(2, classifyI64(int64(20)), "i64 case")
+}
+
+// TestSwitchBool verifies switch on bool subjects.
+pub fn TestSwitchBool() {
+    testing.AssertEqualInt(1, classifyBool(true), "bool true")
+    testing.AssertEqualInt(0, classifyBool(false), "bool false")
+}

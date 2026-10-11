@@ -1,0 +1,356 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/rand_test.skink
+// Purpose: Skink module for rand test.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module rand_test
+
+import "std/rand"
+import "std/libc"
+import "testing"
+
+// TestIntnRange verifies Intn returns a value in [0, n).
+pub fn TestIntnRange() {
+    rand.Seed(int64(42))
+    v := rand.Intn(10)
+    if v < 0 {
+        Errorf("Intn should be non-negative")
+    }
+    if v >= 10 {
+        Errorf("Intn should be less than n")
+    }
+}
+
+// TestIntnZero verifies Intn(0) returns 0.
+pub fn TestIntnZero() {
+    v := rand.Intn(0)
+    if v != 0 {
+        Errorf("Intn(0) should return 0")
+    }
+}
+
+// TestIntnOne verifies Intn(1) returns 0.
+pub fn TestIntnOne() {
+    v := rand.Intn(1)
+    if v != 0 {
+        Errorf("Intn(1) should return 0")
+    }
+}
+
+// TestInt verifies Int returns a non-negative value.
+pub fn TestInt() {
+    rand.Seed(int64(42))
+    v := rand.Int()
+    if v < 0 {
+        Errorf("Int should be non-negative")
+    }
+}
+
+// TestIntnDistribution verifies multiple calls stay in range.
+pub fn TestIntnDistribution() {
+    rand.Seed(int64(42))
+    for i := 0; i < 100; i = i + 1 {
+        v := rand.Intn(5)
+        if v < 0 || v >= 5 {
+            Errorf("Intn distribution out of range")
+        }
+    }
+}
+
+// TestInt8 verifies Int8 returns a value in [-128, 127].
+pub fn TestInt8() {
+    rand.Seed(int64(42))
+    for i := 0; i < 100; i = i + 1 {
+        v := rand.Int8()
+        if v < int8(-128) || v > int8(127) {
+            Errorf("Int8 out of range")
+        }
+    }
+}
+
+// TestInt8n verifies Int8n returns a value in [0, n).
+pub fn TestInt8n() {
+    rand.Seed(int64(42))
+    for i := 0; i < 100; i = i + 1 {
+        v := rand.Int8n(int8(10))
+        if v < 0 || v >= int8(10) {
+            Errorf("Int8n out of range")
+        }
+    }
+}
+
+// TestInt16 verifies Int16 returns a value in [-32768, 32767].
+pub fn TestInt16() {
+    rand.Seed(int64(42))
+    for i := 0; i < 100; i = i + 1 {
+        v := rand.Int16()
+        if v < int16(-32768) || v > int16(32767) {
+            Errorf("Int16 out of range")
+        }
+    }
+}
+
+// TestInt16n verifies Int16n returns a value in [0, n).
+pub fn TestInt16n() {
+    rand.Seed(int64(42))
+    for i := 0; i < 100; i = i + 1 {
+        v := rand.Int16n(int16(1000))
+        if v < 0 || v >= int16(1000) {
+            Errorf("Int16n out of range")
+        }
+    }
+}
+
+// TestInt32 verifies Int32 returns a non-negative value.
+pub fn TestInt32() {
+    rand.Seed(int64(42))
+    v := rand.Int32()
+    if v < int32(0) {
+        Errorf("Int32 should be non-negative")
+    }
+}
+
+// TestInt32n verifies Int32n returns a value in [0, n).
+pub fn TestInt32n() {
+    rand.Seed(int64(42))
+    for i := 0; i < 100; i = i + 1 {
+        v := rand.Int32n(int32(100))
+        if v < int32(0) || v >= int32(100) {
+            Errorf("Int32n out of range")
+        }
+    }
+}
+
+// TestInt64 verifies Int64 returns a non-negative value.
+pub fn TestInt64() {
+    rand.Seed(int64(42))
+    v := rand.Int64()
+    if v < int64(0) {
+        Errorf("Int64 should be non-negative")
+    }
+}
+
+// TestInt64n verifies Int64n returns a value in [0, n).
+pub fn TestInt64n() {
+    rand.Seed(int64(42))
+    for i := 0; i < 100; i = i + 1 {
+        v := rand.Int64n(int64(1000000))
+        if v < int64(0) || v >= int64(1000000) {
+            Errorf("Int64n out of range")
+        }
+    }
+}
+
+// TestUint verifies Uint returns a non-negative value.
+pub fn TestUint() {
+    rand.Seed(int64(42))
+    v := rand.Uint()
+    if v < uint(0) {
+        Errorf("Uint should be non-negative")
+    }
+}
+
+// TestUint8 verifies Uint8 returns a value (smoke test).
+pub fn TestUint8() {
+    rand.Seed(int64(42))
+    for i := 0; i < 100; i = i + 1 {
+        rand.Uint8()
+    }
+}
+
+// TestUint8n verifies Uint8n returns a value in [0, n).
+pub fn TestUint8n() {
+    rand.Seed(int64(42))
+    for i := 0; i < 100; i = i + 1 {
+        rand.Uint8n(uint8(10))
+    }
+}
+
+// TestUint16 verifies Uint16 returns a value (smoke test).
+pub fn TestUint16() {
+    rand.Seed(int64(42))
+    for i := 0; i < 100; i = i + 1 {
+        rand.Uint16()
+    }
+}
+
+// TestUint16n verifies Uint16n returns a value in [0, n).
+pub fn TestUint16n() {
+    rand.Seed(int64(42))
+    for i := 0; i < 100; i = i + 1 {
+        rand.Uint16n(uint16(1000))
+    }
+}
+
+// TestUint32 verifies Uint32 returns a non-negative value.
+pub fn TestUint32() {
+    rand.Seed(int64(42))
+    v := rand.Uint32()
+    if v < uint32(0) {
+        Errorf("Uint32 should be non-negative")
+    }
+}
+
+// TestUint32n verifies Uint32n returns a value in [0, n).
+pub fn TestUint32n() {
+    rand.Seed(int64(42))
+    for i := 0; i < 100; i = i + 1 {
+        v := rand.Uint32n(uint32(100))
+        if v >= uint32(100) {
+            Errorf("Uint32n out of range")
+        }
+    }
+}
+
+// TestUint64 verifies Uint64 returns a non-negative value.
+pub fn TestUint64() {
+    rand.Seed(int64(42))
+    v := rand.Uint64()
+    if v < uint64(0) {
+        Errorf("Uint64 should be non-negative")
+    }
+}
+
+// TestUint64n verifies Uint64n returns a value in [0, n).
+pub fn TestUint64n() {
+    rand.Seed(int64(42))
+    for i := 0; i < 100; i = i + 1 {
+        v := rand.Uint64n(uint64(1000000))
+        if v >= uint64(1000000) {
+            Errorf("Uint64n out of range")
+        }
+    }
+}
+
+// TestFloatRange verifies Float returns [0.0, 1.0).
+pub fn TestFloatRange() {
+    rand.Seed(int64(42))
+    for i := 0; i < 100; i = i + 1 {
+        f := rand.Float()
+        if f < 0.0 {
+            Errorf("Float should be >= 0")
+        }
+        if f >= 1.0 {
+            Errorf("Float should be < 1")
+        }
+    }
+}
+
+// TestFloat64Range verifies Float64 returns [0.0, 1.0).
+pub fn TestFloat64Range() {
+    rand.Seed(int64(42))
+    for i := 0; i < 100; i = i + 1 {
+        f := rand.Float64()
+        if f < 0.0 {
+            Errorf("Float64 should be >= 0")
+        }
+        if f >= 1.0 {
+            Errorf("Float64 should be < 1")
+        }
+    }
+}
+
+// TestFloatn verifies Floatn returns [0.0, n).
+pub fn TestFloatn() {
+    rand.Seed(int64(42))
+    for i := 0; i < 100; i = i + 1 {
+        f := rand.Floatn(10.0)
+        if f < 0.0 || f >= 10.0 {
+            Errorf("Floatn out of range")
+        }
+    }
+}
+
+// TestBytes verifies Bytes writes the requested number of bytes.
+pub fn TestBytes() {
+    rand.Seed(int64(42))
+    buf := libc.malloc(16)
+    n := rand.Bytes(buf, 16)
+    if n != 16 {
+        Errorf("Bytes should return requested length")
+    }
+    libc.free(buf)
+}
+
+// TestBytesZeroLength verifies Bytes with len 0 returns 0.
+pub fn TestBytesZeroLength() {
+    buf := libc.malloc(1)
+    n := rand.Bytes(buf, 0)
+    if n != 0 {
+        Errorf("Bytes(0) should return 0")
+    }
+    libc.free(buf)
+}
+
+// TestRead verifies Read fills a slice.
+pub fn TestRead() {
+    rand.Seed(int64(42))
+    buf := make([]int, 32)
+    n := rand.Read(buf)
+    if n != 32 {
+        Errorf("Read should return slice length")
+    }
+}
+
+// TestPerm verifies Perm returns a valid permutation.
+pub fn TestPerm() {
+    rand.Seed(int64(42))
+    p := rand.Perm(10)
+    if len(p) != 10 {
+        Errorf("Perm should return n elements")
+    }
+    // Verify all values 0..9 are present exactly once
+    seen := make([]bool, 10)
+    for i := 0; i < 10; i = i + 1 {
+        v := p[i]
+        if v < 0 || v >= 10 {
+            Errorf("Perm contains out-of-range value")
+        }
+        if seen[v] {
+            Errorf("Perm contains duplicate value")
+        }
+        seen[v] = true
+    }
+}
+
+// TestPermZero verifies Perm(0) returns an empty slice.
+pub fn TestPermZero() {
+    p := rand.Perm(0)
+    if len(p) != 0 {
+        Errorf("Perm(0) should return empty slice")
+    }
+}
+
+// TestSeedReproducibility verifies that the same seed produces the same sequence.
+pub fn TestSeedReproducibility() {
+    rand.Seed(int64(123))
+    a1 := rand.Intn(1000)
+    a2 := rand.Intn(1000)
+    rand.Seed(int64(123))
+    b1 := rand.Intn(1000)
+    b2 := rand.Intn(1000)
+    if a1 != b1 {
+        Errorf("Same seed should produce same first value")
+    }
+    if a2 != b2 {
+        Errorf("Same seed should produce same second value")
+    }
+}

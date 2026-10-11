@@ -1,0 +1,264 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/regex.skink
+// Purpose: Provides regular expression matching backed by POSIX
+//          extended regex (regex.h) via regex_rt.c. Supports the full
+//          POSIX ERE syntax: ., *, +, ?, |, [], (), {}, ^, $, etc.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module regex
+
+import "std/libc"
+import "std/str"
+import "std/errors"
+
+// POSIX regex runtime functions (regex_rt.c).
+extern fn Skink_regex_compile(pattern: string, errorBuf: string, errorBufSize: int) -> int64
+extern fn Skink_regex_free(re: int64)
+extern fn Skink_regex_match(re: int64, text: string) -> int
+extern fn Skink_regex_find(re: int64, text: string, start: string, end: string) -> int
+extern fn Skink_regex_find_at(re: int64, text: string, offset: int, start: string, end: string) -> int
+extern fn Skink_regex_count_matches(re: int64, text: string) -> int
+
+// Match represents a single regex match with its byte positions and matched text.
+pub struct Match {
+    Start: int   // start index in the source text
+    End: int     // end index (exclusive)
+    Text: string // matched substring
+}
+
+// Regex wraps a compiled POSIX extended regex pattern.
+pub struct Regex {
+    handle: int64  // compiled regex_t* (0 if uncompiled or freed)
+    Pattern: string // the original pattern string
+
+    // Match returns true if the text contains a match for the pattern.
+    pub fn Match(self: Regex, text: string) -> bool {
+        if self.handle == 0 {
+            return false
+        }
+        return Skink_regex_match(self.handle, text) != 0
+    }
+
+    // MatchString returns true if the entire text matches the pattern
+    // from start to finish (anchored at both ends).
+    pub fn MatchString(self: Regex, text: string) -> bool {
+        if self.handle == 0 {
+            return false
+        }
+        // Use ^...$ anchoring by checking that the match spans the full text
+        startBuf := libc.malloc(4)
+        endBuf := libc.malloc(4)
+        found := Skink_regex_find(self.handle, text, startBuf, endBuf)
+        if found == 0 {
+            libc.free(startBuf)
+            libc.free(endBuf)
+            return false
+        }
+        // Reassemble 4-byte little-endian integers for start and end positions
+        start := int(startBuf[0]) | (int(startBuf[1]) << 8) |
+                 (int(startBuf[2]) << 16) | (int(startBuf[3]) << 24)
+        end := int(endBuf[0]) | (int(endBuf[1]) << 8) |
+               (int(endBuf[2]) << 16) | (int(endBuf[3]) << 24)
+        libc.free(startBuf)
+        libc.free(endBuf)
+        textLen := int(libc.strlen(text))
+        return start == 0 && end == textLen
+    }
+
+    // Find returns the first match in the text.
+    // If no match is found, Start and End are -1.
+    pub fn Find(self: Regex, text: string) -> Match {
+        if self.handle == 0 {
+            return Match{Start: -1, End: -1, Text: ""}
+        }
+        startBuf := libc.malloc(4)
+        endBuf := libc.malloc(4)
+        found := Skink_regex_find(self.handle, text, startBuf, endBuf)
+        if found == 0 {
+            libc.free(startBuf)
+            libc.free(endBuf)
+            return Match{Start: -1, End: -1, Text: ""}
+        }
+        // Reassemble 4-byte little-endian integers for start and end positions
+        start := int(startBuf[0]) | (int(startBuf[1]) << 8) |
+                 (int(startBuf[2]) << 16) | (int(startBuf[3]) << 24)
+        end := int(endBuf[0]) | (int(endBuf[1]) << 8) |
+               (int(endBuf[2]) << 16) | (int(endBuf[3]) << 24)
+        libc.free(startBuf)
+        libc.free(endBuf)
+        // Extract matched substring as a managed string so it is released
+        // when the Match is dropped.
+        matchLen := end - start
+        matchText := str.Substr(text, start, matchLen)
+        return Match{Start: start, End: end, Text: matchText}
+    }
+
+    // FindAll returns all non-overlapping matches in the text.
+    pub fn FindAll(self: Regex, text: string) -> []Match {
+        var matches []Match
+        if self.handle == 0 {
+            return matches
+        }
+        textLen := int(libc.strlen(text))
+        offset := 0
+        startBuf := libc.malloc(4)
+        endBuf := libc.malloc(4)
+        for offset <= textLen {
+            found := Skink_regex_find_at(self.handle, text, offset, startBuf, endBuf)
+            if found == 0 {
+                break
+            }
+            // Reassemble 4-byte little-endian integers for start and end positions
+            start := int(startBuf[0]) | (int(startBuf[1]) << 8) |
+                     (int(startBuf[2]) << 16) | (int(startBuf[3]) << 24)
+            end := int(endBuf[0]) | (int(endBuf[1]) << 8) |
+                   (int(endBuf[2]) << 16) | (int(endBuf[3]) << 24)
+            matchLen := end - start
+            matchText := str.Substr(text, start, matchLen)
+            matches = append(matches, Match{Start: start, End: end, Text: matchText})
+            if end == offset {
+                // Empty match — advance by 1 to avoid infinite loop
+                offset = offset + 1
+            } else {
+                offset = end
+            }
+        }
+        libc.free(startBuf)
+        libc.free(endBuf)
+        return matches
+    }
+
+    // ReplaceAll replaces all non-overlapping matches with replacement.
+    pub fn ReplaceAll(self: Regex, text: string, replacement: string) -> string {
+        if self.handle == 0 {
+            return text
+        }
+        matches := self.FindAll(text)
+        if len(matches) == 0 {
+            return text
+        }
+        replLen := int(libc.strlen(replacement))
+        textLen := int(libc.strlen(text))
+        // Calculate result size by subtracting match lengths and adding replacement lengths
+        resultSize := textLen
+        for i := 0; i < len(matches); i = i + 1 {
+            matchLen := matches[i].End - matches[i].Start
+            resultSize = resultSize - matchLen + replLen
+        }
+        result := libc.malloc(resultSize + 1)
+        pos := 0
+        resultPos := 0
+        for i := 0; i < len(matches); i = i + 1 {
+            // Copy text before match
+            beforeLen := matches[i].Start - pos
+            if beforeLen > 0 {
+                libc.memcpy(string(int64(result) + int64(resultPos)),
+                           string(int64(text) + int64(pos)), beforeLen)
+                resultPos = resultPos + beforeLen
+            }
+            // Copy replacement
+            if replLen > 0 {
+                libc.memcpy(string(int64(result) + int64(resultPos)),
+                           replacement, replLen)
+                resultPos = resultPos + replLen
+            }
+            pos = matches[i].End
+        }
+        // Copy remaining text after last match
+        remaining := textLen - pos
+        if remaining > 0 {
+            libc.memcpy(string(int64(result) + int64(resultPos)),
+                       string(int64(text) + int64(pos)), remaining)
+            resultPos = resultPos + remaining
+        }
+        result[resultPos] = 0 // Null-terminate the result string
+        return result
+    }
+
+    // Free destroys the underlying POSIX regex handle and releases its memory.
+    pub fn Free(self: *Regex) {
+        if self.handle != int64(0) {
+            Skink_regex_free(self.handle)
+            self.handle = int64(0)
+        }
+    }
+}
+
+// Compile compiles a POSIX extended regular expression pattern.
+// Returns (Regex, error) where error.message == "" on success.
+pub fn Compile(pattern: string) -> (Regex, errors.Error) {
+    errorBuf := libc.malloc(256)
+    handle := Skink_regex_compile(pattern, errorBuf, 256)
+    if handle == 0 {
+        // Copy the error into an RC-managed string so it is released when
+        // the Error goes out of scope; the temporary errorBuf can then be freed.
+        errMsg := str.Substr(errorBuf, 0, int(libc.strlen(errorBuf)))
+        libc.free(errorBuf)
+        return Regex{handle: 0, Pattern: pattern}, errors.New(errMsg)
+    }
+    libc.free(errorBuf)
+    return Regex{handle: handle, Pattern: pattern}, errors.New("")
+}
+
+// MustCompile compiles a pattern and panics on error.
+pub fn MustCompile(pattern: string) -> Regex {
+    r, err := Compile(pattern)
+    if err.message != "" {
+        panic("regex compile failed: " + err.message)
+    }
+    return r
+}
+
+// MatchString is a convenience function that compiles the pattern and
+// checks if text contains a match.
+pub fn MatchString(pattern: string, text: string) -> bool {
+    r, err := Compile(pattern)
+    if err.message != "" {
+        return false
+    }
+    result := r.Match(text)
+    Skink_regex_free(r.handle) // Clean up the compiled regex
+    return result
+}
+
+// FindAll is a convenience function that compiles the pattern and
+// returns all matches in text.
+pub fn FindAll(pattern: string, text: string) -> []Match {
+    r, err := Compile(pattern)
+    if err.message != "" {
+        return []
+    }
+    matches := r.FindAll(text)
+    Skink_regex_free(r.handle) // Clean up the compiled regex
+    return matches
+}
+
+// ReplaceAll is a convenience function that compiles the pattern and
+// replaces all matches in text with replacement.
+pub fn ReplaceAll(pattern: string, text: string, replacement: string) -> string {
+    r, err := Compile(pattern)
+    if err.message != "" {
+        return text
+    }
+    result := r.ReplaceAll(text, replacement)
+    Skink_regex_free(r.handle) // Clean up the compiled regex
+    return result
+}

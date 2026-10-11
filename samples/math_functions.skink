@@ -1,0 +1,104 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/math_functions.skink
+// Purpose: Demonstrates mathematical functions from std/math.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/math"
+import "std/io"
+import "std/strconv"
+
+pub fn main() {
+    io.PrintLine("=== Math Functions Demo ===")
+    io.PrintLine("")
+
+    // --- Constants ---
+    io.PrintLine("--- Constants ---")
+    io.PrintLine("Pi  = " + strconv.FormatFloat(math.Pi, 15))
+    io.PrintLine("E   = " + strconv.FormatFloat(math.E, 15))
+    io.PrintLine("Sqrt2 = " + strconv.FormatFloat(math.Sqrt2, 15))
+    io.PrintLine("Ln2 = " + strconv.FormatFloat(math.Ln2, 15))
+    io.PrintLine("Ln10 = " + strconv.FormatFloat(math.Ln10, 15))
+    io.PrintLine("")
+
+    // --- Basic functions ---
+    io.PrintLine("--- Basic Functions ---")
+    io.PrintLine("Sqrt(16) = " + strconv.FormatFloat(math.Sqrt(16.0), 2))
+    io.PrintLine("Abs(-5.5) = " + strconv.FormatFloat(math.Abs(-5.5), 1))
+    io.PrintLine("Abs(5.5) = " + strconv.FormatFloat(math.Abs(5.5), 1))
+    io.PrintLine("Ceil(3.2) = " + strconv.FormatFloat(math.Ceil(3.2), 1))
+    io.PrintLine("Floor(3.8) = " + strconv.FormatFloat(math.Floor(3.8), 1))
+    io.PrintLine("Round(3.5) = " + strconv.FormatFloat(math.Round(3.5), 1))
+    io.PrintLine("Round(3.4) = " + strconv.FormatFloat(math.Round(3.4), 1))
+    io.PrintLine("")
+
+    // --- Trigonometric functions ---
+    io.PrintLine("--- Trigonometric Functions ---")
+    io.PrintLine("Sin(0) = " + strconv.FormatFloat(math.Sin(0.0), 6))
+    io.PrintLine("Sin(Pi/2) = " + strconv.FormatFloat(math.Sin(math.Pi / 2.0), 6))
+    io.PrintLine("Cos(0) = " + strconv.FormatFloat(math.Cos(0.0), 6))
+    io.PrintLine("Cos(Pi) = " + strconv.FormatFloat(math.Cos(math.Pi), 6))
+    io.PrintLine("Tan(Pi/4) = " + strconv.FormatFloat(math.Tan(math.Pi / 4.0), 6))
+    io.PrintLine("Asin(1) = " + strconv.FormatFloat(math.Asin(1.0), 6))
+    io.PrintLine("Acos(0) = " + strconv.FormatFloat(math.Acos(0.0), 6))
+    io.PrintLine("Atan(1) = " + strconv.FormatFloat(math.Atan(1.0), 6))
+    io.PrintLine("")
+
+    // --- Exponential and logarithmic ---
+    io.PrintLine("--- Exponential & Logarithmic ---")
+    io.PrintLine("Exp(0) = " + strconv.FormatFloat(math.Exp(0.0), 6))
+    io.PrintLine("Exp(1) = " + strconv.FormatFloat(math.Exp(1.0), 6))
+    io.PrintLine("Log(1) = " + strconv.FormatFloat(math.Log(1.0), 6))
+    io.PrintLine("Log(E) = " + strconv.FormatFloat(math.Log(math.E), 6))
+    io.PrintLine("Log10(100) = " + strconv.FormatFloat(math.Log10(100.0), 6))
+    io.PrintLine("Log10(1000) = " + strconv.FormatFloat(math.Log10(1000.0), 6))
+    io.PrintLine("")
+
+    // --- Power functions ---
+    io.PrintLine("--- Power Functions ---")
+    io.PrintLine("Pow(2, 3) = " + strconv.FormatFloat(math.Pow(2.0, 3.0), 1))
+    io.PrintLine("Pow(2, 10) = " + strconv.FormatFloat(math.Pow(2.0, 10.0), 1))
+    io.PrintLine("Pow(10, 2) = " + strconv.FormatFloat(math.Pow(10.0, 2.0), 1))
+    io.PrintLine("Pow(3, 0.5) = " + strconv.FormatFloat(math.Pow(3.0, 0.5), 6))
+    io.PrintLine("")
+
+    // --- Practical calculations ---
+    io.PrintLine("--- Practical: Circle Calculations ---")
+    radius := 5.0
+    area := math.Pi * math.Pow(radius, 2.0)
+    circumference := 2.0 * math.Pi * radius
+    io.PrintLine("Circle with radius " + strconv.FormatFloat(radius, 1))
+    io.PrintLine("  Area = " + strconv.FormatFloat(area, 4))
+    io.PrintLine("  Circumference = " + strconv.FormatFloat(circumference, 4))
+    io.PrintLine("")
+
+    // --- Practical: Compound interest ---
+    io.PrintLine("--- Practical: Compound Interest ---")
+    principal := 1000.0
+    rate := 0.05
+    years := 10
+    amount := principal * math.Exp(float(years) * math.Log(1.0 + rate))
+    io.PrintLine("Principal: $" + strconv.FormatFloat(principal, 2))
+    io.PrintLine("Rate: " + strconv.FormatFloat(rate * 100, 1) + "%")
+    io.PrintLine("Years: " + strconv.Itoa(years))
+    io.PrintLine("Final amount: $" + strconv.FormatFloat(amount, 2))
+}

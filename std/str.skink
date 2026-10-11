@@ -1,0 +1,361 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/str.skink
+// Purpose: String manipulation utilities including length, comparison,
+//          search, split, join, replace, case conversion, and a Builder.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+module str
+
+import "std/libc"
+
+extern fn Skink_mem_alloc(size: int64) -> string
+
+// managedAlloc allocates a GC-managed string of the given byte size.
+fn managedAlloc(size: int) -> string {
+    return Skink_mem_alloc(int64(size))
+}
+
+// Builder is a growable byte buffer for efficiently constructing strings.
+pub struct Builder {
+    buf: string
+    len: int
+    cap: int
+}
+
+// NewBuilder creates a new Builder with at least cap bytes of capacity.
+pub fn NewBuilder(cap: int) -> Builder {
+    // Enforce a minimum capacity of 1 so the buffer is always valid.
+    if cap < 1 {
+        cap = 1
+    }
+    b := Builder{buf: managedAlloc(cap), len: 0, cap: cap}
+    b.buf[0] = 0
+    return b
+}
+
+// Write appends the contents of s to the builder.
+pub fn Write(self: *Builder, s: string) {
+    n := Len(s)
+    self.ensure(n)
+    if n > 0 {
+        // Copy into the buffer at the current write offset.
+        libc.memcpy(string(int64(self.buf) + int64(self.len)), s, n)
+    }
+    self.len = self.len + n
+    self.buf[self.len] = 0
+}
+
+// WriteByte appends a single byte b to the builder.
+pub fn WriteByte(self: *Builder, b: int) {
+    self.ensure(1)
+    self.buf[self.len] = b
+    self.len = self.len + 1
+    self.buf[self.len] = 0
+}
+
+// String returns a null-terminated copy of the builder's contents.
+pub fn String(self: Builder) -> string {
+    result := managedAlloc(self.len + 1)
+    if self.len > 0 {
+        libc.memcpy(result, self.buf, self.len)
+    }
+    result[self.len] = 0
+    return result
+}
+
+// BuilderValue returns the builder's internal buffer without copying.
+pub fn BuilderValue(self: Builder) -> string {
+    return self.buf
+}
+
+// LenBuilder returns the number of bytes currently stored in the builder.
+pub fn LenBuilder(self: Builder) -> int {
+    return self.len
+}
+
+// Reset discards all data in the builder, returning it to length 0.
+pub fn Reset(self: *Builder) {
+    self.len = 0
+    if self.cap > 0 {
+        self.buf[0] = 0
+    }
+}
+
+// Free releases the heap memory used by the builder.
+pub fn Free(self: *Builder) {
+    if self.cap > 0 {
+        libc.free(self.buf)
+        self.buf = ""
+        self.len = 0
+        self.cap = 0
+    }
+}
+
+// ensure grows the backing allocation if there is not enough room for extra bytes.
+fn ensure(self: *Builder, extra: int) {
+    need := self.len + extra + 1
+    if need <= self.cap {
+        return
+    }
+    // Double the capacity, or use the exact requirement if larger.
+    newCap := self.cap * 2
+    if newCap < need {
+        newCap = need
+    }
+    self.buf = libc.realloc(self.buf, newCap)
+    self.cap = newCap
+}
+
+// Len returns the length of s in bytes (excluding the null terminator).
+pub fn Len(s: string) -> int {
+    if s == "" {
+        return 0
+    }
+    return libc.strlen(s)
+}
+
+// Compare compares two strings lexicographically.
+// Returns -1 if a < b, 0 if equal, 1 if a > b.
+pub fn Compare(a: string, b: string) -> int {
+    if a == "" && b == "" { return 0 }
+    if a == "" { return -1 }
+    if b == "" { return 1 }
+    return libc.strcmp(a, b)
+}
+
+// Equal reports whether two strings are equal.
+pub fn Equal(a: string, b: string) -> bool {
+    if a == "" && b == "" { return true }
+    if a == "" || b == "" { return false }
+    return libc.strcmp(a, b) == 0
+}
+
+// Contains reports whether s contains the substring needle.
+pub fn Contains(s: string, needle: string) -> bool {
+    if needle == "" { return true }
+    if s == "" { return false }
+    // strstr returns a non-null pointer if the substring is found.
+    return int(libc.strstr(s, needle)) != 0
+}
+
+// Concat returns a new string that is the concatenation of a and b.
+//
+// Performance note: Concat always allocates a new RC-managed string via
+// managedAlloc (Skink_mem_alloc). For repeated concatenation (e.g. building
+// a string in a loop), use str.Builder instead, which amortizes allocation
+// by growing a buffer. High-frequency callers like the LSP should prefer
+// Builder to avoid per-call allocation overhead.
+pub fn Concat(a: string, b: string) -> string {
+    la := Len(a)
+    lb := Len(b)
+    result := managedAlloc(la + lb + 1)
+    if la > 0 { libc.memcpy(result, a, la) }
+    // Copy b after a in the result buffer.
+    if lb > 0 { libc.memcpy(string(int64(result) + int64(la)), b, lb) }
+    result[la + lb] = 0
+    return result
+}
+
+// Substr returns a substring of s starting at start with the given length.
+// Out-of-range values are clamped to valid bounds.
+//
+// Performance note: like Concat, Substr always allocates a new RC-managed
+// string. For extracting many small substrings from the same source,
+// consider indexing into the source string directly (Skink strings are
+// byte-indexable) or using a slice/reader pattern to avoid per-call
+// allocation.
+pub fn Substr(s: string, start: int, length: int) -> string {
+    n := Len(s)
+    // Clamp start and length to valid bounds.
+    if start < 0 { start = 0 }
+    if start > n { start = n }
+    if length < 0 { length = 0 }
+    if start + length > n { length = n - start }
+    result := managedAlloc(length + 1)
+    if length > 0 {
+        libc.memcpy(result, string(int64(s) + int64(start)), length)
+    }
+    result[length] = 0
+    return result
+}
+
+// Trim removes leading and trailing whitespace from s.
+pub fn Trim(s: string) -> string {
+    n := Len(s)
+    start := 0
+    end := n
+    // Skip leading whitespace.
+    for start < end && isSpace(s[start]) { start = start + 1 }
+    // Skip trailing whitespace.
+    for end > start && isSpace(s[end - 1]) { end = end - 1 }
+    return Substr(s, start, end - start)
+}
+
+// isSpace reports whether c is a whitespace character (space, tab, newline, CR).
+fn isSpace(c: int) -> bool {
+    return c == 32 || c == 9 || c == 10 || c == 13
+}
+
+// matchesAt reports whether part occurs at position pos in s.
+fn matchesAt(s: string, pos: int, part: string) -> bool {
+    n := Len(part)
+    if pos < 0 || pos + n > Len(s) { return false }
+    for i := 0; i < n; i = i + 1 {
+        if s[pos + i] != part[i] { return false }
+    }
+    return true
+}
+
+// StartsWith reports whether s begins with prefix.
+pub fn StartsWith(s: string, prefix: string) -> bool {
+    return matchesAt(s, 0, prefix)
+}
+
+// EndsWith reports whether s ends with suffix.
+pub fn EndsWith(s: string, suffix: string) -> bool {
+    n := Len(s)
+    m := Len(suffix)
+    if m > n { return false }
+    return matchesAt(s, n - m, suffix)
+}
+
+// IndexOf returns the byte offset of the first occurrence of part in s,
+// or -1 if not found.
+pub fn IndexOf(s: string, part: string) -> int {
+    if part == "" { return 0 }
+    pos := libc.strstr(s, part)
+    if int(pos) == 0 { return -1 }
+    // Compute the offset by subtracting the base pointer.
+    return int(int64(pos) - int64(s))
+}
+
+// LastIndexOf returns the byte offset of the last occurrence of part in s,
+// or -1 if not found.
+pub fn LastIndexOf(s: string, part: string) -> int {
+    n := Len(s)
+    m := Len(part)
+    if m == 0 { return n }
+    if m > n { return -1 }
+    // Scan backwards from the last possible start position.
+    i := n - m
+    for i >= 0 {
+        if matchesAt(s, i, part) { return i }
+        i = i - 1
+    }
+    return -1
+}
+
+// Split splits s on the separator sep and returns a slice of substrings.
+pub fn Split(s: string, sep: string) -> []string {
+    var result []string
+    m := Len(sep)
+    // Empty separator: return the whole string as a single element.
+    if m == 0 {
+        result = append(result, s)
+        return result
+    }
+    start := 0
+    n := Len(s)
+    i := 0
+    for i <= n - m {
+        if matchesAt(s, i, sep) {
+            result = append(result, Substr(s, start, i - start))
+            start = i + m
+            i = start
+        } else {
+            i = i + 1
+        }
+    }
+    // Append the remaining text after the last separator.
+    result = append(result, Substr(s, start, n - start))
+    return result
+}
+
+// Join concatenates the elements of parts, separated by sep.
+pub fn Join(parts: []string, sep: string) -> string {
+    result := ""
+    i := 0
+    while i < len(parts) {
+        // Insert the separator before every element except the first.
+        if i > 0 { result = Concat(result, sep) }
+        result = Concat(result, parts[i])
+        i = i + 1
+    }
+    return result
+}
+
+// Replace returns a copy of s with all occurrences of old replaced by new.
+pub fn Replace(s: string, old: string, new: string) -> string {
+    oldLen := Len(old)
+    if oldLen == 0 { return Concat(s, "") }
+    result := ""
+    i := 0
+    n := Len(s)
+    for i < n {
+        if matchesAt(s, i, old) {
+            result = Concat(result, new)
+            i = i + oldLen
+        } else {
+            // Copy one character at a time when no match is found.
+            result = Concat(result, Substr(s, i, 1))
+            i = i + 1
+        }
+    }
+    return result
+}
+
+// ToLower returns a copy of s with all ASCII letters converted to lowercase.
+pub fn ToLower(s: string) -> string {
+    n := Len(s)
+    result := managedAlloc(n + 1)
+    for i := 0; i < n; i = i + 1 { result[i] = libc.tolower(s[i]) }
+    result[n] = 0
+    return result
+}
+
+// ToUpper returns a copy of s with all ASCII letters converted to uppercase.
+pub fn ToUpper(s: string) -> string {
+    n := Len(s)
+    result := managedAlloc(n + 1)
+    for i := 0; i < n; i = i + 1 { result[i] = libc.toupper(s[i]) }
+    result[n] = 0
+    return result
+}
+
+// Repeat returns a new string consisting of count copies of s.
+pub fn Repeat(s: string, count: int) -> string {
+    if count <= 0 { return Concat("", "") }
+    n := Len(s)
+    if n == 0 { return Concat("", "") }
+    // Check for integer overflow: n * count must not exceed INT_MAX
+    if n > 2147483647 / count {
+        return Concat("", "")
+    }
+    total := n * count
+    result := managedAlloc(total + 1)
+    // Copy s repeatedly into the result buffer.
+    for i := 0; i < count; i = i + 1 {
+        for j := 0; j < n; j = j + 1 {
+            result[i * n + j] = s[j]
+        }
+    }
+    result[total] = 0
+    return result
+}

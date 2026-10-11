@@ -1,0 +1,117 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/async_test.skink
+// Purpose: Regression tests for async/await — async f(args) returns a
+//          future handle, await p blocks until the spawned thread
+//          finishes and yields the result.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module async_test
+
+import "testing"
+import "std/str"
+
+fn fibSlow(n: int) -> int {
+    if n < 2 { return n }
+    return fibSlow(n - 1) + fibSlow(n - 2)
+}
+
+fn greet(name: string) -> string {
+    return str.Concat("hello, ", name)
+}
+
+fn noArgs() -> int {
+    return 99
+}
+
+fn doubleIt(x: float) -> float {
+    return x * 2.0
+}
+
+var voidRan: int
+
+fn setFlag() {
+    voidRan = 1
+}
+
+struct Pair { a: int, b: int }
+
+fn makePair(a: int, b: int) -> Pair {
+    return Pair{a: a, b: b}
+}
+
+// TestAsyncInt verifies async int return via await.
+pub fn TestAsyncInt() {
+    p := async fibSlow(10)
+    v := await p
+    testing.AssertEqualInt(55, v, "async int result")
+}
+
+// TestAsyncString verifies async string return survives thread boundary.
+pub fn TestAsyncString() {
+    p := async greet("skink")
+    v := await p
+    testing.AssertEqualString("hello, skink", v, "async string result survives thread boundary")
+}
+
+// TestAsyncNoArgs verifies async call with no arguments returns result.
+pub fn TestAsyncNoArgs() {
+    p := async noArgs()
+    v := await p
+    testing.AssertEqualInt(99, v, "async no-arg result")
+}
+
+// TestAsyncFloat verifies async float return via await.
+pub fn TestAsyncFloat() {
+    p := async doubleIt(2.5)
+    v := await p
+    testing.AssertEqualFloat(5.0, v, "async float result")
+}
+
+// TestAsyncStruct verifies async struct return via await.
+pub fn TestAsyncStruct() {
+    p := async makePair(3, 4)
+    v := await p
+    testing.AssertEqualInt(7, v.a + v.b, "async struct result")
+}
+
+// TestAsyncConcurrent verifies two concurrent async tasks complete.
+pub fn TestAsyncConcurrent() {
+    p1 := async fibSlow(8)
+    p2 := async fibSlow(9)
+    a := await p1
+    b := await p2
+    testing.AssertEqualInt(21 + 34, a + b, "two concurrent async tasks")
+}
+
+// TestAsyncVoidJoin verifies await on void async joins the task.
+pub fn TestAsyncVoidJoin() {
+    voidRan = 0
+    p := async setFlag()
+    await p
+    testing.AssertEqualInt(1, voidRan, "await on void async joins the task")
+}
+
+// TestAsyncUsedInExpr verifies await result is usable in arithmetic.
+pub fn TestAsyncUsedInExpr() {
+    p := async fibSlow(7)
+    total := await p + 1
+    testing.AssertEqualInt(14, total, "await result usable in arithmetic")
+}

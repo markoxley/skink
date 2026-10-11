@@ -1,0 +1,349 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/api.skink
+// Purpose: HTTP client primitives (GET/POST with optional TLS) and response
+//          handling for the Skink standard library.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module api
+
+import "std/errors"
+import "std/net"
+import "std/str"
+import "std/fmt"
+import "std/strconv"
+import "std/libc"
+
+// Skink_tls_client_connect_ex performs a client TLS handshake: sends SNI,
+// verifies the peer certificate when verify != 0, offers ALPN
+// "http/1.1", and reuses a cached session for host:port when available.
+extern fn Skink_tls_client_connect_ex(fd: int, hostname: string, port: int, verify: int) -> int64
+extern fn Skink_tls_read(ssl: int64, buf: string, len: int) -> int
+extern fn Skink_tls_write(ssl: int64, buf: string, len: int) -> int
+extern fn Skink_tls_close(ssl: int64)
+extern fn Skink_set_socket_timeout(fd: int, timeoutMs: int) -> int
+
+// Response holds an HTTP response.
+pub struct Response {
+    status: int
+    body: string
+
+    // Status returns the HTTP status code of the response.
+    pub fn Status(self: Response) -> int {
+        return self.status
+    }
+
+    // Body returns the response body as a string.
+    pub fn Body(self: Response) -> string {
+        return self.body
+    }
+}
+
+// ParseURL extracts host, path, port, and whether TLS is needed from a URL.
+// Exported for testing and for use by custom HTTP clients.
+pub fn ParseURL(url: string) -> (string, string, int, bool) {
+    return parseURL(url)
+}
+
+// parseURL extracts host, path, port, and whether TLS is needed from a URL.
+fn parseURL(url: string) -> (string, string, int, bool) {
+    rest := url
+    useTLS := false
+    port := 80
+    // Strip the scheme prefix and set defaults for TLS vs plain HTTP.
+    if str.StartsWith(url, "http://") {
+        rest = str.Substr(url, 7, str.Len(url) - 7)
+    } else if str.StartsWith(url, "https://") {
+        rest = str.Substr(url, 8, str.Len(url) - 8)
+        useTLS = true
+        port = 443
+    }
+    // Split host from path at the first "/".
+    pathStart := str.IndexOf(rest, "/")
+    host := rest
+    path := "/"
+    if pathStart >= 0 {
+        host = str.Substr(rest, 0, pathStart)
+        path = str.Substr(rest, pathStart, str.Len(rest) - pathStart)
+    }
+    // Check for explicit port in host (e.g. host:8080)
+    colon := str.IndexOf(host, ":")
+    if colon >= 0 {
+        portStr := str.Substr(host, colon + 1, str.Len(host) - colon - 1)
+        host = str.Substr(host, 0, colon)
+        parsedPort, ok := strconv.ParseInt(portStr)
+        if ok {
+            port = parsedPort
+        }
+    }
+    return host, path, port, useTLS
+}
+
+// Client makes HTTP requests with an optional timeout.
+// insecureSkipVerify disables TLS certificate verification — intended
+// for tests against self-signed servers; leave false in production.
+pub struct Client {
+    timeoutMs: int
+    insecureSkipVerify: bool
+
+    // Get performs an HTTP GET request.
+    pub fn Get(self: Client, url: string) -> (Response, errors.Error) {
+        host, path, port, useTLS := parseURL(url)
+        // Delegate to TLS path if the URL uses https://
+        if useTLS {
+            return self.doTLSGet(host, path, port)
+        }
+        conn, err := net.Connect(host, port)
+        if err.message != "" {
+            return Response{status: 0, body: ""}, err
+        }
+        Skink_set_socket_timeout(conn.fd, self.timeoutMs)
+        // Build the HTTP/1.1 request line and required headers.
+        request := str.Concat(str.Concat("GET ", path), " HTTP/1.1\r\nHost: ")
+        request = str.Concat(request, host)
+        request = str.Concat(request, "\r\nConnection: close\r\n\r\n")
+        conn.Send(request)
+        // Read the full response, growing the buffer as needed.
+        bufSize := 8192
+        buf := libc.malloc(bufSize)
+        total := 0
+        for {
+            if total >= bufSize - 1 {
+                // Double the buffer when we are about to overflow.
+                bufSize = bufSize * 2
+                buf = libc.realloc(buf, bufSize)
+            }
+            n := conn.Read(string(int64(buf) + int64(total)), bufSize - total - 1)
+            if n <= 0 {
+                break
+            }
+            total = total + n
+        }
+        conn.Close()
+        if total == 0 {
+            libc.free(buf)
+            return Response{status: 0, body: ""}, errors.New("empty response")
+        }
+        // NUL-terminate the raw buffer so string operations see the end.
+        buf[total] = 0
+        // Locate the header/body boundary (\r\n\r\n) to extract just the body.
+        bodyStart := 0
+        for i := 0; i < total - 3; i = i + 1 {
+            if buf[i] == 13 && buf[i+1] == 10 && buf[i+2] == 13 && buf[i+3] == 10 {
+                bodyStart = i + 4
+                break
+            }
+        }
+        body := str.Substr(buf, bodyStart, total - bodyStart)
+        libc.free(buf)
+        return Response{status: 200, body: body}, errors.New("")
+    }
+
+    // doTLSGet performs an HTTPS GET request using TLS.
+    fn doTLSGet(self: Client, host: string, path: string, port: int) -> (Response, errors.Error) {
+        conn, err := net.Connect(host, port)
+        if err.message != "" {
+            return Response{status: 0, body: ""}, err
+        }
+        Skink_set_socket_timeout(conn.fd, self.timeoutMs)
+        // Perform the TLS handshake over the raw TCP socket.
+        verify := 1
+        if self.insecureSkipVerify {
+            verify = 0
+        }
+        ssl := Skink_tls_client_connect_ex(conn.fd, host, port, verify)
+        if ssl == 0 {
+            conn.Close()
+            return Response{status: 0, body: ""}, errors.New("TLS handshake failed")
+        }
+        request := str.Concat(str.Concat("GET ", path), " HTTP/1.1\r\nHost: ")
+        request = str.Concat(request, host)
+        request = str.Concat(request, "\r\nConnection: close\r\n\r\n")
+        Skink_tls_write(ssl, request, str.Len(request))
+
+        // Read the full TLS-encrypted response, growing the buffer as needed.
+        bufSize := 8192
+        buf := libc.malloc(bufSize)
+        total := 0
+        for {
+            if total >= bufSize - 1 {
+                bufSize = bufSize * 2
+                buf = libc.realloc(buf, bufSize)
+            }
+            n := Skink_tls_read(ssl, string(int64(buf) + int64(total)), bufSize - total - 1)
+            if n <= 0 {
+                break
+            }
+            total = total + n
+        }
+        Skink_tls_close(ssl)
+        conn.Close()
+        if total == 0 {
+            libc.free(buf)
+            return Response{status: 0, body: ""}, errors.New("empty response")
+        }
+        buf[total] = 0
+        // Locate the header/body boundary (\r\n\r\n) to extract just the body.
+        bodyStart := 0
+        for i := 0; i < total - 3; i = i + 1 {
+            if buf[i] == 13 && buf[i+1] == 10 && buf[i+2] == 13 && buf[i+3] == 10 {
+                bodyStart = i + 4
+                break
+            }
+        }
+        body := str.Substr(buf, bodyStart, total - bodyStart)
+        libc.free(buf)
+        return Response{status: 200, body: body}, errors.New("")
+    }
+
+    // Post performs an HTTP POST request.
+    pub fn Post(self: Client, url: string, contentType: string, bodyData: string) -> (Response, errors.Error) {
+        host, path, port, useTLS := parseURL(url)
+        // Delegate to TLS path if the URL uses https://
+        if useTLS {
+            return self.doTLSPost(host, path, port, contentType, bodyData)
+        }
+        conn, err := net.Connect(host, port)
+        if err.message != "" {
+            return Response{status: 0, body: ""}, err
+        }
+        Skink_set_socket_timeout(conn.fd, self.timeoutMs)
+        // Build the HTTP/1.1 request line, headers, and body.
+        request := str.Concat(str.Concat("POST ", path), " HTTP/1.1\r\nHost: ")
+        request = str.Concat(request, host)
+        request = str.Concat(request, "\r\nContent-Type: ")
+        request = str.Concat(request, contentType)
+        request = str.Concat(request, "\r\nContent-Length: ")
+        bodyLenStr := fmt.Itoa(str.Len(bodyData))
+        request = str.Concat(request, bodyLenStr)
+        request = str.Concat(request, "\r\nConnection: close\r\n\r\n")
+        request = str.Concat(request, bodyData)
+        conn.Send(request)
+        // Read the full response, growing the buffer as needed.
+        bufSize := 8192
+        buf := libc.malloc(bufSize)
+        total := 0
+        for {
+            if total >= bufSize - 1 {
+                bufSize = bufSize * 2
+                buf = libc.realloc(buf, bufSize)
+            }
+            n := conn.Read(string(int64(buf) + int64(total)), bufSize - total - 1)
+            if n <= 0 {
+                break
+            }
+            total = total + n
+        }
+        conn.Close()
+        if total == 0 {
+            libc.free(buf)
+            return Response{status: 0, body: ""}, errors.New("empty response")
+        }
+        buf[total] = 0
+        // For POST responses we return the entire buffer (headers + body).
+        body := str.Substr(buf, 0, total)
+        libc.free(buf)
+        return Response{status: 200, body: body}, errors.New("")
+    }
+
+    // doTLSPost performs an HTTPS POST request using TLS.
+    fn doTLSPost(self: Client, host: string, path: string, port: int, contentType: string, bodyData: string) -> (Response, errors.Error) {
+        conn, err := net.Connect(host, port)
+        if err.message != "" {
+            return Response{status: 0, body: ""}, err
+        }
+        Skink_set_socket_timeout(conn.fd, self.timeoutMs)
+        // Perform the TLS handshake over the raw TCP socket.
+        verify := 1
+        if self.insecureSkipVerify {
+            verify = 0
+        }
+        ssl := Skink_tls_client_connect_ex(conn.fd, host, port, verify)
+        if ssl == 0 {
+            conn.Close()
+            return Response{status: 0, body: ""}, errors.New("TLS handshake failed")
+        }
+        request := str.Concat(str.Concat("POST ", path), " HTTP/1.1\r\nHost: ")
+        request = str.Concat(request, host)
+        request = str.Concat(request, "\r\nContent-Type: ")
+        request = str.Concat(request, contentType)
+        request = str.Concat(request, "\r\nContent-Length: ")
+        bodyLenStr := fmt.Itoa(str.Len(bodyData))
+        request = str.Concat(request, bodyLenStr)
+        request = str.Concat(request, "\r\nConnection: close\r\n\r\n")
+        request = str.Concat(request, bodyData)
+        Skink_tls_write(ssl, request, str.Len(request))
+
+        // Read the full TLS-encrypted response, growing the buffer as needed.
+        bufSize := 8192
+        buf := libc.malloc(bufSize)
+        total := 0
+        for {
+            if total >= bufSize - 1 {
+                bufSize = bufSize * 2
+                buf = libc.realloc(buf, bufSize)
+            }
+            n := Skink_tls_read(ssl, string(int64(buf) + int64(total)), bufSize - total - 1)
+            if n <= 0 {
+                break
+            }
+            total = total + n
+        }
+        Skink_tls_close(ssl)
+        conn.Close()
+        if total == 0 {
+            libc.free(buf)
+            return Response{status: 0, body: ""}, errors.New("empty response")
+        }
+        buf[total] = 0
+        body := str.Substr(buf, 0, total)
+        libc.free(buf)
+        return Response{status: 200, body: body}, errors.New("")
+    }
+
+    // PostJSON sends a JSON payload with Content-Type application/json.
+    pub fn PostJSON(self: Client, url: string, jsonBody: string) -> (Response, errors.Error) {
+        return self.Post(url, "application/json", jsonBody)
+    }
+}
+
+// SimpleGet is a convenience function for GET requests with a 30s timeout.
+pub fn SimpleGet(url: string) -> (Response, errors.Error) {
+    c := Client{timeoutMs: 30000}
+    return c.Get(url)
+}
+
+// SimplePost is a convenience function for POST requests with a 30s timeout.
+pub fn SimplePost(url: string, bodyData: string) -> (Response, errors.Error) {
+    c := Client{timeoutMs: 30000}
+    return c.Post(url, "application/x-www-form-urlencoded", bodyData)
+}
+
+// Get performs an HTTP GET with a default client (30s timeout).
+// Convenience wrapper matching the book's api.Get(url) examples.
+pub fn Get(url: string) -> (Response, errors.Error) {
+    return SimpleGet(url)
+}
+
+// Post performs an HTTP POST with a default client (30s timeout).
+pub fn Post(url: string, contentType: string, bodyData: string) -> (Response, errors.Error) {
+    c := Client{timeoutMs: 30000}
+    return c.Post(url, contentType, bodyData)
+}

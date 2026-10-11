@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Exec(make)",
+      "Exec(true)",
+      "Exec(bash)",
+      "Exec(SKINK_HOME=\"$(pwd)\" timeout)",
+      "Exec(timeout)",
+      "Exec(cp)",
+      "Exec(SKINK_HOME=\"$(pwd)\" ./skink)",
+      "Exec(sed)",
+      "Exec(find)",
+      "Exec(grep)",
+      "Exec(awk)",
+      "Exec(diff)",
+      "Exec(head)",
+      "Exec(python3)",
+      "Exec(xargs)",
+      "Exec(cat)",
+      "Exec(git status)",
+      "Exec(git add)",
+      "Exec(/tmp/nested_test2_bin)",
+      "Exec(/tmp/nested_test_bin)",
+      "Exec(git commit)",
+      "Exec(/tmp/error_test_bin)",
+      "Exec(mkdir)",
+      "Exec(git show)",
+      "Exec(chmod)",
+      "Exec(basename)",
+      "Exec(SKINK_HOME=/home/mark/Documents/GitHub/skink /home/mark/Documents/GitHub/skink/skink)",
+      "Exec(/tmp/test_interp)"
+    ]
+  }
+}

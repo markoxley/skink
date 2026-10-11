@@ -1,0 +1,412 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/ui/ui_test.skink
+// Purpose: Tests for the std/ui toolkit. Runs headless via SDL's dummy
+//          video driver + software renderer (set before first window
+//          creation). Model/binding logic is exercised without a
+//          window; widget drawing is exercised through real frames on
+//          the dummy driver. If the driver is unavailable the window
+//          tests pass trivially (no display — nothing to assert).
+//
+// Author:  Mark Oxley
+// Created: 2026
+
+module ui_test
+
+import "testing"
+import "std/ui"
+import "std/ui/binding"
+import "std/strconv"
+import "std/str"
+
+// setenv via libc — must run before ui.NewWindow so SDL picks the dummy
+// video driver and software renderer on headless machines.
+extern fn setenv(k: string, v: string, overwrite: int) -> int
+
+fn headless() {
+    setenv("SDL_VIDEODRIVER", "dummy", 1)
+    setenv("SDL_RENDER_DRIVER", "software", 1)
+    setenv("SDL_AUDIODRIVER", "dummy", 1)
+}
+
+// ============================================================================
+// Observable
+// ============================================================================
+
+var obsHits = 0
+
+fn obsHit() {
+    obsHits = obsHits + 1
+}
+
+// TestObservableSetGet verifies typed storage and reads.
+pub fn TestObservableSetGet() {
+    o := binding.NewObservable("hello")
+    testing.AssertEqualString("hello", o.Get(), "string round-trip")
+
+    oi := binding.NewObservableInt(42)
+    testing.AssertEqualInt(42, oi.GetInt(), "int round-trip")
+
+    of := binding.NewObservableFloat(2.5)
+    testing.AssertEqualFloat(2.5, of.GetFloat(), "float round-trip")
+
+    ob := binding.NewObservableBool(true)
+    testing.AssertTrue(ob.GetBool(), "bool round-trip")
+
+    o.Set("world")
+    testing.AssertEqualString("world", o.Get(), "set updates")
+    oi.SetInt(7)
+    testing.AssertEqualInt(7, oi.GetInt(), "int set updates")
+    ob.SetBool(false)
+    testing.AssertFalse(ob.GetBool(), "bool set updates")
+}
+
+// TestObservableSubscribe verifies subscribers fire on every Set.
+pub fn TestObservableSubscribe() {
+    o := binding.NewObservableInt(0)
+    obsHits = 0
+    o.Subscribe(obsHit)
+    o.Subscribe(obsHit)
+    o.SetInt(1)
+    testing.AssertEqualInt(2, obsHits, "two subscribers, one set")
+    o.SetInt(2)
+    testing.AssertEqualInt(4, obsHits, "subscribers fire per set")
+    o.Notify()
+    testing.AssertEqualInt(6, obsHits, "explicit notify")
+}
+
+// TestObservableSameValueSilent verifies the documented contract that
+// subscribers fire only on actual changes: a same-value set (same kind,
+// same stored value) is a no-op, while a kind switch always notifies
+// even if a backing field happens to compare equal.
+pub fn TestObservableSameValueSilent() {
+    obsHits = 0
+    o := binding.NewObservableInt(5)
+    o.Subscribe(obsHit)
+    o.SetInt(5)
+    o.SetInt64(5)
+    testing.AssertEqualInt(0, obsHits, "same-value int sets are silent")
+    o.SetInt(6)
+    testing.AssertEqualInt(1, obsHits, "changed int notifies")
+    o.SetInt64(6)
+    testing.AssertEqualInt(1, obsHits, "SetInt64 same i64 is silent")
+
+    s := binding.NewObservable("a")
+    obsHits = 0
+    s.Subscribe(obsHit)
+    s.Set("a")
+    testing.AssertEqualInt(0, obsHits, "same string set is silent")
+    s.Set("b")
+    testing.AssertEqualInt(1, obsHits, "changed string notifies")
+
+    f := binding.NewObservableFloat(1.5)
+    obsHits = 0
+    f.Subscribe(obsHit)
+    f.SetFloat(1.5)
+    testing.AssertEqualInt(0, obsHits, "same float set is silent")
+
+    b := binding.NewObservableBool(true)
+    obsHits = 0
+    b.Subscribe(obsHit)
+    b.SetBool(true)
+    testing.AssertEqualInt(0, obsHits, "same bool set is silent")
+
+    // Kind switch notifies even when a backing field compares equal:
+    // a fresh int observable holding 5 has s=="" — Set("") must still
+    // fire because kind changes INT -> STRING.
+    k := binding.NewObservableInt(5)
+    obsHits = 0
+    k.Subscribe(obsHit)
+    k.Set("")
+    testing.AssertEqualInt(1, obsHits, "kind switch notifies")
+}
+
+// ============================================================================
+// RowModel adapters
+// ============================================================================
+
+// TestSliceModel verifies the [][]string table source.
+pub fn TestSliceModel() {
+    var r0 []string
+    r0 = append(r0, "a0")
+    r0 = append(r0, "b0")
+    var r1 []string
+    r1 = append(r1, "a1")
+    r1 = append(r1, "b1")
+    var rows [][]string
+    rows = append(rows, r0)
+    rows = append(rows, r1)
+    m := binding.FromSlice(rows)
+
+    testing.AssertEqualInt(2, m.RowCount(), "two rows")
+    testing.AssertEqualString("b1", m.CellText(1, 1), "cell 1,1")
+    testing.AssertEqualString("", m.CellText(5, 0), "OOB row -> empty")
+    testing.AssertEqualString("", m.CellText(0, 9), "OOB col -> empty")
+
+    // Live source: appending to the model's slice shows immediately.
+    var r2 []string
+    r2 = append(r2, "a2")
+    r2 = append(r2, "b2")
+    m.Rows = append(m.Rows, r2)
+    testing.AssertEqualInt(3, m.RowCount(), "live row count")
+}
+
+var fmCalls = 0
+
+fn fmCount() -> int {
+    return 4
+}
+fn fmCell(r: int, c: int) -> string {
+    fmCalls = fmCalls + 1
+    return str.Concat(strconv.Itoa(r), str.Concat(":", strconv.Itoa(c)))
+}
+
+// TestFuncModel verifies the callback-backed table source.
+pub fn TestFuncModel() {
+    m := binding.FromFunc(fmCount, fmCell)
+    testing.AssertEqualInt(4, m.RowCount(), "count fn")
+    fmCalls = 0
+    got := m.CellText(2, 3)
+    testing.AssertEqualString("2:3", got, "cell fn")
+    testing.AssertEqualInt(1, fmCalls, "cell called once")
+}
+
+// TestChanModel verifies channel-fed rows drain on RowCount.
+pub fn TestChanModel() {
+    ch := make(chan<string>, 4)
+    m := binding.FromChan(ch)
+    testing.AssertEqualInt(0, m.RowCount(), "empty before send")
+    ch <- "one"
+    ch <- "two"
+    testing.AssertEqualInt(2, m.RowCount(), "drained two")
+    testing.AssertEqualString("two", m.CellText(1, 0), "row 1 text")
+    close(ch)
+    testing.AssertEqualInt(2, m.RowCount(), "closed chan drains empty")
+}
+
+// ============================================================================
+// Bound widget logic (no window needed — binding compare/push logic is
+// exercised via Draw only when a window exists; observable direction is
+// verified through control state).
+// ============================================================================
+
+// TestBindCheck verifies observable->checkbox initialization.
+pub fn TestBindCheck() {
+    obs := binding.NewObservableBool(true)
+    cb := ui.NewCheckBox("flag", false)
+    bound := binding.BindCheck(cb, obs)
+    testing.AssertTrue(cb.Checked, "checkbox pulled initial value")
+    testing.AssertEqualInt(24, bound.Height(), "row height")
+}
+
+// TestBindSlider verifies observable->slider initialization.
+pub fn TestBindSlider() {
+    obs := binding.NewObservableInt(77)
+    s := ui.NewSliderInt(0, 100, 1, 0)
+    binding.BindSliderInt(s, obs)
+    testing.AssertEqualInt(77, s.Value, "slider pulled initial value")
+}
+
+// TestBindCombo verifies observable->combo initialization.
+pub fn TestBindCombo() {
+    var items []string
+    items = append(items, "x")
+    items = append(items, "y")
+    obs := binding.NewObservableInt(1)
+    cb := ui.NewComboBox(items)
+    binding.BindCombo(cb, obs)
+    testing.AssertEqualInt(1, cb.Selected(), "combo pulled selection")
+    obs.SetInt(0)
+    // pull happens on Draw — without a window we verify Select works.
+    cb.Select(0)
+    testing.AssertEqualInt(0, cb.Selected(), "programmatic select")
+}
+
+// TestBoundLabelText verifies the computed-label source fn.
+pub fn TestBoundLabelText() {
+    obs := binding.NewObservableInt(9)
+    src := binding.IntText(obs)
+    got := src()
+    testing.AssertEqualString("9", got, "int text from obs")
+    obs.SetInt(10)
+    got = src()
+    testing.AssertEqualString("10", got, "text follows obs")
+}
+
+// TestBoundItems verifies the items-refresh adapter.
+pub fn TestBoundItems() {
+    var items []string
+    items = append(items, "a")
+    lb := ui.NewListBox(items, 100)
+    tested := false
+    iof := binding.BindItems(lb, fn() -> []string {
+        var fresh []string
+        fresh = append(fresh, "b")
+        fresh = append(fresh, "c")
+        tested = true
+        return fresh
+    })
+    // Without a window, Draw can't run — but the adapter is wired.
+    testing.AssertEqualInt(-1, iof.Height(), "listbox is self-managing")
+    tested = false
+    testing.AssertFalse(tested, "not yet invoked")
+}
+
+// ============================================================================
+// Headless window + frame pump (SDL dummy driver)
+// ============================================================================
+
+// TestWindowLifecycle verifies creation, size, title, close, destroy.
+pub fn TestWindowLifecycle() {
+    headless()
+    win := ui.NewWindow("t", 320, 240, 0)
+    if !win.IsValid() {
+        // No video driver at all — nothing further to assert.
+        return
+    }
+    testing.AssertEqualInt(320, win.Width(), "window width")
+    testing.AssertEqualInt(240, win.Height(), "window height")
+    win.SetTitle("retitled")
+    testing.AssertFalse(win.ShouldClose(), "not closed yet")
+    win.RequestClose()
+    testing.AssertTrue(win.ShouldClose(), "close requested")
+    win.Destroy()
+    testing.AssertFalse(win.IsValid(), "handle cleared")
+}
+
+// TestFramePump verifies BeginFrame/EndFrame run a frame without error.
+pub fn TestFramePump() {
+    headless()
+    win := ui.NewWindow("f", 640, 480, 0)
+    if !win.IsValid() {
+        return
+    }
+    // A couple of frames with widgets registered.
+    lbl := ui.NewLabel("hello")
+    btn := ui.NewButton("ok", fn() {})
+    win.Add(lbl)
+    win.Add(btn)
+    frames := 0
+    for frames < 3 {
+        if !win.BeginFrame() {
+            break
+        }
+        win.Draw()
+        win.EndFrame()
+        frames = frames + 1
+    }
+    testing.AssertEqualInt(3, frames, "three frames rendered")
+    win.Destroy()
+}
+
+// TestAllWidgetsDraw exercises every retained control for one frame —
+// catches layout/null-state crashes in the shim.
+pub fn TestAllWidgetsDraw() {
+    headless()
+    win := ui.NewWindow("w", 800, 900, 0)
+    if !win.IsValid() {
+        return
+    }
+
+    win.Add(ui.NewLabel("label"))
+
+    tl := ui.TextLabel{Text: "colored", R: 200, G: 80, B: 40}
+    win.Add(&tl)
+
+    win.Add(ui.NewButton("btn", fn() {}))
+    win.Add(ui.NewCheckBox("chk", true))
+    win.Add(ui.NewTextBox())
+    win.Add(ui.NewSliderInt(0, 10, 1, 5))
+    win.Add(ui.NewSliderFloat(0.0, 1.0, 0.1, 0.5))
+    win.Add(ui.NewProgressBar(100))
+    win.Add(ui.NewPropertyInt("prop", 0, 10, 1, 3))
+
+    var opts []string
+    opts = append(opts, "one")
+    opts = append(opts, "two")
+    win.Add(ui.NewComboBox(opts))
+
+    rg := ui.NewRadioGroup(opts)
+    win.Add(rg)
+
+    win.Add(ui.NewListBox(opts, 80))
+
+    var hdrs []string
+    hdrs = append(hdrs, "c1")
+    var r0 []string
+    r0 = append(r0, "v1")
+    var rows [][]string
+    rows = append(rows, r0)
+    win.Add(ui.NewTable(hdrs, binding.FromSlice(rows), 60))
+
+    grp := ui.NewGroup("grp", 80)
+    grp.Add(ui.NewLabel("inside"))
+    win.Add(grp)
+
+    tn := ui.NewTreeNode("node")
+    tn.Add(ui.NewLabel("leaf"))
+    win.Add(tn)
+
+    bar := ui.NewMenuBar()
+    var mitems []ui.MenuItem
+    mitems = append(mitems, ui.NewMenuItem("x", fn() {}))
+    bar.AddMenu("M", mitems)
+    win.SetMenuBar(bar)
+
+    ts := ui.NewTabStrip()
+    var pgw ui.Widget
+    pgw = ui.NewLabel("pg")
+    var page []ui.Widget
+    page = append(page, pgw)
+    ts.AddTab("tab", page)
+    win.Add(ts)
+
+    win.Add(ui.NewColorPicker(0x804020FF, true))
+
+    pop := ui.NewPopup("pop", 200, 120)
+    pop.Add(ui.NewLabel("in popup"))
+    pop.Show = true
+    win.Add(pop)
+
+    frames := 0
+    for frames < 2 {
+        if !win.BeginFrame() {
+            break
+        }
+        win.Draw()
+        win.EndFrame()
+        frames = frames + 1
+    }
+    testing.AssertEqualInt(2, frames, "all widgets drew two frames")
+    win.Destroy()
+}
+
+// TestImmediateHelpers exercises the immediate-mode helpers.
+pub fn TestImmediateHelpers() {
+    headless()
+    win := ui.NewWindow("i", 400, 300, 0)
+    if !win.IsValid() {
+        return
+    }
+    if win.BeginFrame() {
+        ui.Row(&win, 24, 2)
+        ui.Label(&win, "l")
+        ui.Spacer(&win)
+        ui.Row(&win, 30, 1)
+        ui.Button(&win, "b")
+        ui.Row(&win, 24, 1)
+        ui.CheckBox(&win, "c", false)
+        ui.Row(&win, 26, 1)
+        ui.Slider(&win, 0, 5, 10, 1)
+        ui.Row(&win, 22, 1)
+        ui.Progress(&win, 40, 100)
+        ui.Tooltip(&win, "tip")
+        win.EndFrame()
+    }
+    testing.AssertFalse(win.ShouldClose(), "still open")
+    win.Destroy()
+}

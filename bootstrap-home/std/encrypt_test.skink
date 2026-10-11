@@ -1,0 +1,238 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/encrypt_test.skink
+// Purpose: Skink module for encrypt test.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module encrypt_test
+
+import "std/encrypt"
+import "std/str"
+import "std/strconv"
+import "testing"
+
+// Test AES key must be exactly 16, 24, or 32 bytes.
+const aesKey128 = "0123456789abcdef"
+const aesKey256 = "0123456789abcdef0123456789abcdef"
+
+// TestRSAKeyPEM is a 2048-bit RSA key pair for testing.
+// Generated with: openssl genrsa -out test.pem 2048
+const rsaPubKey = `-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqapjM4qvGejn6Rb53A+D
+oS8xJ8TPnmMdxEpeZWpvMSaIjTb5fhhW2kSCOZ4rbf4PgYKZ0oNIGpLkZnxpD671
+59xI3hZ2dJGQihMn1YtkN/V62L5F9Kf8Shm0NVlsZ5EeNuuXrdy+GcgoFnyZGKYd
+B8O5zgiNynsQXQagWSiZNZp30NJB/W1rlFBmSRFyPqfaShPIK9KHa9r2nnCbhkx9
+8HAzFGjifkPCJRYduhMjovIpkbo/16/nlMwJYoShkvBecplxNXQOGATN1dIHc2iE
+M7WLtdKgiLV5eSpbZ3C1qxhawWR3sTfW1Aw8KvcpATy0v9RIcnh6P5rexOFwE3Ch
+rwIDAQAB
+-----END PUBLIC KEY-----`
+
+const rsaPrivKey = `-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCpqmMziq8Z6Ofp
+FvncD4OhLzEnxM+eYx3ESl5lam8xJoiNNvl+GFbaRII5nitt/g+BgpnSg0gakuRm
+fGkPrvXn3EjeFnZ0kZCKEyfVi2Q39XrYvkX0p/xKGbQ1WWxnkR4265et3L4ZyCgW
+fJkYph0Hw7nOCI3KexBdBqBZKJk1mnfQ0kH9bWuUUGZJEXI+p9pKE8gr0odr2vae
+cJuGTH3wcDMUaOJ+Q8IlFh26EyOi8imRuj/Xr+eUzAlihKGS8F5ymXE1dA4YBM3V
+0gdzaIQztYu10qCItXl5KltncLWrGFrBZHexN9bUDDwq9ykBPLS/1EhyeHo/mt7E
+4XATcKGvAgMBAAECggEAOQCsfJwbEU7tX6QfBT7XIBfNYYmfoZy2WwULavJT8kT6
+esteDm3Z/FIpGHeaKsXBauc4jAAcgQUaJI6m86R6LNCXULpmSOrBD4q5Budin+Rj
+Rh/DPBwWSMUTBRuKrs8UQipsFvdDjUDwqwFopF3nAf1R1zWLgdxP1plL1TitJNM5
+KEscY3jIKmiAgdjihtNrqDT2r3PWFqYP+zBGIu6sFl3CTkGa/hCbJYwcdM7GpUVg
+zLwbwddzEHyvNTE6wiRzkDqKZUt8Z8l8G85WjCW1ZalHPTC3/kAfr34yRO12/2MQ
++oLJltgloiWJZXf3PlW6swqj2BctZVfpLlICUEe/+QKBgQDc27cx8QXqH2RVs9gG
+DBau0uzwq2YhxSNfnTaTfOz73lr+N/GaIZwrYPw88JRR/IKvidQw+FJhElk14CRC
+6PI9rP0CJR3CXqD9KYMqAaUVKuAAtfYlCo0xQHJqw3K45LLXvF7/SBHDtBggbuMl
+cHr6UXUItQT0eGRddgHM2JIWSQKBgQDEqWzWD1UNfa5Js0THCJn9HtE8iyGaTufV
+Nzqtv3oKK8eFfcwo4AoskqN6izh+/wYiF4OlGyWXTJFrV6HMiWmdCOeQOwaGAU02
+2ZajPG3le1wcOMGm469mt3wMZE4Gk/Kx6507JJWBEXb//N5yoXhkpaQS6rgYqZQ4
+js/Rbj8YNwKBgDy+bXdd7BuFgMoVib+4CXER8DsNWSzGlMESc1VDUcbAVFSBPIEA
+53wC071LCfA2vBbdmK/TTI0IR+MKf86rVRzjfD7fyHySHEMk7L9b7nSQ80UextFP
+QqAeMpnsoZv6wrmVRKd/wesKmGwrM2wzsI8yYjb/2poGlswhzcLyedOJAoGAe9YE
+BrcY46nkedw8zugHr3AcaXdi7XwKWCSy+n28J3Nx7AlO6d5KCc88ygmoxa9o+Ua9
+StZRUXiRiXphFB7jNlNJHXVNokxnhsZ1KM0AlqSbV9oVdzWgWZnorxTqXRIEnSy0
+kW10BxYsTP26RYyP9zCmpJLQ4hbGkua6zjIR4PkCgYEAxAM4BIL5hSJ/TgO2ANz8
+koE+Es4mP+oVjwvv043BJGzm9yg7JU7t9O9E6s0/UaZ3e9LB4PPE8jT26nezgANq
+mua1h5dlHSNYWIokj/oKADrWkjoaQAcpOysjtkW9Cd49yL17K+zc2jgIf1rWgelS
+iah1H7nIB/6mWssSJbFTcv8=
+-----END PRIVATE KEY-----`
+
+// bytesEqual compares two raw byte buffers by length and content.
+// Unlike str.Equal (which uses strcmp), this handles buffers that may
+// contain embedded null bytes.
+fn bytesEqual(a: string, b: string, len: int) -> bool {
+    if len <= 0 {
+        return true
+    }
+    for i := 0; i < len; i = i + 1 {
+        if a[i] != b[i] {
+            return false
+        }
+    }
+    return true
+}
+
+// TestAES128Roundtrip verifies AES-128-GCM encrypt then decrypt restores
+// the original plaintext.
+pub fn TestAES128Roundtrip() {
+    aes := encrypt.NewAES(aesKey128)
+    plaintext := "hello world"
+    result, e1 := aes.Encrypt(plaintext, 11)
+    if e1.message != "" {
+        Errorf("AES-128 Encrypt should not error: " + e1.message)
+    }
+    // GCM: 12 (nonce) + 16 (tag) + 11 (ciphertext) = 39
+    if result.length != 39 {
+        Errorf("AES-128 ciphertext+nonce+tag should be 39 bytes, got " + strconv.Itoa(result.length))
+    }
+    restored, e2 := aes.Decrypt(result.data, result.length)
+    if e2.message != "" {
+        Errorf("AES-128 Decrypt should not error: " + e2.message)
+    }
+    if restored.length != 11 {
+        Errorf("AES-128 restored length should be 11, got " + strconv.Itoa(restored.length))
+    }
+    if bytesEqual(restored.data, plaintext, restored.length) == false {
+        Errorf("AES-128 roundtrip should restore plaintext")
+    }
+}
+
+// TestAES256Roundtrip verifies AES-256-GCM encrypt then decrypt.
+pub fn TestAES256Roundtrip() {
+    aes := encrypt.NewAES(aesKey256)
+    plaintext := "hello world"
+    result, e1 := aes.Encrypt(plaintext, 11)
+    if e1.message != "" {
+        Errorf("AES-256 Encrypt should not error: " + e1.message)
+    }
+    restored, e2 := aes.Decrypt(result.data, result.length)
+    if e2.message != "" {
+        Errorf("AES-256 Decrypt should not error: " + e2.message)
+    }
+    if restored.length != 11 {
+        Errorf("AES-256 restored length should be 11, got " + strconv.Itoa(restored.length))
+    }
+    if bytesEqual(restored.data, plaintext, restored.length) == false {
+        Errorf("AES-256 roundtrip should restore plaintext")
+    }
+}
+
+// TestAESEmptyData verifies AES-GCM with empty data.
+pub fn TestAESEmptyData() {
+    aes := encrypt.NewAES(aesKey128)
+    result, e1 := aes.Encrypt("", 0)
+    if e1.message != "" {
+        Errorf("AES Encrypt empty should not error: " + e1.message)
+    }
+    // GCM: 12 (nonce) + 16 (tag) + 0 (ciphertext) = 28
+    if result.length != 28 {
+        Errorf("AES empty encrypt should produce 28 bytes, got " + strconv.Itoa(result.length))
+    }
+    restored, e2 := aes.Decrypt(result.data, result.length)
+    if e2.message != "" {
+        Errorf("AES Decrypt empty should not error: " + e2.message)
+    }
+    if restored.length != 0 {
+        Errorf("AES empty roundtrip should restore length 0, got " + strconv.Itoa(restored.length))
+    }
+}
+
+// TestAESDifferentKeys verifies different keys produce different ciphertext.
+pub fn TestAESDifferentKeys() {
+    key1 := "0123456789abcdef"
+    key2 := "fedcba9876543210"
+    aes1 := encrypt.NewAES(key1)
+    aes2 := encrypt.NewAES(key2)
+    plain := "hello world"
+    r1, _ := aes1.Encrypt(plain, 11)
+    r2, _ := aes2.Encrypt(plain, 11)
+    if r1.length != r2.length {
+        Errorf("Ciphertext lengths should match")
+    }
+    same := true
+    for i := 0; i < r1.length; i = i + 1 {
+        if r1.data[i] != r2.data[i] {
+            same = false
+        }
+    }
+    if same == true {
+        Errorf("Different keys should produce different ciphertext")
+    }
+}
+
+// TestAESWrongKey verifies decryption with wrong key fails.
+pub fn TestAESWrongKey() {
+    aes1 := encrypt.NewAES("0123456789abcdef")
+    aes2 := encrypt.NewAES("fedcba9876543210")
+    result, _ := aes1.Encrypt("secret data", 11)
+    _, e := aes2.Decrypt(result.data, result.length)
+    if e.message == "" {
+        Errorf("Decryption with wrong key should fail")
+    }
+}
+
+// TestAESInvalidKey verifies invalid key lengths are rejected.
+pub fn TestAESInvalidKey() {
+    aes := encrypt.NewAES("short")
+    _, e := aes.Encrypt("data", 4)
+    if e.message == "" {
+        Errorf("Invalid key length should be rejected")
+    }
+}
+
+// TestRSARoundtrip verifies RSA encrypt then decrypt restores the message.
+pub fn TestRSARoundtrip() {
+    rsa := encrypt.NewRSA(rsaPubKey, rsaPrivKey)
+    msg := "test message"
+    result, e1 := rsa.Encrypt(msg, 11)
+    if e1.message != "" {
+        Errorf("RSA Encrypt should not error: " + e1.message)
+    }
+    if result.length <= 0 {
+        Errorf("RSA ciphertext length should be positive, got " + strconv.Itoa(result.length))
+    }
+    restored, e2 := rsa.Decrypt(result.data, result.length)
+    if e2.message != "" {
+        Errorf("RSA Decrypt should not error: " + e2.message)
+    }
+    if restored.length != 11 {
+        Errorf("RSA restored length should be 11, got " + strconv.Itoa(restored.length))
+    }
+    if bytesEqual(restored.data, msg, restored.length) == false {
+        Errorf("RSA roundtrip should restore message")
+    }
+}
+
+// TestRSANoPrivateKey verifies decryption fails without a private key.
+pub fn TestRSANoPrivateKey() {
+    rsa := encrypt.NewRSA(rsaPubKey, "")
+    _, e := rsa.Decrypt("dummy", 5)
+    if e.message == "" {
+        Errorf("RSA Decrypt without private key should fail")
+    }
+}
+
+// TestRSANoPublicKey verifies encryption fails without a public key.
+pub fn TestRSANoPublicKey() {
+    rsa := encrypt.NewRSA("", rsaPrivKey)
+    _, e := rsa.Encrypt("dummy", 5)
+    if e.message == "" {
+        Errorf("RSA Encrypt without public key should fail")
+    }
+}

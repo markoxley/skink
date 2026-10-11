@@ -1,0 +1,7 @@
+// expect: cannot send
+module main
+fn main() -> int {
+    ch := make(chan<int>)
+    ch <- "not an int"
+    return 0
+}

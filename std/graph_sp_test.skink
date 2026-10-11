@@ -1,0 +1,60 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/graph_sp_test.skink
+// Purpose: Tests for WGraph Dijkstra shortest path (Phase 4 graph.skink).
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module graph_sp_test
+
+import "testing"
+import "std/graph"
+import "std/str"
+
+// TestShortestPathDirect verifies direct edge shortest path.
+pub fn TestShortestPathDirect() {
+    g := graph.New()
+    g.AddEdge("A", "B", 1.0)
+    path, dist := g.ShortestPath("A", "B")
+    testing.AssertEqualInt(2, len(path), "path length")
+    testing.AssertEqualFloat(1.0, dist, "direct distance")
+    testing.AssertEqualString("A", path[0], "path start")
+    testing.AssertEqualString("B", path[1], "path end")
+}
+
+// TestShortestPathVia verifies shortest path picks cheaper route.
+pub fn TestShortestPathVia() {
+    g := graph.New()
+    g.AddEdge("A", "C", 10.0)
+    g.AddEdge("A", "B", 1.0)
+    g.AddEdge("B", "C", 2.0)
+    path, dist := g.ShortestPath("A", "C")
+    testing.AssertEqualFloat(3.0, dist, "via B is cheaper")
+    testing.AssertEqualInt(3, len(path), "path via B")
+}
+
+// TestShortestPathNoRoute verifies no route returns empty path.
+pub fn TestShortestPathNoRoute() {
+    g := graph.New()
+    g.AddNode("X")
+    g.AddNode("Y")
+    path, dist := g.ShortestPath("X", "Y")
+    testing.AssertEqualInt(0, len(path), "no route -> empty path")
+    testing.AssertEqualFloat(0.0, dist, "no route -> 0")
+}

@@ -1,0 +1,18 @@
+# Build artifacts
+skink
+skink_stage2
+*.ll
+*.o
+*.o.tmp
+dist/
+.skink-rt-*/
+# Generated version module
+version.skink
+
+# Test scratch files and binaries
+test_*
+dump_tokens
+plus_test
+__skink_test_bin
+# Local artifacts (stale binaries, scratch tests, planning notes)
+artifacts/

@@ -1,0 +1,65 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/api_client.skink
+// Purpose: Skink module for api client.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/api"
+import "std/io"
+import "std/strconv"
+
+pub fn main() {
+    // Create a client with a 5-second timeout
+    c := api.Client{timeoutMs: 5000}
+
+    // Simple GET request
+    io.PrintLine("=== GET http://httpbin.org/get ===")
+    resp, err := c.Get("http://httpbin.org/get")
+    if err.message != "" {
+        io.PrintErrorLine("Request failed: " + err.message)
+    } else {
+        io.PrintLine("Status: " + strconv.Itoa(resp.Status()))
+        io.PrintLine("Body: " + resp.Body())
+    }
+
+    // POST with JSON
+    io.PrintLine("")
+    io.PrintLine("=== POST http://httpbin.org/post ===")
+    resp2, err2 := c.PostJSON("http://httpbin.org/post", "{\"name\": \"skink\", \"type\": \"compiler\"}")
+    if err2.message != "" {
+        io.PrintErrorLine("Request failed: " + err2.message)
+    } else {
+        io.PrintLine("Status: " + strconv.Itoa(resp2.Status()))
+        io.PrintLine("Body: " + resp2.Body())
+    }
+
+    // SimpleGet convenience function
+    io.PrintLine("")
+    io.PrintLine("=== SimpleGet http://httpbin.org/uuid ===")
+    resp3, err3 := api.SimpleGet("http://httpbin.org/uuid")
+    if err3.message != "" {
+        io.PrintErrorLine("Request failed: " + err3.message)
+    } else {
+        io.PrintLine("Status: " + strconv.Itoa(resp3.Status()))
+        io.PrintLine("Body: " + resp3.Body())
+    }
+}

@@ -1,0 +1,509 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/hashmap_test.skink
+// Purpose: Skink module for hashmap test.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module hashmap_test
+
+import "std/hashmap"
+import "std/str"
+import "std/strconv"
+import "testing"
+
+// TestNewEmpty verifies that a new map reports no entries.
+pub fn TestNewEmpty() {
+    m := hashmap.New<int, int>()
+    if m.count != 0 {
+        Errorf("New map should be empty")
+    }
+}
+
+// TestPutGet verifies that a stored value can be retrieved.
+pub fn TestPutGet() {
+    m := hashmap.New<int, int>()
+    m.Put(42, 100)
+    val, err := m.Get(42)
+    if err.message != "" {
+        Errorf("Get should not error for existing key")
+    }
+    if val != 100 {
+        Errorf("Get should return the stored value")
+    }
+}
+
+// TestHas verifies Has returns true for existing keys.
+pub fn TestHas() {
+    m := hashmap.New<int, int>()
+    m.Put(1, 10)
+    if m.Has(1) == false {
+        Errorf("Has should return true for existing key")
+    }
+    if m.Has(2) == true {
+        Errorf("Has should return false for missing key")
+    }
+}
+
+// TestUpdate verifies that Put overwrites an existing value.
+pub fn TestUpdate() {
+    m := hashmap.New<int, int>()
+    m.Put(7, 70)
+    m.Put(7, 77)
+    val, err := m.Get(7)
+    if err.message != "" {
+        Errorf("Get should not error for existing key")
+    }
+    if val != 77 {
+        Errorf("Put should overwrite existing value")
+    }
+}
+
+// TestStringKeys verifies the map works with string keys and values
+// using the same variable for Put and Get.
+pub fn TestStringKeys() {
+    m := hashmap.New<string, string>()
+    key := "hello"
+    m.Put(key, "world")
+    val, err := m.Get(key)
+    if err.message != "" {
+        Errorf("Get should not error for existing key")
+    }
+    if val != "world" {
+        Errorf("String key map should store and retrieve correctly")
+    }
+}
+
+// TestStringKeysContentEquality verifies that string keys are compared by
+// content, not pointer identity. Two distinct allocations of the same string
+// content must be treated as the same key.
+pub fn TestStringKeysContentEquality() {
+    m := hashmap.New<string, string>()
+    // Insert with a literal.
+    m.Put("hello", "world")
+    // Look up with a freshly constructed equal-content string that has a
+    // different allocation address.
+    lookup := str.Concat("hel", "lo")
+    if lookup != "hello" {
+        Errorf("Sanity: concat should produce hello")
+    }
+    val, err := m.Get(lookup)
+    if err.message != "" {
+        Errorf("Get should find key by content equality, not pointer identity")
+    }
+    if val != "world" {
+        Errorf("Get should return the stored value for content-equal key")
+    }
+}
+
+// TestStringKeysMultiple verifies multiple string keys with content lookup.
+pub fn TestStringKeysMultiple() {
+    m := hashmap.New<string, string>()
+    m.Put("apple", "red")
+    m.Put("banana", "yellow")
+    m.Put("cherry", "red")
+    // Look up each with a freshly concatenated key (different allocation).
+    a := str.Concat("ap", "ple")
+    val, err := m.Get(a)
+    if err.message != "" {
+        Errorf("Get should find apple by content")
+    }
+    if val != "red" {
+        Errorf("apple should be red")
+    }
+    b := str.Concat("ban", "ana")
+    val2, err2 := m.Get(b)
+    if err2.message != "" {
+        Errorf("Get should find banana by content")
+    }
+    if val2 != "yellow" {
+        Errorf("banana should be yellow")
+    }
+    c := str.Concat("ch", "erry")
+    val3, err3 := m.Get(c)
+    if err3.message != "" {
+        Errorf("Get should find cherry by content")
+    }
+    if val3 != "red" {
+        Errorf("cherry should be red")
+    }
+}
+
+// TestStringKeyHas verifies Has works with content equality for strings.
+pub fn TestStringKeyHas() {
+    m := hashmap.New<string, int>()
+    m.Put("foo", 1)
+    lookup := str.Concat("f", "oo")
+    if m.Has(lookup) == false {
+        Errorf("Has should return true for content-equal string key")
+    }
+    if m.Has("bar") == true {
+        Errorf("Has should return false for missing string key")
+    }
+}
+
+// TestMultipleEntries verifies multiple key-value pairs.
+pub fn TestMultipleEntries() {
+    m := hashmap.New<int, int>()
+    m.Put(1, 10)
+    m.Put(2, 20)
+    m.Put(3, 30)
+    v1, e1 := m.Get(1)
+    if e1.message != "" {
+        Errorf("Get should not error for existing key")
+    }
+    if v1 != 10 {
+        Errorf("Multiple entries should all be retrievable")
+    }
+    v2, e2 := m.Get(2)
+    if e2.message != "" {
+        Errorf("Get should not error for existing key")
+    }
+    if v2 != 20 {
+        Errorf("Multiple entries should all be retrievable")
+    }
+    v3, e3 := m.Get(3)
+    if e3.message != "" {
+        Errorf("Get should not error for existing key")
+    }
+    if v3 != 30 {
+        Errorf("Multiple entries should all be retrievable")
+    }
+}
+
+// TestLen verifies the Len method returns the correct count.
+pub fn TestLen() {
+    m := hashmap.New<int, int>()
+    if m.Len() != 0 {
+        Errorf("Len should be 0 for new map")
+    }
+    m.Put(1, 10)
+    if m.Len() != 1 {
+        Errorf("Len should be 1 after one Put")
+    }
+    m.Put(2, 20)
+    if m.Len() != 2 {
+        Errorf("Len should be 2 after two Puts")
+    }
+    m.Put(1, 11)
+    if m.Len() != 2 {
+        Errorf("Len should not change when updating existing key")
+    }
+}
+
+// TestDeleteBasic verifies that Delete removes an entry.
+pub fn TestDeleteBasic() {
+    m := hashmap.New<int, int>()
+    m.Put(42, 100)
+    err := m.Delete(42)
+    if err.message != "" {
+        Errorf("Delete should succeed for existing key")
+    }
+    if m.Has(42) {
+        Errorf("Has should return false after Delete")
+    }
+    if m.Len() != 0 {
+        Errorf("Len should be 0 after deleting the only entry")
+    }
+}
+
+// TestDeleteNonExistent verifies that Delete returns an error for a
+// missing key and does not modify the map.
+pub fn TestDeleteNonExistent() {
+    m := hashmap.New<int, int>()
+    m.Put(1, 10)
+    err := m.Delete(99)
+    if err.message == "" {
+        Errorf("Delete should return error for missing key")
+    }
+    if m.Len() != 1 {
+        Errorf("Len should be unchanged after failed Delete")
+    }
+    if m.Has(1) == false {
+        Errorf("Existing key should still be present after failed Delete")
+    }
+}
+
+// TestDeleteAndReAdd verifies that a deleted key's slot can be reused.
+pub fn TestDeleteAndReAdd() {
+    m := hashmap.New<int, int>()
+    m.Put(5, 50)
+    m.Delete(5)
+    m.Put(5, 55)
+    val, err := m.Get(5)
+    if err.message != "" {
+        Errorf("Get should find re-added key")
+    }
+    if val != 55 {
+        Errorf("Re-added key should have new value")
+    }
+    if m.Len() != 1 {
+        Errorf("Len should be 1 after delete and re-add")
+    }
+}
+
+// TestDeleteProbeChain verifies that deleting an entry from the middle of
+// a probe chain does not break lookups of entries that probed past it.
+// This tests the backward-shift deletion algorithm.
+pub fn TestDeleteProbeChain() {
+    m := hashmap.New<int, int>()
+    // Insert enough entries to guarantee probe chains exist. With an
+    // initial capacity of 8, inserting 5 entries ensures some collisions.
+    m.Put(1, 11)
+    m.Put(2, 22)
+    m.Put(3, 33)
+    m.Put(4, 44)
+    m.Put(5, 55)
+    // Delete a key that is likely in the middle of a probe chain.
+    m.Delete(3)
+    // All remaining keys must still be findable.
+    keys := []int{1, 2, 4, 5}
+    vals := []int{11, 22, 44, 55}
+    i := 0
+    while i < 4 {
+        v, e := m.Get(keys[i])
+        if e.message != "" {
+            Errorf("Get should find remaining key after Delete")
+        }
+        if int(v) != vals[i] {
+            Errorf("Remaining key should have correct value after Delete")
+        }
+        i = i + 1
+    }
+    // The deleted key should not be found.
+    if m.Has(3) {
+        Errorf("Deleted key should not be found")
+    }
+    if m.Len() != 4 {
+        Errorf("Len should be 4 after deleting one of five entries")
+    }
+}
+
+// TestDeleteAll verifies deleting all entries one by one.
+pub fn TestDeleteAll() {
+    m := hashmap.New<int, int>()
+    i := 0
+    while i < 10 {
+        m.Put(i, i * 10)
+        i = i + 1
+    }
+    if m.Len() != 10 {
+        Errorf("Len should be 10 after inserting 10 entries")
+    }
+    i = 0
+    while i < 10 {
+        err := m.Delete(i)
+        if err.message != "" {
+            Errorf("Delete should succeed for existing key")
+        }
+        i = i + 1
+    }
+    if m.Len() != 0 {
+        Errorf("Len should be 0 after deleting all entries")
+    }
+    // Verify all keys are gone.
+    i = 0
+    while i < 10 {
+        if m.Has(i) {
+            Errorf("No keys should remain after deleting all")
+        }
+        i = i + 1
+    }
+}
+
+// TestDeleteStringKeys verifies Delete works with string keys using
+// content equality.
+pub fn TestDeleteStringKeys() {
+    m := hashmap.New<string, int>()
+    m.Put("alpha", 1)
+    m.Put("beta", 2)
+    m.Put("gamma", 3)
+    // Delete using a different allocation with the same content.
+    delKey := str.Concat("be", "ta")
+    err := m.Delete(delKey)
+    if err.message != "" {
+        Errorf("Delete should succeed for content-equal string key")
+    }
+    if m.Has("beta") {
+        Errorf("Has should return false for deleted string key")
+    }
+    // Remaining keys should still be found by content.
+    a := str.Concat("al", "pha")
+    v, e := m.Get(a)
+    if e.message != "" {
+        Errorf("Get should find remaining string key by content")
+    }
+    if v != 1 {
+        Errorf("Remaining string key should have correct value")
+    }
+    if m.Len() != 2 {
+        Errorf("Len should be 2 after deleting one of three string keys")
+    }
+}
+
+// TestResize verifies that the map grows correctly when many entries are
+// inserted and all remain retrievable after resizing.
+pub fn TestResize() {
+    m := hashmap.New<int, int>()
+    i := 0
+    while i < 100 {
+        m.Put(i, i * i)
+        i = i + 1
+    }
+    if m.Len() != 100 {
+        Errorf("Len should be 100 after inserting 100 entries")
+    }
+    // All entries should be retrievable.
+    i = 0
+    while i < 100 {
+        v, e := m.Get(i)
+        if e.message != "" {
+            Errorf("Get should find key after resize")
+        }
+        if int(v) != i * i {
+            Errorf("Value should be correct after resize")
+        }
+        i = i + 1
+    }
+}
+
+// TestStressMixed verifies a mixed sequence of inserts, deletes, and
+// lookups to exercise resize, probe chains, and backward-shift deletion
+// together.
+pub fn TestStressMixed() {
+    m := hashmap.New<int, int>()
+    // Insert 0..49.
+    i := 0
+    while i < 50 {
+        m.Put(i, i + 1000)
+        i = i + 1
+    }
+    // Delete even keys.
+    i = 0
+    while i < 50 {
+        m.Delete(i)
+        i = i + 2
+    }
+    // Verify: even keys gone, odd keys present with correct values.
+    i = 0
+    while i < 50 {
+        if m.Has(i) {
+            if i % 2 == 0 {
+                Errorf("Even key should have been deleted")
+            } else {
+                v, e := m.Get(i)
+                if e.message != "" {
+                    Errorf("Odd key should be found")
+                }
+                if int(v) != i + 1000 {
+                    Errorf("Odd key should have correct value")
+                }
+            }
+        } else {
+            if i % 2 != 0 {
+                Errorf("Odd key should still be present")
+            }
+        }
+        i = i + 1
+    }
+    if m.Len() != 25 {
+        Errorf("Len should be 25 after deleting 25 of 50 entries")
+    }
+    // Re-add some deleted keys.
+    m.Put(0, 999)
+    m.Put(10, 888)
+    if m.Len() != 27 {
+        Errorf("Len should be 27 after re-adding 2 keys")
+    }
+    v0, e0 := m.Get(0)
+    if e0.message != "" || int(v0) != 999 {
+        Errorf("Re-added key 0 should have value 999")
+    }
+    v10, e10 := m.Get(10)
+    if e10.message != "" || int(v10) != 888 {
+        Errorf("Re-added key 10 should have value 888")
+    }
+}
+
+// TestStringKeyResize verifies that string keys survive a resize and remain
+// findable by content equality.
+pub fn TestStringKeyResize() {
+    m := hashmap.New<string, int>()
+    i := 0
+    // Insert enough string keys to trigger at least one resize.
+    while i < 30 {
+        key := str.Concat("key", strconv.Itoa(i))
+        m.Put(key, i)
+        i = i + 1
+    }
+    if m.Len() != 30 {
+        Errorf("Len should be 30 after inserting 30 string keys")
+    }
+    // Look up each key using a freshly concatenated string (different
+    // allocation) to verify content equality after resize.
+    i = 0
+    while i < 30 {
+        lookup := str.Concat("ke", str.Concat("y", strconv.Itoa(i)))
+        v, e := m.Get(lookup)
+        if e.message != "" {
+            Errorf("Get should find string key by content after resize")
+        }
+        if int(v) != i {
+            Errorf("String key should have correct value after resize")
+        }
+        i = i + 1
+    }
+}
+
+// TestGetMissingReturnsError verifies that Get returns an error for a key
+// that was never inserted.
+pub fn TestGetMissingReturnsError() {
+    m := hashmap.New<int, int>()
+    m.Put(1, 10)
+    val, err := m.Get(99)
+    if err.message == "" {
+        Errorf("Get should return error for missing key")
+    }
+    if val != 0 {
+        Errorf("Get should return zero value for missing key")
+    }
+}
+
+// TestGetFromEmptyMap verifies that Get on an uninitialized map returns an
+// error and zero value.
+pub fn TestGetFromEmptyMap() {
+    m := hashmap.New<int, int>()
+    val, err := m.Get(1)
+    if err.message == "" {
+        Errorf("Get should return error for empty map")
+    }
+    if val != 0 {
+        Errorf("Get should return zero value for empty map")
+    }
+}
+
+// TestDeleteFromEmptyMap verifies that Delete on an uninitialized map
+// returns an error.
+pub fn TestDeleteFromEmptyMap() {
+    m := hashmap.New<int, int>()
+    err := m.Delete(1)
+    if err.message == "" {
+        Errorf("Delete should return error for empty map")
+    }
+}

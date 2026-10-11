@@ -1,0 +1,435 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/resolver.skink
+// Purpose: Module resolver that recursively discovers, parses, and
+//          loads all transitive imports for a Skink source file,
+//          qualifying declaration names by their owning module.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module resolver
+
+import "std/ast"
+import "std/lexer"
+import "std/parser"
+import "std/str"
+
+extern fn fopen(path: string, mode: string) -> int64
+extern fn fclose(fp: int64) -> int
+extern fn fread(buf: string, size: int, count: int, fp: int64) -> int
+extern fn fseek(fp: int64, offset: int64, whence: int) -> int
+extern fn ftell(fp: int64) -> int64
+
+// FileInfo holds the parsed contents of a single resolved source file.
+struct FileInfo {
+    path: string
+    moduleName: string
+    declarations: []ast.Stmt
+}
+
+// Resolver tracks loaded files, their load state (unvisited / in-progress /
+// done), accumulated errors, and the standard-library search root.
+struct Resolver {
+    files: []FileInfo
+    states: map[string]int
+    errors: []string
+    searchRoot: string
+}
+
+// joinPath concatenates two path components, inserting a "/" separator
+// only when the first component is non-empty and does not already end with "/".
+fn joinPath(a: string, b: string) -> string {
+    if str.Len(a) == 0 {
+        return b
+    }
+    if str.Substr(a, str.Len(a) - 1, 1) == "/" {
+        return str.Concat(a, b)
+    }
+    return str.Concat(str.Concat(a, "/"), b)
+}
+
+// lastSlash returns the index of the final "/" in p, or -1 if none.
+fn lastSlash(p: string) -> int {
+    for i := str.Len(p) - 1; i >= 0; i = i - 1 {
+        if str.Substr(p, i, 1) == "/" {
+            return i
+        }
+    }
+    return -1
+}
+
+// dirName returns the directory portion of p, equivalent to POSIX dirname.
+fn dirName(p: string) -> string {
+    idx := lastSlash(p)
+    if idx < 0 {
+        return "."
+    }
+    if idx == 0 {
+        return "/"
+    }
+    return str.Substr(p, 0, idx)
+}
+
+// baseName returns the final path component of p, equivalent to POSIX basename.
+fn baseName(p: string) -> string {
+    idx := lastSlash(p)
+    if idx < 0 {
+        return p
+    }
+    return str.Substr(p, idx + 1, str.Len(p) - idx - 1)
+}
+
+// normalizePath produces a canonical spelling of p by collapsing duplicate
+// slashes, dropping "." components, and resolving ".." against earlier
+// segments. The same physical file reached through different relative
+// spellings (e.g. "./lib/x.skink" vs "././lib/x.skink") yields a single
+// canonical path, which is what allows loadFile's state map to deduplicate
+// diamond imports (comp_error.md #25).
+fn normalizePath(p: string) -> string {
+    if str.Len(p) == 0 {
+        return p
+    }
+    absolute := str.StartsWith(p, "/")
+    parts := str.Split(p, "/")
+    var out []string
+    for i := 0; i < len(parts); i = i + 1 {
+        seg := parts[i]
+        if str.Len(seg) == 0 || str.Equal(seg, ".") {
+            continue
+        }
+        if str.Equal(seg, "..") {
+            if len(out) > 0 && !str.Equal(out[len(out) - 1], "..") {
+                // Pop the last segment: "a/b/.." → "a".
+                var popped []string
+                for j := 0; j < len(out) - 1; j = j + 1 {
+                    popped = append(popped, out[j])
+                }
+                out = popped
+            } else if !absolute {
+                // Leading ".." in a relative path cannot be resolved.
+                out = append(out, seg)
+            }
+            continue
+        }
+        out = append(out, seg)
+    }
+    result := str.Join(out, "/")
+    if absolute {
+        result = str.Concat("/", result)
+    }
+    if str.Len(result) == 0 {
+        if absolute {
+            return "/"
+        }
+        return "."
+    }
+    return result
+}
+
+// fileExists reports whether a regular file exists at the given path.
+fn fileExists(p: string) -> bool {
+    fp := fopen(p, "r")
+    if fp == 0 {
+        return false
+    }
+    fclose(fp)
+    return true
+}
+
+// readFile reads the entire file at p into a string, or returns "" on failure.
+fn readFile(p: string) -> string {
+    path := str.Substr(p, 0, str.Len(p))
+    mode := str.Substr("r", 0, 1)
+    fp := fopen(path, mode)
+    if fp == 0 {
+        return ""
+    }
+    // Seek to end to measure size, then rewind.
+    fseek(fp, int64(0), 2)
+    size := ftell(fp)
+    fseek(fp, int64(0), 0)
+    if size <= 0 {
+        fclose(fp)
+        return ""
+    }
+    count := int(size)
+    // Allocate one extra byte for a null terminator.
+    buf := str.Repeat(" ", count + 1)
+    got := fread(buf, 1, count, fp)
+    fclose(fp)
+    if got <= 0 {
+        return ""
+    }
+    // Null-terminate the buffer so C string functions see the correct length.
+    buf[got] = 0
+    return buf
+}
+
+// tryPath attempts to locate a source file for importPath relative to base,
+// checking three candidate locations: direct file, main.skink in a directory,
+// and a file named after the last path component.
+fn tryPath(base: string, importPath: string) -> string {
+    candidate := joinPath(base, str.Concat(importPath, ".skink"))
+    if fileExists(candidate) {
+        return candidate
+    }
+    candidate = joinPath(joinPath(base, importPath), "main.skink")
+    if fileExists(candidate) {
+        return candidate
+    }
+    candidate = joinPath(joinPath(base, importPath), str.Concat(baseName(importPath), ".skink"))
+    if fileExists(candidate) {
+        return candidate
+    }
+    return ""
+}
+
+// resolveImport searches for the physical file backing an import path,
+// walking up the directory tree and checking vendor, cache, and std dirs.
+fn resolveImport(r: *Resolver, importPath: string, baseDir: string) -> string {
+    // C: imports are special C-linkage declarations, not Skink files.
+    if str.StartsWith(importPath, "C:") {
+        return ""
+    }
+    // Rewrite the bare "testing" import to its canonical std path.
+    if str.Equal(importPath, "testing") {
+        importPath = "std/testing"
+    }
+    // For std/ imports, first check an overlay directory derived from searchRoot.
+    if str.StartsWith(importPath, "std/") && str.Len(r.searchRoot) > 0 {
+        overlay := dirName(r.searchRoot)
+        candidate := tryPath(overlay, importPath)
+        if str.Len(candidate) > 0 {
+            return candidate
+        }
+    }
+    // Try the importing file's own directory first.
+    candidate := tryPath(baseDir, importPath)
+    if str.Len(candidate) > 0 {
+        return candidate
+    }
+
+    // Walk up the directory tree, checking vendor, cache, and std at each level.
+    current := baseDir
+    for {
+        candidate = tryPath(joinPath(current, "vendor"), importPath)
+        if str.Len(candidate) > 0 {
+            return candidate
+        }
+        candidate = tryPath(joinPath(joinPath(current, ".skink"), "cache"), importPath)
+        if str.Len(candidate) > 0 {
+            return candidate
+        }
+        candidate = tryPath(joinPath(current, "std"), importPath)
+        if str.Len(candidate) > 0 {
+            return candidate
+        }
+        candidate = tryPath(current, importPath)
+        if str.Len(candidate) > 0 {
+            return candidate
+        }
+        // Stop when we reach the filesystem root (dirname returns itself).
+        parent := dirName(current)
+        if str.Equal(parent, current) {
+            break
+        }
+        current = parent
+    }
+
+    // Final fallback: check the configured search root and its cache subdirectory.
+    if str.Len(r.searchRoot) > 0 {
+        candidate = tryPath(r.searchRoot, importPath)
+        if str.Len(candidate) > 0 {
+            return candidate
+        }
+        candidate = tryPath(joinPath(r.searchRoot, "cache"), importPath)
+        if str.Len(candidate) > 0 {
+            return candidate
+        }
+    }
+    return ""
+}
+
+// addError appends an error message to the resolver's error list.
+fn addError(r: *Resolver, message: string) {
+    r.errors = append(r.errors, message)
+}
+
+// qualify prefixes a declaration name with its module name, unless the
+// module is "main" or the name already contains a dot qualifier.
+fn qualify(moduleName: string, name: string) -> string {
+    if str.Len(moduleName) == 0 || str.Equal(moduleName, "main") || str.Contains(name, ".") {
+        return name
+    }
+    return str.Concat(str.Concat(moduleName, "."), name)
+}
+
+// qualifyDeclaration rewrites the name field of a single top-level
+// declaration so it is qualified with the owning module name.
+fn qualifyDeclaration(stmt: *ast.Stmt, moduleName: string) {
+    d := stmt.decl
+    // Record the owning module on every declaration so downstream passes
+    // (emitter module-context switches, library-main detection) can
+    // recover it without tracking ambient state (comp_error.md #117).
+    d.moduleName = moduleName
+    if stmt.kind == ast.ST_FN {
+        d.fnName = qualify(moduleName, d.fnName)
+    } else if stmt.kind == ast.ST_STRUCT {
+        d.structName = qualify(moduleName, d.structName)
+    } else if stmt.kind == ast.ST_ENUM {
+        d.enumName = qualify(moduleName, d.enumName)
+    } else if stmt.kind == ast.ST_CONST {
+        // Block-form const declarations have no single name — qualify()
+        // would turn "" into "module.", colliding across blocks.
+        if str.Len(d.constName) > 0 {
+            d.constName = qualify(moduleName, d.constName)
+        }
+        // Qualify every constant inside a const block as well.
+        for i := 0; i < len(d.constBlock); i = i + 1 {
+            d.constBlock[i].name = qualify(moduleName, d.constBlock[i].name)
+        }
+    } else if stmt.kind == ast.ST_VARDECL {
+        stmt.varName = qualify(moduleName, stmt.varName)
+    } else if stmt.kind == ast.ST_TYPEALIAS {
+        d.aliasName = qualify(moduleName, d.aliasName)
+    } else if stmt.kind == ast.ST_EXTERN {
+        d.fnName = qualify(moduleName, d.fnName)
+    } else if stmt.kind == ast.ST_TEMPLATE {
+        d.templateName = qualify(moduleName, d.templateName)
+    } else if stmt.kind == ast.ST_RULESET {
+        d.rulesetName = qualify(moduleName, d.rulesetName)
+    } else if stmt.kind == ast.ST_SERVICE {
+        d.serviceName = qualify(moduleName, d.serviceName)
+    }
+    stmt.decl = d
+}
+
+// loadFile parses a single source file, recursively loads its imports,
+// qualifies all declarations, and records the result in the resolver.
+// State 0 = unvisited, 1 = in-progress (used for cycle detection), 2 = done.
+fn loadFile(r: *Resolver, filePath: string) {
+    // Canonicalize so that the same file reached via different textual
+    // paths (diamond imports like ./x and ././x) deduplicates correctly.
+    filePath = normalizePath(filePath)
+    state := r.states[filePath]
+    if state == 2 {
+        return
+    }
+    // State 1 means we re-entered a file currently being loaded → import cycle.
+    if state == 1 {
+        addError(r, str.Concat(str.Concat(filePath, " 0:0: import cycle involving "), filePath))
+        return
+    }
+    r.states[filePath] = 1
+
+    source := readFile(filePath)
+    if str.Len(source) == 0 {
+        addError(r, str.Concat(filePath, " 0:0: cannot read file"))
+        r.states[filePath] = 2
+        return
+    }
+
+    // Lex and parse the source file into top-level declarations.
+    tokens := lexer.Tokenize(source)
+    p := parser.New(tokens)
+    declarations := parser.ParseFile(&p)
+    parseErrors := parser.Errors(&p)
+    if len(parseErrors) > 0 {
+        for i := 0; i < len(parseErrors); i = i + 1 {
+            addError(r, str.Concat(str.Concat(filePath, " "), parseErrors[i]))
+        }
+        r.states[filePath] = 2
+        return
+    }
+
+    // Extract the module name and import list from the parsed declarations.
+    moduleName := "main"
+    imports := []string{}
+    for i := 0; i < len(declarations); i = i + 1 {
+        stmt := declarations[i]
+        if stmt.kind == ast.ST_MODULE {
+            moduleName = stmt.decl.moduleName
+        } else if stmt.kind == ast.ST_IMPORT {
+            imports = append(imports, stmt.decl.importPath)
+        }
+    }
+    if str.Len(moduleName) == 0 {
+        moduleName = "main"
+    }
+
+    // Recursively resolve and load every imported module.
+    baseDir := dirName(filePath)
+    for i := 0; i < len(imports); i = i + 1 {
+        imported := resolveImport(r, imports[i], baseDir)
+        if str.Len(imported) == 0 {
+            // Suppress errors for C: imports since they are not Skink files.
+            if !str.StartsWith(imports[i], "C:") {
+                addError(r, str.Concat(str.Concat(filePath, " 0:0: cannot resolve import \""), str.Concat(imports[i], "\"")))
+            }
+        } else {
+            loadFile(r, imported)
+        }
+    }
+
+    // Qualify all declarations with the module name before recording.
+    for i := 0; i < len(declarations); i = i + 1 {
+        stmt := declarations[i]
+        stmt.filePath = filePath
+        qualifyDeclaration(&stmt, moduleName)
+        declarations[i] = stmt
+    }
+    r.files = append(r.files, FileInfo{path: filePath, moduleName: moduleName, declarations: declarations})
+    r.states[filePath] = 2
+}
+
+// Resolve is the public entry point: given a root source file and the
+// standard-library search root, it loads all transitive imports and
+// returns the merged list of qualified top-level declarations.
+pub fn Resolve(entry: string, searchRoot: string) -> ([]ast.Stmt, []string) {
+    r := Resolver{}
+    r.files = []FileInfo{}
+    r.states = make(map[string]int)
+    r.errors = []string{}
+    r.searchRoot = searchRoot
+    if str.Len(entry) == 0 {
+        addError(&r, str.Concat(entry, " 0:0: empty entry path"))
+        return []ast.Stmt{}, r.errors
+    }
+    loadFile(&r, entry)
+
+    // Flatten all loaded files' declarations into a single slice.
+    // Files without an explicit `module` line get a synthetic module
+    // declaration prepended so the checker resets its current module
+    // between files (otherwise declarations from a module-less file would
+    // be attributed to whatever module was processed before it).
+    merged := []ast.Stmt{}
+    for i := 0; i < len(r.files); i = i + 1 {
+        hasModule := len(r.files[i].declarations) > 0 && r.files[i].declarations[0].kind == ast.ST_MODULE
+        if !hasModule {
+            d := ast.newDecl(ast.ST_MODULE)
+            d.moduleName = r.files[i].moduleName
+            modDecl := ast.Stmt{kind: ast.ST_MODULE, filePath: r.files[i].path, decl: d}
+            merged = append(merged, modDecl)
+        }
+        for j := 0; j < len(r.files[i].declarations); j = j + 1 {
+            merged = append(merged, r.files[i].declarations[j])
+        }
+    }
+    return merged, r.errors
+}

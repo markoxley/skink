@@ -1,0 +1,10 @@
+// expect: unexpected token in enum body
+// Regression: enum member loop made no progress on non-IDENT tokens
+// (e.g. `fn` after a missing `}`) — hung the parser (comp_error.md #98).
+module main
+
+enum Shape {
+    Circle(float)
+fn main() -> int {
+    return 0
+}

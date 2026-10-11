@@ -1,0 +1,152 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/base64.skink
+// Purpose: Base64 encoding and decoding (RFC 4648) for the Skink standard
+//          library, converting between binary data and Base64 strings.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+module base64
+
+import "std/str"
+import "std/libc"
+import "std/errors"
+
+// Encode encodes the first length bytes of data as a Base64 string.
+// Returns an empty string if length <= 0.
+pub fn Encode(data: string, length: int) -> string {
+    if length <= 0 {
+        return ""
+    }
+    // Standard Base64 alphabet per RFC 4648
+    alphabet := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    result := ""
+    i := 0
+    // Process 3 bytes at a time, producing 4 Base64 characters
+    for i < length {
+        b1 := int(data[i])
+        b2 := 0
+        b3 := 0
+        if i + 1 < length {
+            b2 = int(data[i + 1])
+        }
+        if i + 2 < length {
+            b3 = int(data[i + 2])
+        }
+
+        // Split 24 bits into four 6-bit indices
+        i1 := b1 >> 2
+        i2 := ((b1 & 3) << 4) | (b2 >> 4)
+        i3 := ((b2 & 15) << 2) | (b3 >> 6)
+        i4 := b3 & 63
+
+        result = str.Concat(result, str.Substr(alphabet, i1, 1))
+        result = str.Concat(result, str.Substr(alphabet, i2, 1))
+        // Pad with '=' if fewer than 2 bytes remain
+        if i + 1 < length {
+            result = str.Concat(result, str.Substr(alphabet, i3, 1))
+        } else {
+            result = str.Concat(result, "=")
+        }
+        // Pad with '=' if fewer than 3 bytes remain
+        if i + 2 < length {
+            result = str.Concat(result, str.Substr(alphabet, i4, 1))
+        } else {
+            result = str.Concat(result, "=")
+        }
+        i = i + 3
+    }
+    return result
+}
+
+// Decode decodes a Base64 string back to binary data.
+// Returns an error if the input is not valid Base64 (wrong length or invalid characters).
+pub fn Decode(s: string) -> (string, errors.Error) {
+    inLen := str.Len(s)
+    if inLen == 0 {
+        return "", errors.New("")
+    }
+    // Base64 input length must be a multiple of 4
+    if inLen % 4 != 0 {
+        return "", errors.New("invalid base64 length")
+    }
+    // Calculate output length, accounting for padding
+    outLen := (inLen / 4) * 3
+    if s[inLen - 1] == 61 { // '='
+        outLen = outLen - 1
+    }
+    if s[inLen - 2] == 61 { // '='
+        outLen = outLen - 1
+    }
+    result := libc.malloc(outLen + 1)
+    idx := 0
+    // Process 4 Base64 characters at a time, producing up to 3 bytes
+    for i := 0; i < inLen; i = i + 4 {
+        b1 := decodeChar(s[i])
+        b2 := decodeChar(s[i + 1])
+        b3 := decodeChar(s[i + 2])
+        b4 := decodeChar(s[i + 3])
+        // Reject invalid characters
+        if b1 == -1 || b2 == -1 || b3 == -1 || b4 == -1 {
+            libc.free(result)
+            return "", errors.New("invalid base64 character")
+        }
+
+        // Reassemble 3 bytes from four 6-bit values
+        result[idx] = (b1 << 2) | (b2 >> 4)
+        idx = idx + 1
+        // Skip padding bytes
+        if s[i + 2] != 61 {
+            result[idx] = ((b2 & 15) << 4) | (b3 >> 2)
+            idx = idx + 1
+        }
+        if s[i + 3] != 61 {
+            result[idx] = ((b3 & 3) << 6) | b4
+            idx = idx + 1
+        }
+    }
+    // Null-terminate the output buffer
+    result[idx] = 0
+    return result, errors.New("")
+}
+
+// decodeChar maps a single Base64 character to its 6-bit integer value.
+// Returns -1 for characters not in the Base64 alphabet.
+fn decodeChar(c: int) -> int {
+    if c >= 65 && c <= 90 { // A-Z
+        return c - 65
+    }
+    if c >= 97 && c <= 122 { // a-z
+        return c - 71
+    }
+    if c >= 48 && c <= 57 { // 0-9
+        return c + 4
+    }
+    if c == 43 { // '+'
+        return 62
+    }
+    if c == 47 { // '/'
+        return 63
+    }
+    if c == 61 { // '='
+        // Padding character; treated as 0 during decode
+        return 0
+    }
+    // Invalid character
+    return -1
+}

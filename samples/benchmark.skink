@@ -1,0 +1,86 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/benchmark.skink
+// Purpose: Skink module for benchmark.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/benchmark"
+import "std/io"
+import "std/strconv"
+import "std/str"
+
+// fibIter computes the nth Fibonacci number iteratively.
+fn fibIter(n: int) -> int {
+    if n <= 1 {
+        return n
+    }
+    a := 0
+    b := 1
+    i := 2
+    for i <= n {
+        tmp := a + b
+        a = b
+        b = tmp
+        i = i + 1
+    }
+    return b
+}
+
+pub fn main() {
+    // Benchmark string concatenation
+    io.PrintLine("=== Benchmark: String Concatenation ===")
+    b := benchmark.NewB("StringConcat")
+    b.SetN(10000)
+    b.StartTimer()
+    i := 0
+    s := ""
+    for i < b.N() {
+        s = str.Concat(s, "x")
+        i = i + 1
+    }
+    b.StopTimer()
+    b.Report()
+    io.PrintLine("Result length: " + strconv.Itoa(str.Len(s)))
+    io.PrintLine("Per-op: " + strconv.Itoa(int(b.PerOp())) + " ns")
+    io.PrintLine("")
+
+    // Benchmark Fibonacci
+    io.PrintLine("=== Benchmark: Fibonacci(30) ===")
+    b2 := benchmark.NewB("Fibonacci")
+    b2.SetN(100000)
+    b2.StartTimer()
+    j := 0
+    for j < b2.N() {
+        fibIter(30)
+        j = j + 1
+    }
+    b2.StopTimer()
+    b2.Report()
+    io.PrintLine("Per-op: " + strconv.Itoa(int(b2.PerOp())) + " ns")
+    io.PrintLine("")
+
+    // Show the result
+    io.PrintLine("=== Verification ===")
+    io.PrintLine("fib(10) = " + strconv.Itoa(fibIter(10)))
+    io.PrintLine("fib(20) = " + strconv.Itoa(fibIter(20)))
+    io.PrintLine("fib(30) = " + strconv.Itoa(fibIter(30)))
+}

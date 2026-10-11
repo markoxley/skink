@@ -1,0 +1,60 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/spawn_args_test.skink
+// Purpose: Regression tests for spawn with multiple args / heap args (B8).
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module spawn_args_test
+
+import "testing"
+import "std/waitgroup"
+import "std/str"
+
+var saSum: int
+var saGot: string
+
+fn addTwo(a: int, b: int, wg: *waitgroup.WaitGroup) {
+    defer wg.Done()
+    saSum = a + b
+}
+
+fn echoIt(s: string, wg: *waitgroup.WaitGroup) {
+    defer wg.Done()
+    saGot = s
+}
+
+// TestSpawnMultiArg verifies spawn passes multiple int args correctly.
+pub fn TestSpawnMultiArg() {
+    wg := waitgroup.New()
+    wg.Add(1)
+    spawn addTwo(20, 22, &wg)
+    wg.Wait()
+    testing.AssertEqualInt(42, saSum, "spawned fn received both ints")
+}
+
+// TestSpawnHeapArg verifies spawn passes heap-allocated string arg.
+pub fn TestSpawnHeapArg() {
+    saGot = ""
+    wg := waitgroup.New()
+    wg.Add(1)
+    spawn echoIt("heap string arg", &wg)
+    wg.Wait()
+    testing.AssertEqualString("heap string arg", saGot, "string arg survives spawn")
+}

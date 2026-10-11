@@ -1,0 +1,122 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/reflect_demo.skink
+// Purpose: Demonstrates runtime type reflection and field inspection.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/reflect"
+import "std/io"
+import "std/strconv"
+import "std/str"
+
+// User is a sample struct for reflection demonstration.
+struct User {
+    name:   string
+    age:    int
+    active: bool
+    score:  float
+}
+
+// Product is another sample struct for reflection.
+struct Product {
+    id:    int
+    title: string
+    price: float
+}
+
+pub fn main() {
+    io.PrintLine("=== Reflection Demo ===")
+    io.PrintLine("")
+
+    // --- Type inspection ---
+    io.PrintLine("--- Type Inspection ---")
+    user := User{name: "Alice", age: 30, active: true, score: 95.5}
+    t := reflect.TypeOf<User>(user)
+    io.PrintLine("Type name: " + reflect.TypeName(t))
+    io.PrintLine("Field count: " + strconv.Itoa(reflect.FieldCount(t)))
+    io.PrintLine("")
+
+    // --- List all fields ---
+    io.PrintLine("--- Fields of User ---")
+    for i := 0; i < reflect.FieldCount(t); i = i + 1 {
+        name := reflect.FieldName(t, i)
+        ftype := reflect.FieldType(t, name)
+        io.PrintLine("  " + name + ": " + ftype)
+    }
+    io.PrintLine("")
+
+    // --- Field access by name ---
+    io.PrintLine("--- Field Access by Name ---")
+    nameField := reflect.FieldByName(t, "name")
+    ageField := reflect.FieldByName(t, "age")
+    activeField := reflect.FieldByName(t, "active")
+    scoreField := reflect.FieldByName(t, "score")
+
+    io.PrintLine("  name field type: " + nameField.type_name)
+    io.PrintLine("  age field type: " + ageField.type_name)
+    io.PrintLine("  active field type: " + activeField.type_name)
+    io.PrintLine("  score field type: " + scoreField.type_name)
+    io.PrintLine("")
+
+    // --- Inspect another struct ---
+    io.PrintLine("--- Fields of Product ---")
+    product := Product{id: 42, title: "Widget", price: 9.99}
+    pt := reflect.TypeOf<Product>(product)
+    io.PrintLine("Type name: " + reflect.TypeName(pt))
+    io.PrintLine("Field count: " + strconv.Itoa(reflect.FieldCount(pt)))
+    for i := 0; i < reflect.FieldCount(pt); i = i + 1 {
+        name := reflect.FieldName(pt, i)
+        ftype := reflect.FieldType(pt, name)
+        io.PrintLine("  " + name + ": " + ftype)
+    }
+    io.PrintLine("")
+
+    // --- Type comparison ---
+    io.PrintLine("--- Type Comparison ---")
+    io.PrintLine("User type: " + reflect.TypeName(t))
+    io.PrintLine("Product type: " + reflect.TypeName(pt))
+    same := str.Equal(reflect.TypeName(t), reflect.TypeName(pt))
+    if same {
+        io.PrintLine("Same type: yes")
+    } else {
+        io.PrintLine("Same type: no")
+    }
+    io.PrintLine("")
+
+    // --- Reflect on primitive types ---
+    io.PrintLine("--- Primitive Type Reflection ---")
+    n := 42
+    nt := reflect.TypeOf<int>(n)
+    io.PrintLine("int type: " + reflect.TypeName(nt))
+
+    s := "hello"
+    st := reflect.TypeOf<string>(s)
+    io.PrintLine("string type: " + reflect.TypeName(st))
+
+    b := true
+    bt := reflect.TypeOf<bool>(b)
+    io.PrintLine("bool type: " + reflect.TypeName(bt))
+
+    f := 3.14
+    ft := reflect.TypeOf<float>(f)
+    io.PrintLine("float type: " + reflect.TypeName(ft))
+}

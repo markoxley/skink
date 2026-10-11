@@ -1,0 +1,85 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/benchmark_test.skink
+// Purpose: Skink module for benchmark test.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module benchmark_test
+
+import "std/benchmark"
+import "testing"
+
+// TestNewB verifies benchmark creation.
+pub fn TestNewB() {
+    b := benchmark.NewB("foo")
+    if b.N() != 1 {
+        Errorf("NewB default N should be 1")
+    }
+}
+
+// TestSetN verifies iteration count can be changed.
+pub fn TestSetN() {
+    b := benchmark.NewB("foo")
+    b.SetN(100)
+    if b.N() != 100 {
+        Errorf("SetN should update iteration count")
+    }
+}
+
+// TestTimerSmoke verifies StartTimer and StopTimer run without panic.
+pub fn TestTimerSmoke() {
+    b := benchmark.NewB("foo")
+    b.StartTimer()
+    b.StopTimer()
+    b.Report()
+}
+
+// TestElapsed verifies that elapsed time is non-negative after timing.
+pub fn TestElapsed() {
+    b := benchmark.NewB("foo")
+    b.StartTimer()
+    b.StopTimer()
+    if b.Elapsed() < 0 {
+        Errorf("Elapsed should be non-negative")
+    }
+}
+
+// TestPerOp verifies that PerOp divides elapsed by n.
+pub fn TestPerOp() {
+    b := benchmark.NewB("foo")
+    b.SetN(10)
+    b.StartTimer()
+    b.StopTimer()
+    // PerOp should be elapsed / 10, which is >= 0
+    if b.PerOp() < 0 {
+        Errorf("PerOp should be non-negative")
+    }
+}
+
+// TestPerOpZeroN verifies that PerOp returns elapsed when n is 0.
+pub fn TestPerOpZeroN() {
+    b := benchmark.NewB("foo")
+    b.SetN(0)
+    b.StartTimer()
+    b.StopTimer()
+    if b.PerOp() != b.Elapsed() {
+        Errorf("PerOp should equal Elapsed when n is 0")
+    }
+}

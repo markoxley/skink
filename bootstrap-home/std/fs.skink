@@ -1,0 +1,357 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/fs.skink
+// Purpose: Filesystem access through a File struct wrapping C stdio,
+//          plus platform-agnostic helpers for stat, readdir, mkdir, etc.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+module fs
+
+import "std/libc"
+import "std/errors"
+
+// C stdio wrappers used by the File struct.
+// File handles are stored as int64 to match pointer size on 64-bit platforms
+// and allow NULL comparison with 0.
+extern fn fopen(path: string, mode: string) -> int64
+extern fn fclose(fp: int64) -> int
+extern fn fgetc(fp: int64) -> int
+extern fn fputc(c: int, fp: int64) -> int
+extern fn fwrite(ptr: string, size: int, count: int, fp: int64) -> int
+extern fn feof(fp: int64) -> int
+extern fn fread(buf: string, size: int, count: int, fp: int64) -> int
+extern fn fseek(fp: int64, offset: int64, whence: int) -> int
+extern fn ftell(fp: int64) -> int64
+extern fn fflush(fp: int64) -> int
+
+// Platform-agnostic filesystem runtime (fs_rt.c).
+// These wrappers abstract platform-specific struct layouts (stat, dirent)
+// so Skink code doesn't need hardcoded offsets.
+// Pointer out-parameters use string (i8*) since Skink strings are raw pointers.
+extern fn Skink_fs_stat(path: string, mode: string, size: string, mtime: string) -> int
+extern fn Skink_fs_isdir(path: string) -> int
+extern fn Skink_fs_isfile(path: string) -> int
+extern fn Skink_fs_exists(path: string) -> int
+extern fn Skink_fs_filesize(path: string) -> int64
+extern fn Skink_fs_mode(path: string) -> int
+extern fn Skink_fs_mtime(path: string) -> int64
+extern fn Skink_fs_opendir(path: string) -> int64
+extern fn Skink_fs_readdir(dir: int64, buf: string, bufSize: int, isDir: string) -> int
+extern fn Skink_fs_closedir(dir: int64) -> int
+extern fn Skink_fs_mkdir(path: string) -> int
+extern fn Skink_fs_remove(path: string) -> int
+extern fn Skink_fs_rename(old: string, new: string) -> int
+extern fn Skink_fs_access(path: string, mode: int) -> int
+
+// File wraps a C FILE* handle and provides character-level I/O methods.
+pub struct File {
+    handle: int64 // C FILE* pointer stored as int64
+
+    // Close closes the file and releases its resources.
+    pub fn Close(self: *File) -> errors.Error {
+        if self.handle != 0 {
+            rc := fclose(self.handle)
+            // Clear the handle so the file can't be used after close.
+            self.handle = 0
+            if rc == 0 {
+                return errors.New("")
+            }
+            return errors.New("close failed")
+        }
+        return errors.New("file not open")
+    }
+
+    // ReadChar reads and returns the next byte from the file.
+    // Returns (byte, error) where error.message == "EOF" at end of file.
+    pub fn ReadChar(self: *File) -> (int, errors.Error) {
+        if self.handle == 0 {
+            return 0, errors.New("file not open")
+        }
+        c := fgetc(self.handle)
+        // fgetc returns -1 on EOF or error; distinguish via feof.
+        if c == -1 {
+            if feof(self.handle) != 0 {
+                return -1, errors.New("EOF")
+            }
+            return -1, errors.New("read error")
+        }
+        return c, errors.New("")
+    }
+
+    // WriteChar writes a single byte c to the file.
+    pub fn WriteChar(self: *File, c: int) -> errors.Error {
+        if self.handle != 0 {
+            rc := fputc(c, self.handle)
+            if rc != -1 {
+                return errors.New("")
+            }
+            return errors.New("write error")
+        }
+        return errors.New("file not open")
+    }
+
+    // IsEOF reports whether the end of the file has been reached.
+    pub fn IsEOF(self: *File) -> bool {
+        if self.handle != 0 {
+            r := feof(self.handle)
+            return r != 0
+        }
+        return true
+    }
+
+    // Read implements the Reader template interface.
+    // Reads up to len bytes into buf and returns the number of bytes read,
+    // or -1 on error.
+    pub fn Read(self: *File, buf: string, len: int) -> int {
+        if self.handle == 0 {
+            return -1
+        }
+        return fread(buf, 1, len, self.handle)
+    }
+
+    // Write implements the Writer template interface.
+    pub fn Write(self: *File, buf: string, len: int) -> int {
+        if self.handle == 0 {
+            return -1
+        }
+        written := fwrite(buf, 1, len, self.handle)
+        return written
+    }
+}
+
+// Open opens a file at path with the given C fopen mode (e.g. "r", "w", "a").
+pub fn Open(path: string, mode: string) -> (File, errors.Error) {
+    h := fopen(path, mode)
+    // A null handle means fopen failed.
+    if h == 0 {
+        return File{handle: 0}, errors.New("open failed")
+    }
+    return File{handle: h}, errors.New("")
+}
+
+// ReadAll reads the entire contents of a file into a string.
+pub fn ReadAll(path: string) -> (string, errors.Error) {
+    fp := fopen(path, "r")
+    if fp == 0 {
+        return "", errors.New("open failed")
+    }
+    // Seek to end to determine size.
+    rc := fseek(fp, int64(0), 2) // SEEK_END = 2
+    if rc != 0 {
+        fclose(fp)
+        return "", errors.New("seek failed")
+    }
+    size := ftell(fp)
+    if size < 0 {
+        fclose(fp)
+        return "", errors.New("tell failed")
+    }
+    // Seek back to the beginning before reading.
+    fseek(fp, int64(0), 0) // SEEK_SET = 0
+    count := int(size)
+    buf := libc.malloc(count + 1)
+    n := fread(buf, 1, count, fp)
+    // Null-terminate the buffer at the actual read count.
+    buf[n] = 0
+    fclose(fp)
+    return buf, errors.New("")
+}
+
+// WriteAll writes data to a file at path, replacing any existing contents.
+pub fn WriteAll(path: string, data: string) -> errors.Error {
+    fp := fopen(path, "w")
+    if fp == 0 {
+        return errors.New("open failed")
+    }
+    n := libc.strlen(data)
+    written := fwrite(data, 1, n, fp)
+    fclose(fp)
+    if written != n {
+        return errors.New("write failed")
+    }
+    return errors.New("")
+}
+
+// AppendAll appends data to the end of a file at path.
+pub fn AppendAll(path: string, data: string) -> errors.Error {
+    fp := fopen(path, "a")
+    if fp == 0 {
+        return errors.New("open failed")
+    }
+    n := libc.strlen(data)
+    written := fwrite(data, 1, n, fp)
+    fclose(fp)
+    if written != n {
+        return errors.New("write failed")
+    }
+    return errors.New("")
+}
+
+// Exists reports whether a file or directory exists at path.
+pub fn Exists(path: string) -> bool {
+    return Skink_fs_exists(path) != 0
+}
+
+// Remove deletes the file or empty directory at path.
+pub fn Remove(path: string) -> errors.Error {
+    if Skink_fs_remove(path) == 0 {
+        return errors.New("")
+    }
+    return errors.New("remove failed")
+}
+
+// Rename moves a file or directory from oldPath to newPath.
+pub fn Rename(oldPath: string, newPath: string) -> errors.Error {
+    if Skink_fs_rename(oldPath, newPath) == 0 {
+        return errors.New("")
+    }
+    return errors.New("rename failed")
+}
+
+// Mkdir creates a new directory at path with mode 0755.
+pub fn Mkdir(path: string) -> errors.Error {
+    if Skink_fs_mkdir(path) == 0 {
+        return errors.New("")
+    }
+    return errors.New("mkdir failed")
+}
+
+// FileInfo holds metadata about a file, as returned by Stat.
+pub struct FileInfo {
+    Name:    string
+    Size:    int64
+    Mode:    int
+    IsDir:   bool
+}
+
+// Stat returns metadata about the file at path.
+// Returns (FileInfo, error) where error.message == "" on success.
+pub fn Stat(path: string) -> (FileInfo, errors.Error) {
+    // Allocate out-parameters for mode, size, mtime.
+    modeBuf := libc.malloc(4)
+    sizeBuf := libc.malloc(8)
+    mtimeBuf := libc.malloc(8)
+    if Skink_fs_stat(path, modeBuf, sizeBuf, mtimeBuf) != 0 {
+        libc.free(modeBuf)
+        libc.free(sizeBuf)
+        libc.free(mtimeBuf)
+        return FileInfo{}, errors.New("stat failed")
+    }
+    // Read mode (4 bytes, little-endian int32)
+    mode := int(modeBuf[0]) | (int(modeBuf[1]) << 8) |
+            (int(modeBuf[2]) << 16) | (int(modeBuf[3]) << 24)
+    // Read size (8 bytes, little-endian int64)
+    size := int64(0)
+    for i := 0; i < 8; i = i + 1 {
+        b := int64(sizeBuf[i])
+        shift := int64(i * 8)
+        size = size | (b << shift)
+    }
+    libc.free(modeBuf)
+    libc.free(sizeBuf)
+    libc.free(mtimeBuf)
+    // S_IFDIR = 0x4000 (bit 14 of mode)
+    isDir := (mode & 0x4000) != 0
+    // Extract the base name for convenience.
+    base := pathBase(path)
+    return FileInfo{Name: base, Size: size, Mode: mode, IsDir: isDir}, errors.New("")
+}
+
+// IsDir reports whether the path is a directory.
+pub fn IsDir(path: string) -> bool {
+    return Skink_fs_isdir(path) != 0
+}
+
+// IsFile reports whether the path is a regular file.
+pub fn IsFile(path: string) -> bool {
+    return Skink_fs_isfile(path) != 0
+}
+
+// FileSize returns the size of the file at path in bytes, or -1 on error.
+pub fn FileSize(path: string) -> int64 {
+    return Skink_fs_filesize(path)
+}
+
+// DirEntry represents a single entry in a directory listing.
+pub struct DirEntry {
+    Name:   string
+    IsDir:  bool
+}
+
+// ReadDir returns a list of entries in the directory at path.
+// Returns (entries, error) where error.message == "" on success.
+// The entries do not include "." or "..".
+pub fn ReadDir(path: string) -> ([]DirEntry, errors.Error) {
+    dir := Skink_fs_opendir(path)
+    if dir == 0 {
+        return [], errors.New("opendir failed")
+    }
+    var entries []DirEntry
+    nameBuf := libc.malloc(256)
+    isDirBuf := libc.malloc(4)
+    for {
+        rc := Skink_fs_readdir(dir, nameBuf, 256, isDirBuf)
+        // rc <= 0 means no more entries or an error.
+        if rc <= 0 {
+            break
+        }
+        nameLen := int(libc.strlen(nameBuf))
+        if nameLen == 0 {
+            continue
+        }
+        // Copy the name into its own allocation.
+        name := libc.malloc(nameLen + 1)
+        libc.memcpy(name, nameBuf, nameLen)
+        name[nameLen] = 0
+        // Read isDir flag (4 bytes, little-endian int32)
+        isDir := int(isDirBuf[0]) != 0
+        entries = append(entries, DirEntry{Name: name, IsDir: isDir})
+    }
+    libc.free(nameBuf)
+    libc.free(isDirBuf)
+    Skink_fs_closedir(dir)
+    return entries, errors.New("")
+}
+
+// pathBase returns the last component of a path (for FileInfo.Name).
+fn pathBase(p: string) -> string {
+    n := int(libc.strlen(p))
+    if n == 0 {
+        return ""
+    }
+    last := n - 1
+    // Strip trailing slashes.
+    for last >= 0 && p[last] == 47 {
+        last = last - 1
+    }
+    if last < 0 {
+        return "/"
+    }
+    // Find the start of the last path component.
+    start := last
+    for start >= 0 && p[start] != 47 {
+        start = start - 1
+    }
+    start = start + 1
+    length := last - start + 1
+    result := libc.malloc(length + 1)
+    libc.memcpy(result, string(int64(p) + int64(start)), length)
+    result[length] = 0
+    return result
+}

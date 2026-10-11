@@ -1,0 +1,167 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/hashmap_usage.skink
+// Purpose: Demonstrates HashMap creation, insertion, lookup, and iteration.
+//          Note: Due to Skink's type erasure for generics, values retrieved
+//          from generic HashMaps can only be used in comparisons, not passed
+//          directly to other functions.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/hashmap"
+import "std/io"
+import "std/str"
+import "std/strconv"
+
+pub fn main() {
+    io.PrintLine("=== HashMap Usage Demo ===")
+    io.PrintLine("")
+
+    // --- Integer -> String map ---
+    io.PrintLine("--- Integer -> String Map ---")
+    names := hashmap.New<int, string>()
+    names.Put(1, "Alice")
+    names.Put(2, "Bob")
+    names.Put(3, "Carol")
+    names.Put(4, "Dave")
+    names.Put(5, "Eve")
+
+    // Retrieve by ID (string values from Get can be printed directly)
+    name1, e1 := names.Get(1)
+    if e1.message == "" {
+        io.PrintLine("  ID 1 -> " + name1)
+    }
+    name2, e2 := names.Get(2)
+    if e2.message == "" {
+        io.PrintLine("  ID 2 -> " + name2)
+    }
+    name3, e3 := names.Get(3)
+    if e3.message == "" {
+        io.PrintLine("  ID 3 -> " + name3)
+    }
+    name4, e4 := names.Get(4)
+    if e4.message == "" {
+        io.PrintLine("  ID 4 -> " + name4)
+    }
+    name5, e5 := names.Get(5)
+    if e5.message == "" {
+        io.PrintLine("  ID 5 -> " + name5)
+    }
+    io.PrintLine("")
+
+    // --- Check key existence ---
+    io.PrintLine("--- Key Existence ---")
+    if names.Has(3) == true {
+        io.PrintLine("Key 3 exists in the map")
+    }
+    if names.Has(99) == false {
+        io.PrintLine("Key 99 does NOT exist in the map")
+    }
+    io.PrintLine("")
+
+    // --- Updating values ---
+    io.PrintLine("--- Updating Values ---")
+    scores := hashmap.New<int, int>()
+    scores.Put(1, 85)
+    scores.Put(2, 72)
+
+    // Check initial values (use comparisons due to type erasure)
+    val1, _ := scores.Get(1)
+    if val1 == 85 {
+        io.PrintLine("  ID 1: 85")
+    }
+    val2, _ := scores.Get(2)
+    if val2 == 72 {
+        io.PrintLine("  ID 2: 72")
+    }
+
+    // Update score
+    scores.Put(1, 92)
+    io.PrintLine("After update:")
+    val1u, _ := scores.Get(1)
+    if val1u == 92 {
+        io.PrintLine("  ID 1: 92 (updated)")
+    }
+    io.PrintLine("")
+
+    // --- String -> String map ---
+    io.PrintLine("--- String -> String Map ---")
+    capitals := hashmap.New<string, string>()
+    capitals.Put("France", "Paris")
+    capitals.Put("Germany", "Berlin")
+    capitals.Put("Japan", "Tokyo")
+
+    capital, err := capitals.Get("Japan")
+    if err.message == "" {
+        io.PrintLine("Capital of Japan: " + capital)
+    }
+    capital, err = capitals.Get("France")
+    if err.message == "" {
+        io.PrintLine("Capital of France: " + capital)
+    }
+    capital, err = capitals.Get("Germany")
+    if err.message == "" {
+        io.PrintLine("Capital of Germany: " + capital)
+    }
+    io.PrintLine("")
+
+    // --- String -> Integer map (static values) ---
+    io.PrintLine("--- String -> Integer Map ---")
+    ages := hashmap.New<string, int>()
+    ages.Put("Alice", 30)
+    ages.Put("Bob", 25)
+    ages.Put("Carol", 35)
+    ages.Put("Dave", 28)
+
+    // Retrieve and compare (use comparisons due to type erasure)
+    aliceAge, _ := ages.Get("Alice")
+    if aliceAge == 30 {
+        io.PrintLine("  Alice is 30 years old")
+    }
+    bobAge, _ := ages.Get("Bob")
+    if bobAge == 25 {
+        io.PrintLine("  Bob is 25 years old")
+    }
+    carolAge, _ := ages.Get("Carol")
+    if carolAge == 35 {
+        io.PrintLine("  Carol is 35 years old")
+    }
+    daveAge, _ := ages.Get("Dave")
+    if daveAge == 28 {
+        io.PrintLine("  Dave is 28 years old")
+    }
+
+    // Note: Due to type erasure, values from generic Get() can only be
+    // compared with == against concrete values, not used in arithmetic
+    // or passed to other functions directly.
+    io.PrintLine("")
+
+    // --- Missing key handling ---
+    io.PrintLine("--- Missing Key Handling ---")
+    _, mErr := capitals.Get("Italy")
+    if mErr.message != "" {
+        io.PrintLine("Italy not found in capitals map (expected)")
+    }
+    _, sErr := scores.Get(999)
+    if sErr.message != "" {
+        io.PrintLine("ID 999 not found in scores map (expected)")
+    }
+}

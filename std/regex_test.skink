@@ -1,0 +1,210 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/regex_test.skink
+// Purpose: Skink module for regex test.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module regex_test
+
+import "std/regex"
+import "std/str"
+import "std/strconv"
+import "testing"
+
+// TestCompile verifies that Compile succeeds for a valid pattern.
+pub fn TestCompile() {
+    r, err := regex.Compile("hello")
+    if err.message != "" {
+        Errorf("Compile should not error: " + err.message)
+    }
+    if str.Equal(r.Pattern, "hello") == false {
+        Errorf("Compile pattern failed")
+    }
+}
+
+// TestCompileInvalid verifies that Compile fails for an invalid pattern.
+pub fn TestCompileInvalid() {
+    _, err := regex.Compile("[invalid")
+    if err.message == "" {
+        Errorf("Compile invalid pattern should fail")
+    }
+}
+
+// TestMatchLiteral checks exact-match and non-match cases.
+pub fn TestMatchLiteral() {
+    r, _ := regex.Compile("hello")
+    if r.Match("hello world") == false {
+        Errorf("Match literal failed")
+    }
+    if r.Match("goodbye") == true {
+        Errorf("Match literal should be false for non-match")
+    }
+}
+
+// TestMatchRegex checks real regex patterns.
+pub fn TestMatchRegex() {
+    r, _ := regex.Compile("h.*o")
+    if r.Match("hello") == false {
+        Errorf("Match regex h.*o should match hello")
+    }
+    if r.Match("world") == true {
+        Errorf("Match regex h.*o should not match world")
+    }
+}
+
+// TestMatchDigitClass checks character classes.
+pub fn TestMatchDigitClass() {
+    r, _ := regex.Compile("[0-9]+")
+    if r.Match("abc123def") == false {
+        Errorf("Match [0-9]+ should match abc123def")
+    }
+    if r.Match("abcdef") == true {
+        Errorf("Match [0-9]+ should not match abcdef")
+    }
+}
+
+// TestMatchAlternation checks alternation (|).
+pub fn TestMatchAlternation() {
+    r, _ := regex.Compile("cat|dog|bird")
+    if r.Match("I have a cat") == false {
+        Errorf("Match cat|dog|bird should match 'I have a cat'")
+    }
+    if r.Match("I have a dog") == false {
+        Errorf("Match cat|dog|bird should match 'I have a dog'")
+    }
+    if r.Match("I have a fish") == true {
+        Errorf("Match cat|dog|bird should not match 'I have a fish'")
+    }
+}
+
+// TestFind verifies locating a pattern inside a larger string.
+pub fn TestFind() {
+    r, _ := regex.Compile("world")
+    m := r.Find("hello world")
+    if str.Equal(m.Text, "world") == false {
+        Errorf("Find failed: expected 'world', got '" + m.Text + "'")
+    }
+    if m.Start != 6 {
+        Errorf("Find start should be 6")
+    }
+    if m.End != 11 {
+        Errorf("Find end should be 11")
+    }
+}
+
+// TestFindRegex verifies finding with a regex pattern.
+pub fn TestFindRegex() {
+    r, _ := regex.Compile("[0-9]+")
+    m := r.Find("abc 123 def")
+    if str.Equal(m.Text, "123") == false {
+        Errorf("Find regex failed: expected '123', got '" + m.Text + "'")
+    }
+}
+
+// TestFindNoMatch verifies Find returns -1 when no match.
+pub fn TestFindNoMatch() {
+    r, _ := regex.Compile("xyz")
+    m := r.Find("hello world")
+    if m.Start != -1 {
+        Errorf("Find no match should return Start=-1")
+    }
+}
+
+// TestReplaceAll checks replacing all occurrences of a pattern.
+pub fn TestReplaceAll() {
+    r, _ := regex.Compile("world")
+    result := r.ReplaceAll("hello world", "skink")
+    if str.Equal(result, "hello skink") == false {
+        Errorf("ReplaceAll failed: expected 'hello skink', got '" + result + "'")
+    }
+}
+
+// TestReplaceAllRegex checks replacing with a regex pattern.
+pub fn TestReplaceAllRegex() {
+    r, _ := regex.Compile("[0-9]+")
+    result := r.ReplaceAll("abc 123 def 456", "N")
+    if str.Equal(result, "abc N def N") == false {
+        Errorf("ReplaceAll regex failed: expected 'abc N def N', got '" + result + "'")
+    }
+}
+
+// TestFindAll counts non-overlapping matches in a string.
+pub fn TestFindAll() {
+    r, _ := regex.Compile("ab")
+    matches := r.FindAll("ab cab ab")
+    if len(matches) != 3 {
+        Errorf("FindAll count failed: expected 3, got " + strconv.Itoa(len(matches)))
+    }
+}
+
+// TestFindAllRegex checks FindAll with a regex pattern.
+pub fn TestFindAllRegex() {
+    r, _ := regex.Compile("[0-9]+")
+    matches := r.FindAll("a1 b22 c333")
+    if len(matches) != 3 {
+        Errorf("FindAll regex count failed: expected 3, got " + strconv.Itoa(len(matches)))
+    }
+    if str.Equal(matches[0].Text, "1") == false {
+        Errorf("FindAll regex[0] should be '1'")
+    }
+    if str.Equal(matches[1].Text, "22") == false {
+        Errorf("FindAll regex[1] should be '22'")
+    }
+    if str.Equal(matches[2].Text, "333") == false {
+        Errorf("FindAll regex[2] should be '333'")
+    }
+}
+
+// TestMatchStringAnchored checks full-string match.
+pub fn TestMatchStringAnchored() {
+    r, _ := regex.Compile("hello")
+    if r.MatchString("hello") == false {
+        Errorf("MatchString should match 'hello' exactly")
+    }
+    if r.MatchString("hello world") == true {
+        Errorf("MatchString should not match 'hello world' (not full match)")
+    }
+}
+
+// TestMatchStringFunc checks the convenience function.
+pub fn TestMatchStringFunc() {
+    if regex.MatchString("[0-9]+", "abc123") == false {
+        Errorf("regex.MatchString should find digits in 'abc123'")
+    }
+    if regex.MatchString("[0-9]+", "abcdef") == true {
+        Errorf("regex.MatchString should not find digits in 'abcdef'")
+    }
+}
+
+// TestFindAllFunc checks the convenience function.
+pub fn TestFindAllFunc() {
+    matches := regex.FindAll("[a-z]+", "abc 123 def")
+    if len(matches) != 2 {
+        Errorf("regex.FindAll should find 2 matches")
+    }
+}
+
+// TestReplaceAllFunc checks the convenience function.
+pub fn TestReplaceAllFunc() {
+    result := regex.ReplaceAll("[0-9]", "a1b2c3", "X")
+    if str.Equal(result, "aXbXcX") == false {
+        Errorf("regex.ReplaceAll failed: expected 'aXbXcX', got '" + result + "'")
+    }
+}

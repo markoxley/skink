@@ -1,0 +1,252 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/testing.skink
+// Purpose: Skink module for testing.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module testing
+
+import "std/str"
+import "std/strconv"
+
+extern fn Skink_test_failnow(msg: string)
+
+var failed: bool = false
+var testCount: int = 0
+var passCount: int = 0
+var failCount: int = 0
+
+// Reset clears the failure state before each test.
+pub fn Reset() {
+    failed = false
+}
+
+// Errorf records a test failure and prints a message.
+pub fn Errorf(msg: string) {
+    print("FAIL: " + msg)
+    failed = true
+    failCount = failCount + 1
+}
+
+// Failed reports whether the test has failed.
+pub fn Failed() -> bool {
+    return failed
+}
+
+// Helper marks the calling function as a test helper.
+pub fn Helper() {
+    // No-op for now; used to adjust failure line numbers in future.
+}
+
+// Fail marks the test as failed without a custom message.
+pub fn Fail() {
+    failed = true
+    failCount = failCount + 1
+}
+
+// FailNow marks the test as failed and stops execution immediately.
+// This mirrors Go's testing.FailNow() semantics: the test is marked
+// failed and the process aborts via Skink_test_failnow.
+pub fn FailNow() {
+    failed = true
+    failCount = failCount + 1
+    Skink_test_failnow("FailNow called")
+}
+
+// recordPass increments the pass counter.
+fn recordPass() {
+    passCount = passCount + 1
+}
+
+// recordTest increments the test counter.
+fn recordTest() {
+    testCount = testCount + 1
+}
+
+// AssertTrue asserts that cond is true.
+pub fn AssertTrue(cond: bool, msg: string) {
+    recordTest()
+    if cond == false {
+        Errorf("AssertTrue failed: " + msg)
+    } else {
+        recordPass()
+    }
+}
+
+// AssertFalse asserts that cond is false.
+pub fn AssertFalse(cond: bool, msg: string) {
+    recordTest()
+    if cond == true {
+        Errorf("AssertFalse failed: " + msg)
+    } else {
+        recordPass()
+    }
+}
+
+// AssertEqualString asserts that two strings are equal.
+pub fn AssertEqualString(expected: string, actual: string, msg: string) {
+    recordTest()
+    if str.Equal(expected, actual) == false {
+        Errorf("AssertEqualString failed: expected \"" + expected + "\", got \"" + actual + "\" - " + msg)
+    } else {
+        recordPass()
+    }
+}
+
+// AssertEqualInt asserts that two integers are equal.
+pub fn AssertEqualInt(expected: int, actual: int, msg: string) {
+    recordTest()
+    if expected != actual {
+        Errorf("AssertEqualInt failed: expected " + strconv.Itoa(expected) + ", got " + strconv.Itoa(actual) + " - " + msg)
+    } else {
+        recordPass()
+    }
+}
+
+// AssertEqualFloat asserts that two floats are equal within a small
+// relative epsilon (0.01% of the larger magnitude, minimum 1e-9).
+pub fn AssertEqualFloat(expected: float, actual: float, msg: string) {
+    recordTest()
+    diff := expected - actual
+    if diff < 0.0 {
+        diff = -diff
+    }
+    mag := expected
+    if mag < 0.0 {
+        mag = -mag
+    }
+    eps := mag * 0.0001
+    if eps < 0.000000001 {
+        eps = 0.000000001
+    }
+    if diff > eps {
+        Errorf("AssertEqualFloat failed: expected " + strconv.FormatFloat(expected, 6) + ", got " + strconv.FormatFloat(actual, 6) + " - " + msg)
+    } else {
+        recordPass()
+    }
+}
+
+// AssertEqualBool asserts that two booleans are equal.
+pub fn AssertEqualBool(expected: bool, actual: bool, msg: string) {
+    recordTest()
+    if expected != actual {
+        Errorf("AssertEqualBool failed - " + msg)
+    } else {
+        recordPass()
+    }
+}
+
+// AssertNotEqualString asserts that two strings are not equal.
+pub fn AssertNotEqualString(a: string, b: string, msg: string) {
+    recordTest()
+    if str.Equal(a, b) == true {
+        Errorf("AssertNotEqualString failed: values should differ - " + msg)
+    } else {
+        recordPass()
+    }
+}
+
+// AssertNotEqualInt asserts that two integers are not equal.
+pub fn AssertNotEqualInt(a: int, b: int, msg: string) {
+    recordTest()
+    if a == b {
+        Errorf("AssertNotEqualInt failed: values should differ - " + msg)
+    } else {
+        recordPass()
+    }
+}
+
+// AssertNil asserts that a value is null. Accepts strings, pointers,
+// or any reference type (erased to a pointer at runtime).
+pub fn AssertNil(ptr: any, msg: string) {
+    recordTest()
+    if ptr != nil {
+        Errorf("AssertNil failed: pointer is not null - " + msg)
+    } else {
+        recordPass()
+    }
+}
+
+// AssertNotNil asserts that a value is not null. Accepts strings,
+// pointers, or any reference type (erased to a pointer at runtime).
+pub fn AssertNotNil(ptr: any, msg: string) {
+    recordTest()
+    if ptr == nil {
+        Errorf("AssertNotNil failed: pointer is null - " + msg)
+    } else {
+        recordPass()
+    }
+}
+
+// AssertContains asserts that haystack contains needle.
+pub fn AssertContains(haystack: string, needle: string, msg: string) {
+    recordTest()
+    if str.Contains(haystack, needle) == false {
+        Errorf("AssertContains failed: \"" + haystack + "\" does not contain \"" + needle + "\" - " + msg)
+    } else {
+        recordPass()
+    }
+}
+
+// AssertLen asserts that a string has the expected length.
+pub fn AssertLen(s: string, expected: int, msg: string) {
+    recordTest()
+    actual := str.Len(s)
+    if actual != expected {
+        Errorf("AssertLen failed: expected " + strconv.Itoa(expected) + ", got " + strconv.Itoa(actual) + " - " + msg)
+    } else {
+        recordPass()
+    }
+}
+
+// AssertNoError asserts that an error is nil (empty message).
+pub fn AssertNoError(err: string, msg: string) {
+    recordTest()
+    if str.Len(err) > 0 {
+        Errorf("AssertNoError failed: unexpected error: " + err + " - " + msg)
+    } else {
+        recordPass()
+    }
+}
+
+// AssertError asserts that an error is non-nil (has a message).
+pub fn AssertError(err: string, msg: string) {
+    recordTest()
+    if str.Len(err) == 0 {
+        Errorf("AssertError failed: expected error but got none - " + msg)
+    } else {
+        recordPass()
+    }
+}
+
+// PassCount returns the number of passed assertions.
+pub fn PassCount() -> int {
+    return passCount
+}
+
+// FailCount returns the number of failed assertions.
+pub fn FailCount() -> int {
+    return failCount
+}
+
+// TestCount returns the total number of assertions.
+pub fn TestCount() -> int {
+    return testCount
+}

@@ -1,0 +1,547 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/logic.skink
+// Purpose: Prolog-style predicate logic engine with unification, facts,
+//          rules, and backtracking query evaluation.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+module logic
+
+import "std/str"
+import "std/strconv"
+import "std/libc"
+
+// Term represents a Prolog term: either an atom, a variable, or a compound term.
+pub struct Term {
+    kind:   int    // 0=atom, 1=variable, 2=compound
+    name:   string
+    args:   []Term
+
+    // Name returns the term's name (atom value, variable name, or functor).
+    pub fn Name(self: Term) -> string {
+        return self.name
+    }
+
+    // Kind returns the term kind: 0 for atom, 1 for variable, 2 for compound.
+    pub fn Kind(self: Term) -> int {
+        return self.kind
+    }
+
+    // Args returns the argument list of a compound term (empty for atoms and variables).
+    pub fn Args(self: Term) -> []Term {
+        return self.args
+    }
+
+    // IsAtom reports whether the term is an atom (kind 0).
+    pub fn IsAtom(self: Term) -> bool {
+        return self.kind == 0
+    }
+
+    // IsVariable reports whether the term is a variable (kind 1).
+    pub fn IsVariable(self: Term) -> bool {
+        return self.kind == 1
+    }
+
+    // IsCompound reports whether the term is a compound term (kind 2).
+    pub fn IsCompound(self: Term) -> bool {
+        return self.kind == 2
+    }
+}
+
+// Atom creates an atom term.
+pub fn Atom(name: string) -> Term {
+    return Term{kind: 0, name: name, args: []Term{}}
+}
+
+// Var creates a variable term. Variable names start with uppercase.
+pub fn Var(name: string) -> Term {
+    return Term{kind: 1, name: name, args: []Term{}}
+}
+
+// Compound creates a compound term with a functor and arguments.
+pub fn Compound(functor: string, args: []Term) -> Term {
+    return Term{kind: 2, name: functor, args: args}
+}
+
+// Clause represents a fact or rule. A fact is a clause with an empty body.
+// A rule has a head and a body (list of goals).
+pub struct Clause {
+    head: Term
+    body: []Term  // empty for facts
+}
+
+// Fact creates a fact clause.
+pub fn Fact(head: Term) -> Clause {
+    return Clause{head: head, body: []Term{}}
+}
+
+// Rule creates a rule clause.
+pub fn Rule(head: Term, body: []Term) -> Clause {
+    return Clause{head: head, body: body}
+}
+
+// Database holds a collection of clauses.
+pub struct Database {
+    clauses: []Clause
+
+    // Add adds a clause to the database.
+    pub fn Add(self: *Database, clause: Clause) {
+        self.clauses = append(self.clauses, clause)
+    }
+
+    // AddFact adds a fact to the database.
+    pub fn AddFact(self: *Database, head: Term) {
+        self.Add(Fact(head))
+    }
+
+    // AddRule adds a rule to the database.
+    pub fn AddRule(self: *Database, head: Term, body: []Term) {
+        self.Add(Rule(head, body))
+    }
+
+    // Query evaluates a goal and returns the first binding that satisfies it,
+    // or an empty binding if no solution exists.
+    pub fn Query(self: Database, goal: Term) -> map[string]Term {
+        b := make(map[string]Term)
+        if self.solve(goal, b) {
+            return b
+        }
+        return make(map[string]Term)
+    }
+
+    // QueryAll evaluates a goal and returns all bindings that satisfy it.
+    // Only the variables present in the goal term are included in the results.
+    pub fn QueryAll(self: Database, goal: Term) -> []map[string]Term {
+        globalResults = make([]map[string]Term, 0)
+        self.solveAll(goal, make(map[string]Term))
+        // Extract the query variable names from the goal
+        queryVars := extractVarNames(goal)
+        // Filter results to only include query variables, then deduplicate
+        filtered := filterBindings(globalResults, queryVars)
+        return deduplicateBindings(filtered)
+    }
+
+    // solve attempts to prove a goal with the given binding.
+    fn solve(self: Database, goal: Term, b: map[string]Term) -> bool {
+        i := 0
+        for i < len(self.clauses) {
+            clause := self.clauses[i]
+            // Rename clause variables to fresh names to avoid collisions with query variables
+            renamedHead, renamedBody := renameClauseVars(clause.head, clause.body)
+            // Work on a copy so failed unification doesn't corrupt the original binding
+            fresh := copyBinding(b)
+            if unify(renamedHead, goal, fresh) {
+                // Try to prove the clause body with the updated binding
+                if self.solveBody(renamedBody, fresh) {
+                    // Success: propagate the solution back to the caller's binding
+                    copyInto(fresh, b)
+                    return true
+                }
+            }
+            // Backtrack: try the next clause
+            i = i + 1
+        }
+        return false
+    }
+
+    // solveAll collects all solutions for a goal into globalResults.
+    fn solveAll(self: Database, goal: Term, b: map[string]Term) {
+        i := 0
+        for i < len(self.clauses) {
+            clause := self.clauses[i]
+            renamedHead, renamedBody := renameClauseVars(clause.head, clause.body)
+            fresh := copyBinding(b)
+            if unify(renamedHead, goal, fresh) {
+                if len(renamedBody) == 0 {
+                    globalResults = append(globalResults, copyBinding(fresh))
+                } else {
+                    self.solveBodyAll(renamedBody, fresh)
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    // solveBody evaluates a list of goals (conjunction).
+    fn solveBody(self: Database, goals: []Term, b: map[string]Term) -> bool {
+        if len(goals) == 0 {
+            return true
+        }
+        return self.solveAllGoals(goals, 0, b)
+    }
+
+    // solveAllGoals solves a conjunction of goals sequentially.
+    fn solveAllGoals(self: Database, goals: []Term, idx: int, b: map[string]Term) -> bool {
+        if idx >= len(goals) {
+            return true
+        }
+        if self.solve(goals[idx], b) {
+            return self.solveAllGoals(goals, idx + 1, b)
+        }
+        return false
+    }
+
+    // solveBodyAll collects all solutions for a conjunction of goals.
+    fn solveBodyAll(self: Database, goals: []Term, b: map[string]Term) {
+        self.collectGoals(goals, 0, b)
+    }
+
+    // collectGoals recursively collects solutions for a conjunction.
+    fn collectGoals(self: Database, goals: []Term, idx: int, b: map[string]Term) {
+        if idx >= len(goals) {
+            // All goals in the conjunction are satisfied — record this solution
+            globalResults = append(globalResults, copyBinding(b))
+            return
+        }
+        i := 0
+        for i < len(self.clauses) {
+            clause := self.clauses[i]
+            // Rename clause variables to fresh names for this attempt
+            renamedHead, renamedBody := renameClauseVars(clause.head, clause.body)
+            // Copy the binding so backtracking restores the prior state
+            fresh := copyBinding(b)
+            if unify(renamedHead, goals[idx], fresh) {
+                if len(renamedBody) == 0 {
+                    // Fact: goal is satisfied, continue with the next goal in the conjunction
+                    self.collectGoals(goals, idx + 1, fresh)
+                } else {
+                    // Rule: must solve the body goals with backtracking, then continue
+                    // with the remaining goals from the original conjunction.
+                    self.solveBodyThenContinue(renamedBody, 0, goals, idx + 1, fresh)
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    // solveBodyThenContinue solves rule body goals sequentially with backtracking.
+    // For each complete solution of the body, it continues with the remaining goals.
+    fn solveBodyThenContinue(self: Database, bodyGoals: []Term, bodyIdx: int, restGoals: []Term, restIdx: int, b: map[string]Term) {
+        if bodyIdx >= len(bodyGoals) {
+            // All body goals solved — continue with remaining goals from the original conjunction
+            self.collectGoals(restGoals, restIdx, b)
+            return
+        }
+        i := 0
+        for i < len(self.clauses) {
+            clause := self.clauses[i]
+            renamedHead, renamedBody := renameClauseVars(clause.head, clause.body)
+            fresh := copyBinding(b)
+            if unify(renamedHead, bodyGoals[bodyIdx], fresh) {
+                if len(renamedBody) == 0 {
+                    // Fact: move to the next body goal
+                    self.solveBodyThenContinue(bodyGoals, bodyIdx + 1, restGoals, restIdx, fresh)
+                } else {
+                    // Nested rule: solve its body, then continue with
+                    // remaining body goals + original rest goals.
+                    // Chain the remaining body goals after the rest goals so they
+                    // are solved once the nested body is fully proven.
+                    chainedRest := concatGoals(bodyGoals, restGoals, bodyIdx + 1)
+                    self.solveBodyThenContinue(renamedBody, 0, chainedRest, 0, fresh)
+                }
+            }
+            i = i + 1
+        }
+    }
+}
+
+// globalResults is used internally by QueryAll to accumulate solutions.
+var globalResults: []map[string]Term = make([]map[string]Term, 0)
+
+// extractVarNames returns all variable names in a term.
+fn extractVarNames(t: Term) -> []string {
+    names := make([]string, 0)
+    if t.IsVariable() {
+        names = append(names, t.name)
+    }
+    if t.IsCompound() {
+        i := 0
+        for i < len(t.args) {
+            childNames := extractVarNames(t.args[i])
+            j := 0
+            for j < len(childNames) {
+                names = append(names, childNames[j])
+                j = j + 1
+            }
+            i = i + 1
+        }
+    }
+    return names
+}
+
+// filterBindings keeps only the specified query variables in each binding,
+// resolving through any renamed variable chains.
+fn filterBindings(results: []map[string]Term, queryVars: []string) -> []map[string]Term {
+    filtered := make([]map[string]Term, 0)
+    i := 0
+    for i < len(results) {
+        b := make(map[string]Term)
+        j := 0
+        for j < len(queryVars) {
+            val := resolve(Var(queryVars[j]), results[i])
+            b[queryVars[j]] = val
+            j = j + 1
+        }
+        filtered = append(filtered, b)
+        i = i + 1
+    }
+    return filtered
+}
+
+// deduplicateBindings removes duplicate bindings from the results.
+// Two bindings are considered duplicates if they produce the same resolved
+// values for all variables (following the binding chain).
+fn deduplicateBindings(results: []map[string]Term) -> []map[string]Term {
+    deduped := make([]map[string]Term, 0)
+    seen := make([]string, 0)
+    i := 0
+    for i < len(results) {
+        sig := bindingSignature(results[i])
+        isDup := false
+        j := 0
+        for j < len(seen) {
+            if str.Equal(seen[j], sig) {
+                isDup = true
+                break
+            }
+            j = j + 1
+        }
+        if !isDup {
+            deduped = append(deduped, results[i])
+            seen = append(seen, sig)
+        }
+        i = i + 1
+    }
+    return deduped
+}
+
+// bindingSignature creates a string signature of all resolved values in a binding.
+fn bindingSignature(b: map[string]Term) -> string {
+    parts := make([]string, 0)
+    for k := range b {
+        val := resolve(b[k], b)
+        parts = append(parts, str.Concat(k, str.Concat("=", TermToString(val))))
+    }
+    return str.Join(parts, ";")
+}
+
+// termsEqual checks if two terms are structurally equal.
+fn termsEqual(a: Term, b: Term) -> bool {
+    if a.kind != b.kind {
+        return false
+    }
+    if !str.Equal(a.name, b.name) {
+        return false
+    }
+    if len(a.args) != len(b.args) {
+        return false
+    }
+    i := 0
+    for i < len(a.args) {
+        if !termsEqual(a.args[i], b.args[i]) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// concatGoals concatenates a rule body with the remaining goals starting at idx.
+fn concatGoals(body: []Term, goals: []Term, idx: int) -> []Term {
+    result := make([]Term, len(body) + len(goals) - idx)
+    i := 0
+    for i < len(body) {
+        result[i] = body[i]
+        i = i + 1
+    }
+    j := idx
+    for j < len(goals) {
+        result[i] = goals[j]
+        i = i + 1
+        j = j + 1
+    }
+    return result
+}
+
+// renameCounter is a global counter for generating fresh variable names.
+var renameCounter: int = 0
+
+// renameClauseVars renames all variables in a clause (head + body) to fresh
+// names, ensuring that the same variable in the head and body gets the same
+// new name. Returns (renamedHead, renamedBody).
+fn renameClauseVars(head: Term, body: []Term) -> (Term, []Term) {
+    renameCounter = renameCounter + 1
+    suffix := strconv.Itoa(renameCounter)
+    renamedHead := renameVarsWithSuffix(head, suffix)
+    renamedBody := make([]Term, len(body))
+    i := 0
+    for i < len(body) {
+        renamedBody[i] = renameVarsWithSuffix(body[i], suffix)
+        i = i + 1
+    }
+    return renamedHead, renamedBody
+}
+
+// renameVarsWithSuffix renames all variables in a term by appending a suffix.
+fn renameVarsWithSuffix(t: Term, suffix: string) -> Term {
+    if t.IsVariable() {
+        newName := str.Concat(t.name, str.Concat("_", suffix))
+        return Var(newName)
+    }
+    if t.IsCompound() {
+        newArgs := make([]Term, len(t.args))
+        i := 0
+        for i < len(t.args) {
+            newArgs[i] = renameVarsWithSuffix(t.args[i], suffix)
+            i = i + 1
+        }
+        return Compound(t.name, newArgs)
+    }
+    return t
+}
+
+// NewDatabase creates an empty Prolog database.
+pub fn NewDatabase() -> Database {
+    return Database{clauses: []Clause{}}
+}
+
+// Unify attempts to unify two terms, updating the binding.
+// Returns true if unification succeeds.
+pub fn Unify(t1: Term, t2: Term, b: map[string]Term) -> bool {
+    // Resolve both terms through the current binding before comparing
+    t1 = resolve(t1, b)
+    t2 = resolve(t2, b)
+    if t1.IsAtom() && t2.IsAtom() {
+        return str.Equal(t1.name, t2.name)
+    }
+    if t1.IsVariable() {
+        // Same variable unifies with itself
+        if t2.IsVariable() && str.Equal(t1.name, t2.name) {
+            return true
+        }
+        // Bind t1 to t2 (variable can unify with anything)
+        b[t1.name] = t2
+        return true
+    }
+    if t2.IsVariable() {
+        // Bind t2 to t1 (only reaches here if t1 is not a variable)
+        b[t2.name] = t1
+        return true
+    }
+    if t1.IsCompound() && t2.IsCompound() {
+        // Functors and arity must match
+        if !str.Equal(t1.name, t2.name) {
+            return false
+        }
+        if len(t1.args) != len(t2.args) {
+            return false
+        }
+        // Recursively unify corresponding arguments
+        i := 0
+        for i < len(t1.args) {
+            if !unify(t1.args[i], t2.args[i], b) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+    return false
+}
+
+// unify is the internal unification function.
+fn unify(t1: Term, t2: Term, b: map[string]Term) -> bool {
+    return Unify(t1, t2, b)
+}
+
+// mapStringTermHasKey checks if a binding map has a key.
+fn mapStringTermHasKey(m: map[string]Term, key: string) -> bool {
+    // Use a special marker: set a key and check if the value differs
+    // from the default. We check if the term kind is non-zero OR the name
+    // is non-empty OR args exist. A default Term{} has kind=0, name="", args=[].
+    val := m[key]
+    if val.kind != 0 {
+        return true
+    }
+    if str.Len(val.name) > 0 {
+        return true
+    }
+    if len(val.args) > 0 {
+        return true
+    }
+    return false
+}
+
+// resolve follows variable bindings to get the final term.
+pub fn resolve(t: Term, b: map[string]Term) -> Term {
+    if t.IsVariable() {
+        if mapStringTermHasKey(b, t.name) {
+            // Follow the binding chain recursively until a non-variable term is found
+            val := b[t.name]
+            return resolve(val, b)
+        }
+    }
+    // Atoms and compounds resolve to themselves
+    return t
+}
+
+// Lookup retrieves the resolved value of a variable from a binding.
+pub fn Lookup(b: map[string]Term, varName: string) -> Term {
+    if mapStringTermHasKey(b, varName) {
+        val := b[varName]
+        return resolve(val, b)
+    }
+    return Term{kind: 0, name: "", args: []Term{}}
+}
+
+// copyBinding creates a shallow copy of a binding map.
+fn copyBinding(b: map[string]Term) -> map[string]Term {
+    result := make(map[string]Term)
+    for k := range b {
+        result[k] = b[k]
+    }
+    return result
+}
+
+// copyInto copies all entries from src into dst.
+fn copyInto(src: map[string]Term, dst: map[string]Term) {
+    for k := range src {
+        dst[k] = src[k]
+    }
+}
+
+// TermToString converts a term to a readable string representation.
+pub fn TermToString(t: Term) -> string {
+    if t.IsAtom() {
+        return t.name
+    }
+    if t.IsVariable() {
+        return str.Concat("?", t.name)
+    }
+    if t.IsCompound() {
+        parts := []string{}
+        i := 0
+        for i < len(t.args) {
+            parts = append(parts, TermToString(t.args[i]))
+            i = i + 1
+        }
+        return str.Concat(t.name, str.Concat("(", str.Concat(str.Join(parts, ", "), ")")))
+    }
+    return ""
+}

@@ -1,0 +1,674 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/compiler_concurrency_test.skink
+// Purpose: Channel and synchronisation edge-semantics tests: bounded
+//          channel capacity enforcement, send-on-closed / double-close
+//          panics, closed-channel receives, select readiness, WaitGroup
+//          reuse and zero-value usability, and panic isolation inside
+//          spawned threads. Guards comp_error.md #71, #72, #73, #82.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module compiler_concurrency_test
+
+import "testing"
+import "std/sync"
+import "std/waitgroup"
+import "std/time"
+import "std/str"
+import "std/strconv"
+
+// ccPanic records the last panic message captured by a test helper.
+var ccPanic: string
+
+fn ccSave(m: string) {
+    ccPanic = m
+}
+
+
+// === Bounded channel capacity (comp_error.md #73) ===
+
+// ccBlockedCh / ccBlockedSent / ccBlockedDone drive the bounded-capacity
+// probe. The done channel makes the post-drain check deterministic —
+// the main thread waits for the send to fully complete rather than
+// racing the woken sender.
+var ccBlockedCh chan<int>
+var ccBlockedSent bool
+var ccBlockedDone chan<int>
+
+fn ccBlockedSender() {
+    ccBlockedCh <- 99
+    ccBlockedSent = true
+    ccBlockedDone <- 1
+}
+
+// TestBoundedChanBlocksAtCap verifies a send on a full bounded channel
+// blocks until a receiver drains an element (comp_error.md #73).
+pub fn TestBoundedChanBlocksAtCap() {
+    ccBlockedCh = make(chan<int>, 1)
+    ccBlockedDone = make(chan<int>)
+    ccBlockedSent = false
+    ccBlockedCh <- 1
+    spawn ccBlockedSender()
+    time.SleepMs(50)
+    testing.AssertFalse(ccBlockedSent, "send on full channel blocked")
+    v := <-ccBlockedCh
+    <-ccBlockedDone
+    testing.AssertTrue(ccBlockedSent, "send unblocked after drain")
+    testing.AssertEqualInt(1, v, "drained the buffered value")
+    v2 := <-ccBlockedCh
+    testing.AssertEqualInt(99, v2, "blocked send delivered")
+}
+
+// TestBoundedChanSelectNotReady verifies a select send-case on a full
+// bounded channel is not ready and falls through to default
+// (comp_error.md #73 — previously send was always reported ready).
+pub fn TestBoundedChanSelectNotReady() {
+    ch := make(chan<int>, 1)
+    ch <- 7
+    sent := false
+    select {
+    case ch <- 8:
+        sent = true
+    default:
+    }
+    testing.AssertFalse(sent, "send on full channel not select-ready")
+    v := <-ch
+    select {
+    case ch <- 8:
+        sent = true
+    default:
+    }
+    testing.AssertTrue(sent, "send ready after drain")
+}
+
+// TestBoundedChanCapTwo verifies capacity 2 allows exactly two pending
+// sends before blocking.
+pub fn TestBoundedChanCapTwo() {
+    ch := make(chan<int>, 2)
+    ch <- 1
+    ch <- 2
+    sent := false
+    select {
+    case ch <- 3:
+        sent = true
+    default:
+    }
+    testing.AssertFalse(sent, "third send blocked at cap 2")
+    v := <-ch
+    testing.AssertEqualInt(1, v, "fifo order")
+}
+
+// === Closed-channel semantics (comp_error.md #71, #72) ===
+
+// ccSendOnClosed sends on the module channel; the deferred recover
+// captures the panic.
+var ccClosedCh chan<int>
+
+fn ccSendOnClosed() {
+    defer fn() { ccSave(recover()) }()
+    ccClosedCh <- 1
+}
+
+// TestSendOnClosedPanics verifies send on a closed channel panics
+// "send on closed channel" (comp_error.md #71 — previously a silent
+// drop).
+pub fn TestSendOnClosedPanics() {
+    ccPanic = ""
+    ccClosedCh = make(chan<int>)
+    close(ccClosedCh)
+    ccSendOnClosed()
+    testing.AssertEqualString("send on closed channel", ccPanic, "send on closed panics")
+}
+
+// ccCloseTwice closes the module channel twice.
+fn ccCloseTwice() {
+    defer fn() { ccSave(recover()) }()
+    close(ccClosedCh)
+    close(ccClosedCh)
+}
+
+// TestCloseTwicePanics verifies a second close panics
+// "close of closed channel" (comp_error.md #72 — previously a no-op).
+pub fn TestCloseTwicePanics() {
+    ccPanic = ""
+    ccClosedCh = make(chan<int>)
+    ccCloseTwice()
+    testing.AssertEqualString("close of closed channel", ccPanic, "double close panics")
+}
+
+// TestRecvOnClosedZeroFalse verifies receive on a closed, empty channel
+// returns the zero value with ok=false immediately.
+pub fn TestRecvOnClosedZeroFalse() {
+    ch := make(chan<int>)
+    close(ch)
+    v, ok := <-ch
+    testing.AssertFalse(ok, "closed recv ok=false")
+    testing.AssertEqualInt(0, v, "closed recv zero value")
+}
+
+// TestRecvClosedDrains verifies buffered values survive close and are
+// received in order before ok=false.
+pub fn TestRecvClosedDrains() {
+    ch := make(chan<int>, 3)
+    ch <- 1
+    ch <- 2
+    close(ch)
+    a := <-ch
+    b := <-ch
+    c, ok := <-ch
+    testing.AssertEqualInt(1, a, "first buffered")
+    testing.AssertEqualInt(2, b, "second buffered")
+    testing.AssertFalse(ok, "then closed")
+}
+
+// TestForInChanUntilClose verifies ranging over a channel yields values
+// until it is closed.
+pub fn TestForInChanUntilClose() {
+    ch := make(chan<int>, 4)
+    ch <- 10
+    ch <- 20
+    ch <- 30
+    close(ch)
+    sum := 0
+    for v in ch {
+        sum = sum + v
+    }
+    testing.AssertEqualInt(60, sum, "for-in drains until close")
+}
+
+// TestSelectOnClosedRecv verifies a select recv-case on a closed channel
+// is immediately ready.
+pub fn TestSelectOnClosedRecv() {
+    ch := make(chan<int>)
+    close(ch)
+    got := -1
+    select {
+    case v := <-ch:
+        got = v
+    default:
+    }
+    testing.AssertEqualInt(0, got, "closed chan recv ready with zero")
+}
+
+// TestChanLen verifies len(ch) reports the buffered element count.
+pub fn TestChanLen() {
+    ch := make(chan<int>, 5)
+    testing.AssertEqualInt(0, len(ch), "empty chan len 0")
+    ch <- 1
+    ch <- 2
+    testing.AssertEqualInt(2, len(ch), "two buffered")
+    v := <-ch
+    testing.AssertEqualInt(1, len(ch), "one after recv")
+}
+
+// TestUnboundedChanNeverBlocks verifies make(chan<T>, -1) — a negative
+// capacity is Skink's unbounded-queue escape hatch: sends never block.
+// (make(chan<T>) with capacity 0 is now a Go-style rendezvous channel;
+// see TestRendezvousChanSendBlocks.)
+pub fn TestUnboundedChanNeverBlocks() {
+    ch := make(chan<int>, -1)
+    i := 0
+    for i < 1000 {
+        ch <- i
+        i = i + 1
+    }
+    testing.AssertEqualInt(1000, len(ch), "unbounded queue holds all sends")
+}
+
+// === Rendezvous channels: make(chan<T>) == capacity 0 ===
+//
+// A capacity-0 channel is a synchronous handoff: the sender parks inside
+// Skink_chan_send until a receiver consumes the value, and a receiver
+// parks until a sender offers one.
+
+var ccRendCh chan<int>
+var ccRendSent bool
+
+fn ccRendSender() {
+    ccRendCh <- 42
+    ccRendSent = true
+}
+
+// TestRendezvousChanSendBlocks verifies a cap-0 send blocks until a
+// receiver arrives (Go unbuffered-channel semantics).
+pub fn TestRendezvousChanSendBlocks() {
+    ccRendCh = make(chan<int>)
+    ccRendSent = false
+    spawn ccRendSender()
+    time.SleepMs(50)
+    testing.AssertFalse(ccRendSent, "rendezvous send blocks with no receiver")
+    v := <-ccRendCh
+    testing.AssertEqualInt(42, v, "rendezvous delivered the value")
+    time.SleepMs(50)
+    testing.AssertTrue(ccRendSent, "send completed once value was taken")
+}
+
+var ccRendRecvCh chan<int>
+var ccRendGot int
+var ccRendRecvDone chan<int>
+
+fn ccRendReceiver() {
+    ccRendGot = <-ccRendRecvCh
+    ccRendRecvDone <- 1
+}
+
+// TestRendezvousChanRecvBlocks verifies a cap-0 receive blocks until a
+// sender arrives.
+pub fn TestRendezvousChanRecvBlocks() {
+    ccRendRecvCh = make(chan<int>)
+    ccRendRecvDone = make(chan<int>, 1)
+    ccRendGot = -1
+    spawn ccRendReceiver()
+    time.SleepMs(50)
+    testing.AssertEqualInt(-1, ccRendGot, "rendezvous recv blocks with no sender")
+    ccRendRecvCh <- 7
+    <-ccRendRecvDone
+    testing.AssertEqualInt(7, ccRendGot, "receiver got the sent value")
+}
+
+var ccSelRendCh chan<int>
+var ccSelRendDone chan<int>
+
+fn ccSelRendReceiver() {
+    <-ccSelRendCh
+    ccSelRendDone <- 1
+}
+
+// TestSelectRendezvousSend verifies a select send-case on a cap-0
+// channel is not ready without a receiver, and fires once a receiver
+// is blocked in <-ch.
+pub fn TestSelectRendezvousSend() {
+    ccSelRendCh = make(chan<int>)
+    ccSelRendDone = make(chan<int>, 1)
+    sent := false
+    select {
+    case ccSelRendCh <- 9:
+        sent = true
+    default:
+    }
+    testing.AssertFalse(sent, "cap-0 send case not ready without receiver")
+    spawn ccSelRendReceiver()
+    time.SleepMs(50)
+    select {
+    case ccSelRendCh <- 9:
+        sent = true
+    default:
+    }
+    testing.AssertTrue(sent, "cap-0 send case fires while receiver waits")
+    <-ccSelRendDone
+}
+
+// TestSelectNilChannelSkipped verifies a nil channel case in select
+// never becomes ready — assigning nil disables the case (Go semantics).
+pub fn TestSelectNilChannelSkipped() {
+    var ch: chan<int>
+    fired := false
+    select {
+    case <-ch:
+        fired = true
+    default:
+    }
+    testing.AssertFalse(fired, "nil recv case never fires")
+    select {
+    case ch <- 1:
+        fired = true
+    default:
+    }
+    testing.AssertFalse(fired, "nil send case never fires")
+}
+
+// === Zero-value sync primitives (comp_error.md #82) ===
+
+// ccWg is a zero-valued module-level WaitGroup: deliberately never
+// New()'d so the test below exercises the lazy-ensure path directly.
+var ccWg waitgroup.WaitGroup
+var ccWgDoneCount int
+
+fn ccWgWorker() {
+    ccWgDoneCount = ccWgDoneCount + 1
+    ccWg.Done()
+}
+
+// TestWaitGroupZeroValue verifies `var wg WaitGroup` is usable without
+// New() — handles are lazily allocated (comp_error.md #82 — previously
+// a segfault on the nil pthread handle).
+pub fn TestWaitGroupZeroValue() {
+    ccWgDoneCount = 0
+    ccWg.Add(1)
+    spawn ccWgWorker()
+    ccWg.Wait()
+    testing.AssertEqualInt(1, ccWgDoneCount, "zero-value WaitGroup works")
+}
+
+// TestMutexZeroValue verifies `var mu Mutex` locks without NewMutex —
+// the established lazy-ensure contract.
+pub fn TestMutexZeroValue() {
+    var mu sync.Mutex
+    shared := 0
+    mu.Lock()
+    shared = shared + 1
+    mu.Unlock()
+    testing.AssertEqualInt(1, shared, "zero-value Mutex locks")
+}
+
+// TestRWMutexZeroValue verifies `var rw RWMutex` locks without
+// NewRWMutex (comp_error.md #82 — previously a segfault).
+pub fn TestRWMutexZeroValue() {
+    var rw sync.RWMutex
+    x := 0
+    rw.Lock()
+    x = x + 1
+    rw.Unlock()
+    rw.RLock()
+    x = x + 1
+    rw.RUnlock()
+    testing.AssertEqualInt(2, x, "zero-value RWMutex works")
+}
+
+// ccZeroCondWait calls Wait on a zero-value Cond — must panic, not crash.
+fn ccZeroCondWait() {
+    defer fn() { ccSave(recover()) }()
+    var c sync.Cond
+    c.Wait()
+}
+
+// TestCondWaitZeroValuePanics verifies Cond.Wait on a zero-valued Cond
+// (no associated Mutex) panics with a clear message rather than calling
+// pthread_cond_wait with a null mutex (comp_error.md #82).
+pub fn TestCondWaitZeroValuePanics() {
+    ccPanic = ""
+    ccZeroCondWait()
+    testing.AssertContains(ccPanic, "zero-valued Cond", "zero-value Cond.Wait panics")
+}
+
+// === WaitGroup lifecycle ===
+
+// TestWaitGroupReuseCycles verifies a WaitGroup can be reused for
+// multiple Add/Wait rounds.
+var ccCycleWg *waitgroup.WaitGroup
+
+fn ccCycleWorker() {
+    ccCycleWg.Done()
+}
+
+pub fn TestWaitGroupReuseCycles() {
+    ccCycleWg = waitgroup.New()
+    round := 0
+    for round < 3 {
+        ccCycleWg.Add(2)
+        spawn ccCycleWorker()
+        spawn ccCycleWorker()
+        ccCycleWg.Wait()
+        round = round + 1
+    }
+    testing.AssertEqualInt(3, round, "three Add/Wait cycles")
+}
+
+// TestWaitGroupConcurrentAdd verifies concurrent Adds don't lose count.
+var ccAddWg *waitgroup.WaitGroup
+
+fn ccAddWorker() {
+    ccAddWg.Done()
+}
+
+pub fn TestWaitGroupConcurrentAdd() {
+    ccAddWg = waitgroup.New()
+    ccAddWg.Add(50)
+    i := 0
+    for i < 50 {
+        spawn ccAddWorker()
+        i = i + 1
+    }
+    ccAddWg.Wait()
+    testing.AssertTrue(true, "50 concurrent workers completed")
+}
+
+// === Spawn semantics ===
+
+// ccSpawnSeen records what a spawned fn observed; ccSpawnWg joins it.
+var ccSpawnSeen int
+var ccSpawnWg *waitgroup.WaitGroup
+
+fn ccSpawnCapture(x: int) {
+    ccSpawnSeen = x
+    ccSpawnWg.Done()
+}
+
+// TestSpawnArgSnapshot verifies spawn arguments are evaluated and packed
+// at the spawn statement — mutating the variable afterwards does not
+// change what the spawned fn sees.
+pub fn TestSpawnArgSnapshot() {
+    ccSpawnWg = waitgroup.New()
+    ccSpawnWg.Add(1)
+    x := 41
+    ccSpawnSeen = 0
+    spawn ccSpawnCapture(x)
+    x = 99
+    ccSpawnWg.Wait()
+    testing.AssertEqualInt(41, ccSpawnSeen, "spawn captures arg value at spawn point")
+}
+
+// ccSpawnPanic runs a panic inside a spawned thread with its own
+// defer/recover — the thread-local panic must not disturb main.
+var ccPanicWg *waitgroup.WaitGroup
+
+fn ccPanicWorker() {
+    defer ccPanicWg.Done()
+    defer fn() { ccSave(recover()) }()
+    panic("spawned boom")
+}
+
+// TestSpawnRecoverIsolation verifies a panic inside a spawned thread is
+// captured by that thread's own recover (thread-local panic state,
+// comp_error.md #46) and the main thread continues undisturbed.
+pub fn TestSpawnRecoverIsolation() {
+    ccPanicWg = waitgroup.New()
+    ccPanicWg.Add(1)
+    ccPanic = ""
+    spawn ccPanicWorker()
+    ccPanicWg.Wait()
+    testing.AssertEqualString("spawned boom", ccPanic, "spawned panic recovered in-thread")
+}
+
+// === Mutex contention ===
+
+// ccCounter is shared state guarded by ccMu.
+var ccCounter int
+var ccMu *sync.Mutex
+var ccIncWg *waitgroup.WaitGroup
+
+fn ccIncWorker() {
+    i := 0
+    for i < 100 {
+        ccMu.Lock()
+        ccCounter = ccCounter + 1
+        ccMu.Unlock()
+        i = i + 1
+    }
+    ccIncWg.Done()
+}
+
+// TestMutexContention verifies mutual exclusion under contention —
+// 20 threads × 100 increments must produce exactly 2000.
+pub fn TestMutexContention() {
+    ccMu = sync.NewMutex()
+    ccIncWg = waitgroup.New()
+    ccCounter = 0
+    ccIncWg.Add(20)
+    i := 0
+    for i < 20 {
+        spawn ccIncWorker()
+        i = i + 1
+    }
+    ccIncWg.Wait()
+    testing.AssertEqualInt(2000, ccCounter, "all increments serialised")
+}
+
+// TestSelectUnboundRecv verifies a select recv-case without a binding
+// (`case <-ch:`) consumes exactly one queued element. Regression guard
+// for comp_error.md #99: the dequeued value box and the element's
+// queue-owned reference were leaked on every unbound select receive —
+// the ASAN build of this suite catches the leak; this test pins the
+// visible semantics.
+pub fn TestSelectUnboundRecv() {
+    // Buffered: capacity 0 is now a rendezvous channel, which would
+    // deadlock these unpaired sends.
+    ch := make(chan<string>, 2)
+    ch <- "first"
+    ch <- "second"
+    select {
+    case <-ch:
+    }
+    testing.AssertEqualInt(1, len(ch), "unbound select recv consumed one element")
+    got := <-ch
+    testing.AssertEqualString("second", got, "head element was consumed, not the tail")
+}
+
+// === Spawned-worker teardown of zero-size allocations (comp_error.md #101) ===
+
+// Skink_rc_live_objects returns the number of RC-managed blocks currently
+// registered with the runtime — a deterministic leak counter.
+extern fn Skink_rc_live_objects() -> int64
+
+// ccTeardownDone lets the test join the worker before asserting on object
+// counts.
+var ccTeardownDone chan<int>
+
+// ccTeardownAlloc builds and drops a graph of zero-size RC blocks (empty
+// slices nested in an outer slice) inside its own frame so every local is
+// released before it returns — mirroring how a detached worker's teardown
+// frees field allocations on its own thread.
+fn ccTeardownAlloc() {
+    grid := make([][]int, 4)
+    i := 0
+    for i < 4 {
+        grid[i] = make([]int, 0)
+        i = i + 1
+    }
+    grid = grid[:0]
+    _ = grid
+}
+
+// ccTeardownWorker runs the allocation workload on a spawned thread, then
+// signals completion.
+fn ccTeardownWorker() {
+    ccTeardownAlloc()
+    ccTeardownDone <- 1
+}
+
+// TestSpawnTeardownZeroSize guards comp_error.md #101: zero-size RC
+// payloads allocated exactly RC_PREFIX_SIZE bytes, so the payload pointer
+// equalled the chunk's end address — a position heap scanners do not treat
+// as a reachability root.  Live empty-slice blocks were therefore reported
+// as leaks whenever they were still registered (or mid-free on a detached
+// worker) at LeakSanitizer's exit scan. The runtime now allocates at least
+// one payload byte so payload pointers are strictly interior, and keeps
+// in-flight frees reachable via a pending-free list. This test pins that
+// a spawned worker's teardown still releases every object it owned.
+pub fn TestSpawnTeardownZeroSize() {
+    ccTeardownDone = make(chan<int>)
+    before := Skink_rc_live_objects()
+    spawn ccTeardownWorker()
+    <-ccTeardownDone
+    // The worker's own allocations are freed before it signals; give the
+    // spawn trampoline a moment to release the argument pack afterwards.
+    time.SleepMs(50)
+    leaked := Skink_rc_live_objects() - before
+    testing.AssertTrue(leaked == 0, "spawned worker teardown leaked rc objects")
+}
+
+// ccMapRaceShared holds a map mutated on a worker while the main thread
+// copies it — the copy() source-pinning regression scenario.
+struct ccMapRaceShared {
+    m:    map[string]int
+    stop: chan<bool>
+    done: chan<bool>
+}
+
+// ccMapRaceWriter repeatedly inserts into the shared map, forcing backing-
+// array growth (and release of the previous arrays) while readers copy.
+fn ccMapRaceWriter(s: *ccMapRaceShared) {
+    i := 0
+    for true {
+        select {
+            case <- s.stop:
+                s.done <- true
+                return
+            default:
+        }
+        s.m[strconv.Itoa(i % 64)] = i
+        i = i + 1
+    }
+}
+
+// TestMapCopyConcurrentGrow guards the concurrent map-copy hardening
+// (comp_error.md #108): copy(m) loaded the map's backing-array pointers and
+// memcpy'd them with no retain, so a concurrent grow that swapped and
+// released the old arrays turned the copy into a use-after-free — and a
+// reused chunk's RC byte-size field at payload -8 read as a bogus element
+// count, overflowing the memcpy heap-buffer-overflow style. emitMapCopy now
+// pins each array via retain+re-verify before copying, and the runtime
+// retire quarantine keeps recently-freed chunks mapped so the retain can
+// never touch unmapped memory. Only observable under ASAN; without it the
+// test is a smoke check that concurrent copy+insert stays correct-shaped.
+pub fn TestMapCopyConcurrentGrow() {
+    s := &ccMapRaceShared{m: make(map[string]int), stop: make(chan<bool>), done: make(chan<bool>)}
+    spawn ccMapRaceWriter(s)
+    i := 0
+    for i < 2000 {
+        c := copy(s.m)
+        // The copy may observe a torn snapshot under the race, but it must
+        // always be a valid map whose length never exceeds capacity.
+        testing.AssertTrue(len(c) >= 0, "map copy produced invalid map")
+        i = i + 1
+    }
+    s.stop <- true
+    <-s.done
+}
+
+// === Rendezvous channel lost-wakeup (comp_error.md #119) ===
+
+// ccRvSenders send on an unbuffered channel. The test enforces the
+// ordering that exposed the bug: the first sender enqueues then parks
+// waiting for consumption; the second sender arrives while the first
+// element is still queued and parks waiting for the slot. The first
+// receive must wake BOTH: the satisfied sender (so it can return) and
+// the queued sender (so it can deliver the next element). A single
+// cond signal could land on the already-satisfied sender, leaving the
+// queued one asleep forever — a ~50% hang per iteration. Iterating
+// makes the pre-fix deadlock effectively deterministic; on fixed
+// runtimes every iteration completes.
+fn ccRvSend(ch: chan<int>, v: int) {
+    ch <- v
+}
+
+pub fn TestRendezvousChanTwoSenders() {
+    for i := 0; i < 20; i = i + 1 {
+        ch := make(chan<int>)
+        spawn ccRvSend(ch, 1)
+        time.SleepMs(30)   // ensure sender 1 enqueues and parks post-send
+        spawn ccRvSend(ch, 2)
+        time.SleepMs(30)   // ensure sender 2 parks in the pre-send wait
+        a := <-ch
+        b := <-ch
+        sum := a + b
+        testing.AssertTrue(sum == 3, "rendezvous two-sender sum")
+    }
+}

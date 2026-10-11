@@ -1,0 +1,6 @@
+// expect: panic() argument must be string
+module main
+fn main() -> int {
+    panic(42)
+    return 0
+}

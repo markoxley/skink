@@ -1,0 +1,6 @@
+// expect: string
+module main
+fn main() -> int {
+    s := "unterminated
+    return 0
+}

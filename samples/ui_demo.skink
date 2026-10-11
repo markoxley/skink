@@ -1,0 +1,108 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/ui_demo.skink
+// Purpose: Demo of the std/ui toolkit — common controls plus data
+//          binding through std/ui/binding. Shows a form, a bound
+//          table fed by a slice, a channel-fed log, and live labels.
+//          Run: SKINK_HOME=<repo> ./skink -o ui_demo samples/ui_demo.skink
+//
+// Author:  Mark Oxley
+// Created: 2026
+
+module main
+
+import "std/ui"
+import "std/ui/binding"
+import "std/strconv"
+
+var clicks = 0
+var logLines [][]string
+var workerRows [][]string
+
+fn onOk() {
+    clicks = clicks + 1
+}
+
+fn clicksText() -> string {
+    return "Clicks: " + strconv.Itoa(clicks)
+}
+
+// tableCell feeds the table from workerRows.
+fn tableCount() -> int {
+    return len(workerRows)
+}
+fn tableCell(row: int, col: int) -> string {
+    return workerRows[row][col]
+}
+
+fn main() -> int {
+    win := ui.NewWindow("Skink UI Demo", 860, 720, ui.WIN_RESIZABLE)
+    if !win.IsValid() {
+        return 1
+    }
+
+    // Observables — the "model" side of the bindings.
+    name := binding.NewObservable("world")
+    volume := binding.NewObservableInt(50)
+    enabled := binding.NewObservableBool(true)
+    choice := binding.NewObservableInt(0)
+
+    // Menus
+    bar := ui.NewMenuBar()
+    quitItem := ui.NewMenuItem("Quit", fn() { win.RequestClose() })
+    var fileItems []ui.MenuItem
+    fileItems = append(fileItems, quitItem)
+    bar.AddMenu("File", fileItems)
+    win.SetMenuBar(bar)
+
+    // Form
+    win.Add(ui.NewLabel("Name:"))
+    box := ui.NewTextBox()
+    win.Add(binding.BindTextBox(&win, box, name))
+
+    chk := ui.NewCheckBox("Enabled", enabled.GetBool())
+    win.Add(binding.BindCheck(chk, enabled))
+
+    slider := ui.NewSliderInt(0, 100, 1, volume.GetInt())
+    win.Add(binding.BindSliderInt(slider, volume))
+    win.Add(binding.BindProgress(volume, 100))
+
+    // Live label — re-reads clicks every frame.
+    win.Add(binding.BindLabel(clicksText))
+    win.Add(ui.NewButton("Click me", onOk))
+
+    var opts []string
+    opts = append(opts, "Alpha")
+    opts = append(opts, "Beta")
+    opts = append(opts, "Gamma")
+    combo := ui.NewComboBox(opts)
+    win.Add(binding.BindCombo(combo, choice))
+
+    // Bound table from a function model.
+    var headers []string
+    headers = append(headers, "ID")
+    headers = append(headers, "Task")
+    headers = append(headers, "Status")
+    model := binding.FromFunc(tableCount, tableCell)
+    win.Add(ui.NewTable(headers, model, 220))
+
+    // Seed some rows.
+    var r0 []string
+    r0 = append(r0, "1")
+    r0 = append(r0, "render")
+    r0 = append(r0, "ok")
+    var r1 []string
+    r1 = append(r1, "2")
+    r1 = append(r1, "events")
+    r1 = append(r1, "ok")
+    workerRows = append(workerRows, r0)
+    workerRows = append(workerRows, r1)
+
+    ui.Run(&win)
+    win.Destroy()
+    return 0
+}

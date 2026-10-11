@@ -1,0 +1,695 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/web/server_live_test.skink
+// Purpose: Live-socket regression tests for the HTTP server. These spawn
+//          real servers and drive them over real TCP connections, covering
+//          behavior that serialization-only unit tests cannot reach:
+//          keep-alive request loops, Content-Length framing, chunked
+//          bodies, timeouts, size caps, and panic recovery
+//          (comp_error.md #45-#49, #53-#57, #59, #64, #65).
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module server_live_test
+
+import "std/fs"
+import "std/libc"
+import "std/net"
+import "std/str"
+import "std/strconv"
+import "std/time"
+import "std/web/router"
+import "std/web/server"
+import "std/web/static"
+import "std/web/types"
+import "std/testing"
+
+// --- Test handlers -----------------------------------------------------
+
+// liveHello serves a fixed "hello" text body.
+fn liveHello(req: types.Request, w: *types.ResponseWriter) {
+    w.Text(200, "hello")
+}
+
+// liveEcho echoes the request body back verbatim.
+fn liveEcho(req: types.Request, w: *types.ResponseWriter) {
+    w.Text(200, req.Body())
+}
+
+// livePanic panics unconditionally to exercise the per-connection
+// recovery path.
+fn livePanic(req: types.Request, w: *types.ResponseWriter) {
+    panic("handler boom")
+}
+
+// liveQuery echoes the decoded "q" query parameter.
+fn liveQuery(req: types.Request, w: *types.ResponseWriter) {
+    w.Text(200, req.QueryParam("q"))
+}
+
+// livePath echoes the decoded request path.
+fn livePath(req: types.Request, w: *types.ResponseWriter) {
+    w.Text(200, req.Path())
+}
+
+// liveParam echoes the ":id" path parameter.
+fn liveParam(req: types.Request, w: *types.ResponseWriter) {
+    w.Text(200, req.URLParam("id"))
+}
+
+// liveInject attempts a CRLF header injection which the serializer must
+// neutralize.
+fn liveInject(req: types.Request, w: *types.ResponseWriter) {
+    w.Header("X-Test", "safe\r\nX-Injected: yes")
+    w.Text(200, "ok")
+}
+
+// liveTeapot returns a 418 to exercise extended status text.
+fn liveTeapot(req: types.Request, w: *types.ResponseWriter) {
+    w.WriteHeader(418)
+    w.Write("short and stout")
+}
+
+// liveServe runs a server in a spawned thread.
+fn liveServe(s: *server.Server) {
+    s.ListenAndServe()
+}
+
+// liveDial retries a TCP connect until the spawned server's accept loop
+// is running (spawn is asynchronous), then applies a client-side timeout
+// so a broken server fails fast instead of hanging the suite.
+fn liveDial(port: int) -> (net.Connection, bool) {
+    for i := 0; i < 40; i = i + 1 {
+        conn, err := net.Connect("127.0.0.1", port)
+        if err.message == "" {
+            conn.SetTimeout(5000)
+            return conn, true
+        }
+        time.SleepMs(50)
+    }
+    return net.Connection{fd: 0}, false
+}
+
+// liveClient buffers one client connection so coalesced responses (a
+// keep-alive or pipelined response that shares a TCP segment with the
+// next one) keep their leftover bytes for the following read.
+struct liveClient {
+    conn:  net.Connection
+    buf:   string
+    total: int
+    head:  int
+}
+
+// liveClientInit allocates a client reader for conn.
+fn liveClientInit(conn: net.Connection) -> liveClient {
+    return liveClient{conn: conn, buf: libc.malloc(65536), total: 0, head: 0}
+}
+
+// liveReadN reads one complete HTTP response from the buffered client:
+// it waits for the header terminator, honors Content-Length, and returns
+// a fresh byte buffer plus its length. Returns ("", 0) if the connection
+// closes before any data arrives.
+fn liveReadN(c: *liveClient) -> (string, int) {
+    // Compact leftover bytes to the front so offsets stay absolute.
+    if c.head > 0 {
+        for i := 0; i < c.total - c.head; i = i + 1 {
+            c.buf[i] = c.buf[c.head + i]
+        }
+        c.total = c.total - c.head
+        c.head = 0
+    }
+    headEnd := -1
+    bodyLen := 0
+    for {
+        if headEnd < 0 {
+            // The header block is pure ASCII, so the NUL-terminated view
+            // is safe to scan with string functions.
+            c.buf[c.total] = 0
+            headEnd = str.IndexOf(c.buf, "\r\n\r\n")
+            if headEnd >= 0 {
+                clIdx := str.IndexOf(c.buf, "Content-Length: ")
+                if clIdx >= 0 && clIdx < headEnd {
+                    tail := str.Substr(c.buf, clIdx + 16, headEnd - clIdx - 16)
+                    v, ok := strconv.ParseInt(str.Trim(tail))
+                    if ok {
+                        bodyLen = v
+                    }
+                }
+            }
+        }
+        if headEnd >= 0 && c.total >= headEnd + 4 + bodyLen {
+            end := headEnd + 4 + bodyLen
+            out := libc.malloc(end + 1)
+            libc.memcpy(out, c.buf, end)
+            out[end] = 0
+            c.head = end
+            return out, end
+        }
+        n := c.conn.Read(string(int64(c.buf) + int64(c.total)), 65535 - c.total)
+        if n <= 0 {
+            if c.total > 0 {
+                // Close after data (e.g. a HEAD response): return what
+                // arrived.
+                out := libc.malloc(c.total + 1)
+                libc.memcpy(out, c.buf, c.total)
+                out[c.total] = 0
+                c.head = c.total
+                return out, c.total
+            }
+            return "", 0
+        }
+        c.total = c.total + n
+    }
+    return "", 0
+}
+
+// liveReadResp reads one complete HTTP response and returns it as a
+// NUL-terminated string (truncating at any embedded NUL — fine for the
+// text assertions that use it).
+fn liveReadResp(c: *liveClient) -> string {
+    out, n := liveReadN(c)
+    if n == 0 {
+        return ""
+    }
+    return out
+}
+
+// liveRespBody extracts the body (everything after \r\n\r\n) from a raw
+// response string.
+fn liveRespBody(resp: string) -> string {
+    idx := str.IndexOf(resp, "\r\n\r\n")
+    if idx < 0 {
+        return ""
+    }
+    return str.Substr(resp, idx + 4, str.Len(resp) - idx - 4)
+}
+
+// TestLiveKeepAliveRequests guards #45/#64: two sequential requests on a
+// single connection must each get a response without the client closing
+// its write side (the old read-until-EOF loop deadlocked here).
+pub fn TestLiveKeepAliveRequests() {
+    r := router.NewRouter()
+    r.Get("/hello", liveHello)
+    s := server.NewServer(18101, &r)
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18101)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    conn.Send("GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
+    resp := liveReadResp(&cl)
+    testing.AssertContains(resp, "HTTP/1.1 200", "first keep-alive response status")
+    testing.AssertContains(resp, "Connection: keep-alive", "first keep-alive header")
+    testing.AssertEqualString("hello", liveRespBody(resp), "first keep-alive body")
+
+    conn.Send("GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
+    resp = liveReadResp(&cl)
+    testing.AssertContains(resp, "HTTP/1.1 200", "second keep-alive response status")
+    testing.AssertEqualString("hello", liveRespBody(resp), "second keep-alive body")
+    conn.Close()
+}
+
+// TestLivePostContentLength guards #45/#51: the server must read exactly
+// Content-Length body bytes — even when they arrive in a later segment —
+// and respond without waiting for connection close.
+pub fn TestLivePostContentLength() {
+    r := router.NewRouter()
+    r.Post("/echo", liveEcho)
+    s := server.NewServer(18102, &r)
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18102)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    // Send headers and body in separate writes.
+    conn.Send("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 7\r\n\r\n")
+    time.SleepMs(100)
+    conn.Send("payload")
+    resp := liveReadResp(&cl)
+    testing.AssertContains(resp, "HTTP/1.1 200", "POST echo status")
+    testing.AssertEqualString("payload", liveRespBody(resp), "POST echo body")
+    conn.Close()
+}
+
+// TestLiveConnectionClose guards #64: "Connection: close" must produce a
+// close-framed response and terminate the connection.
+pub fn TestLiveConnectionClose() {
+    r := router.NewRouter()
+    r.Get("/hello", liveHello)
+    s := server.NewServer(18103, &r)
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18103)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    conn.Send("GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    resp := liveReadResp(&cl)
+    testing.AssertContains(resp, "HTTP/1.1 200", "close response status")
+    testing.AssertContains(resp, "Connection: close", "close response header")
+    // The server must have closed its side.
+    buf := libc.malloc(64)
+    n := conn.Read(buf, 64)
+    testing.AssertTrue(n <= 0, "server closed connection after Connection: close")
+    libc.free(buf)
+    conn.Close()
+}
+
+// TestLivePipelined guards the leftover-buffer path: two requests sent in
+// a single write must each get their own response.
+pub fn TestLivePipelined() {
+    r := router.NewRouter()
+    r.Get("/hello", liveHello)
+    s := server.NewServer(18104, &r)
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18104)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    conn.Send("GET /hello HTTP/1.1\r\nHost: x\r\n\r\nGET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    resp1 := liveReadResp(&cl)
+    testing.AssertContains(resp1, "HTTP/1.1 200", "pipelined response 1 status")
+    testing.AssertEqualString("hello", liveRespBody(resp1), "pipelined response 1 body")
+    resp2 := liveReadResp(&cl)
+    testing.AssertContains(resp2, "HTTP/1.1 200", "pipelined response 2 status")
+    testing.AssertContains(resp2, "Connection: close", "pipelined response 2 close")
+    conn.Close()
+}
+
+// TestLivePanic500 guards #46: a panicking handler must produce a 500
+// response on that connection without killing the server — verified by a
+// successful request on a second connection.
+pub fn TestLivePanic500() {
+    r := router.NewRouter()
+    r.Get("/panic", livePanic)
+    r.Get("/hello", liveHello)
+    s := server.NewServer(18105, &r)
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18105)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    conn.Send("GET /panic HTTP/1.1\r\nHost: x\r\n\r\n")
+    resp := liveReadResp(&cl)
+    testing.AssertContains(resp, "HTTP/1.1 500", "panic response status")
+    conn.Close()
+
+    // The server must still be alive and serving on a new connection.
+    conn2, ok2 := liveDial(18105)
+    cl2 := liveClientInit(conn2)
+    if !ok2 {
+        testing.FailNow()
+    }
+    conn2.Send("GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
+    resp2 := liveReadResp(&cl2)
+    testing.AssertContains(resp2, "HTTP/1.1 200", "post-panic response status")
+    conn2.Close()
+}
+
+// TestLiveOversized413 guards #49: a request whose declared size exceeds
+// maxRequestBytes must be rejected with 413 and closed.
+pub fn TestLiveOversized413() {
+    r := router.NewRouter()
+    r.Post("/echo", liveEcho)
+    s := server.Server{port: 18106, handler: &r, tls: nil, maxRequestBytes: 256, readTimeoutMs: 5000, writeTimeoutMs: 5000}
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18106)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    conn.Send("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\n\r\n")
+    resp := liveReadResp(&cl)
+    testing.AssertContains(resp, "HTTP/1.1 413", "oversized request status")
+    conn.Close()
+}
+
+// TestLiveReadTimeout guards #48: a client that stalls mid-request must
+// have its connection closed by the server's read timeout.
+pub fn TestLiveReadTimeout() {
+    r := router.NewRouter()
+    r.Get("/hello", liveHello)
+    s := server.Server{port: 18107, handler: &r, tls: nil, maxRequestBytes: 1048576, readTimeoutMs: 400, writeTimeoutMs: 5000}
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18107)
+    if !ok {
+        testing.FailNow()
+    }
+    // Send a partial request and stall past the 400ms read timeout.
+    conn.Send("GET /hel")
+    time.SleepMs(900)
+    buf := libc.malloc(64)
+    n := conn.Read(buf, 64)
+    testing.AssertTrue(n <= 0, "server closed stalled connection")
+    libc.free(buf)
+    conn.Close()
+}
+
+// TestLiveHead guards #57: a HEAD response carries headers (including the
+// Content-Length a GET would produce) but no body bytes.
+pub fn TestLiveHead() {
+    r := router.NewRouter()
+    r.Get("/hello", liveHello)
+    s := server.NewServer(18108, &r)
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18108)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    conn.Send("HEAD /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    resp := liveReadResp(&cl)
+    testing.AssertContains(resp, "HTTP/1.1 200", "HEAD status")
+    testing.AssertContains(resp, "Content-Length: 5", "HEAD content-length")
+    // Body must be empty: the response ends at the blank line.
+    testing.AssertEqualString("", liveRespBody(resp), "HEAD body must be empty")
+    conn.Close()
+}
+
+// TestLiveLowercaseHeaders guards #54: header names are case-insensitive,
+// so a lowercase content-length must be honored.
+pub fn TestLiveLowercaseHeaders() {
+    r := router.NewRouter()
+    r.Post("/echo", liveEcho)
+    s := server.NewServer(18109, &r)
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18109)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    conn.Send("POST /echo HTTP/1.1\r\nhost: x\r\ncontent-length: 4\r\n\r\nabcd")
+    resp := liveReadResp(&cl)
+    testing.AssertContains(resp, "HTTP/1.1 200", "lowercase header request status")
+    testing.AssertEqualString("abcd", liveRespBody(resp), "lowercase header body")
+    conn.Close()
+}
+
+// TestLiveURLDecode guards #53: percent-encoded paths must be decoded for
+// routing and query values decoded with '+' as space.
+pub fn TestLiveURLDecode() {
+    r := router.NewRouter()
+    r.Get("/q", liveQuery)
+    r.Get("/p/*", livePath)
+    s := server.NewServer(18110, &r)
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18110)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    conn.Send("GET /q?q=a%20b+c HTTP/1.1\r\nHost: x\r\n\r\n")
+    resp := liveReadResp(&cl)
+    testing.AssertEqualString("a b c", liveRespBody(resp), "decoded query param")
+
+    conn.Send("GET /p/x%20y HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    resp = liveReadResp(&cl)
+    testing.AssertEqualString("/p/x y", liveRespBody(resp), "decoded path")
+    conn.Close()
+}
+
+// TestLiveHeaderInjection guards #55: CR/LF inside a response header
+// value must be stripped so it cannot inject a second header.
+pub fn TestLiveHeaderInjection() {
+    r := router.NewRouter()
+    r.Get("/inj", liveInject)
+    s := server.NewServer(18111, &r)
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18111)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    conn.Send("GET /inj HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    resp := liveReadResp(&cl)
+    // The injected header must not appear as its own line.
+    testing.AssertTrue(!str.Contains(resp, "\r\nX-Injected"), "injected header stripped")
+    testing.AssertContains(resp, "X-Test: safe", "sanitized header kept")
+    conn.Close()
+}
+
+// TestLiveExpect100 guards #56: a client sending Expect: 100-continue
+// must receive the interim 100 before it transmits the body.
+pub fn TestLiveExpect100() {
+    r := router.NewRouter()
+    r.Post("/echo", liveEcho)
+    s := server.NewServer(18112, &r)
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18112)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    conn.Send("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nExpect: 100-continue\r\n\r\n")
+    interim := liveReadResp(&cl)
+    testing.AssertContains(interim, "100 Continue", "interim 100 response")
+    conn.Send("abcd")
+    resp := liveReadResp(&cl)
+    testing.AssertContains(resp, "HTTP/1.1 200", "post-100 status")
+    testing.AssertEqualString("abcd", liveRespBody(resp), "post-100 body")
+    conn.Close()
+}
+
+// TestLiveChunked guards #65: a chunked transfer-encoded body must be
+// decoded before reaching the handler.
+pub fn TestLiveChunked() {
+    r := router.NewRouter()
+    r.Post("/echo", liveEcho)
+    s := server.NewServer(18113, &r)
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18113)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    conn.Send("POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n")
+    resp := liveReadResp(&cl)
+    testing.AssertContains(resp, "HTTP/1.1 200", "chunked request status")
+    testing.AssertEqualString("abcde", liveRespBody(resp), "decoded chunked body")
+    conn.Close()
+}
+
+// TestLiveURLParam guards #59: path parameters land in the dedicated
+// params map and are reachable via URLParam.
+pub fn TestLiveURLParam() {
+    r := router.NewRouter()
+    r.Get("/user/:id", liveParam)
+    s := server.NewServer(18114, &r)
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18114)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    conn.Send("GET /user/42 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    resp := liveReadResp(&cl)
+    testing.AssertEqualString("42", liveRespBody(resp), "URL param value")
+    conn.Close()
+}
+
+// TestLiveStatusText guards #58: extended status codes serialize their
+// standard reason phrases.
+pub fn TestLiveStatusText() {
+    r := router.NewRouter()
+    r.Get("/teapot", liveTeapot)
+    s := server.NewServer(18115, &r)
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18115)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    conn.Send("GET /teapot HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    resp := liveReadResp(&cl)
+    testing.AssertContains(resp, "HTTP/1.1 418 I'm a teapot", "status text")
+    conn.Close()
+}
+
+// TestLiveStaticBinary guards #52: a static file containing NUL bytes
+// must be served byte-for-byte — the old chunked str.Concat path
+// truncated at the first NUL.
+pub fn TestLiveStaticBinary() {
+    fs.Mkdir("/tmp/skink_live_static")
+    f, ferr := fs.Open("/tmp/skink_live_static/bin.dat", "wb")
+    if ferr.message != "" {
+        testing.FailNow()
+    }
+    raw := libc.malloc(6)
+    raw[0] = 0
+    raw[1] = 1
+    raw[2] = 2
+    raw[3] = 3
+    raw[4] = 65
+    raw[5] = 66
+    f.Write(raw, 6)
+    f.Close()
+    libc.free(raw)
+
+    r := router.NewRouter()
+    r.Get("/*", static.FileServer("/tmp/skink_live_static"))
+    s := server.NewServer(18116, &r)
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18116)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    conn.Send("GET /bin.dat HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    raw, total := liveReadN(&cl)
+    testing.AssertContains(raw, "HTTP/1.1 200", "binary file status")
+    testing.AssertContains(raw, "Content-Length: 6", "binary content-length")
+    headEnd := str.IndexOf(raw, "\r\n\r\n")
+    bodyStart := headEnd + 4
+    intact := total >= bodyStart + 6 && raw[bodyStart] == 0 && raw[bodyStart + 1] == 1 && raw[bodyStart + 3] == 3 && raw[bodyStart + 4] == 65 && raw[bodyStart + 5] == 66
+    testing.AssertTrue(intact, "binary body preserved including NULs")
+    conn.Close()
+    fs.Remove("/tmp/skink_live_static/bin.dat")
+    fs.Remove("/tmp/skink_live_static")
+}
+
+// TestLiveMultiRootFileServer guards #60: two FileServer handlers with
+// different roots mounted on one router must each serve their own tree
+// (the old module-global root made the last registration win).
+pub fn TestLiveMultiRootFileServer() {
+    fs.Mkdir("/tmp/skink_root_a")
+    fs.Mkdir("/tmp/skink_root_a/a")
+    fs.Mkdir("/tmp/skink_root_b")
+    fs.Mkdir("/tmp/skink_root_b/b")
+    fs.WriteAll("/tmp/skink_root_a/a/x.txt", "contentA")
+    fs.WriteAll("/tmp/skink_root_b/b/x.txt", "contentB")
+
+    r := router.NewRouter()
+    r.Get("/a/*", static.FileServer("/tmp/skink_root_a"))
+    r.Get("/b/*", static.FileServer("/tmp/skink_root_b"))
+    s := server.NewServer(18117, &r)
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18117)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    conn.Send("GET /a/x.txt HTTP/1.1\r\nHost: x\r\n\r\n")
+    resp := liveReadResp(&cl)
+    testing.AssertEqualString("contentA", liveRespBody(resp), "root A served its file")
+
+    conn.Send("GET /b/x.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    resp = liveReadResp(&cl)
+    testing.AssertEqualString("contentB", liveRespBody(resp), "root B served its file")
+    conn.Close()
+    fs.Remove("/tmp/skink_root_a/a/x.txt")
+    fs.Remove("/tmp/skink_root_b/b/x.txt")
+    fs.Remove("/tmp/skink_root_a/a")
+    fs.Remove("/tmp/skink_root_b/b")
+    fs.Remove("/tmp/skink_root_a")
+    fs.Remove("/tmp/skink_root_b")
+}
+
+// TestLiveShutdown guards #63: Shutdown() must close the listener so new
+// connects are refused while the accept loop drains and returns.
+pub fn TestLiveShutdown() {
+    r := router.NewRouter()
+    r.Get("/hello", liveHello)
+    s := server.NewServer(18118, &r)
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18118)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    conn.Send("GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    resp := liveReadResp(&cl)
+    testing.AssertContains(resp, "HTTP/1.1 200", "pre-shutdown response")
+    conn.Close()
+
+    s.Shutdown()
+    time.SleepMs(300)
+    // The listener must be closed: new connects are refused.
+    conn2, ok2 := liveDial(18118)
+    if ok2 {
+        // A refused connect is the expected outcome; an accepted one may
+        // also occur briefly while the OS drains the backlog — either
+        // way a subsequent request must not be served for long.
+        conn2.SetTimeout(500)
+        n := conn2.Send("GET /hello HTTP/1.1\r\nHost: x\r\n\r\n")
+        buf := libc.malloc(256)
+        m := conn2.Read(buf, 256)
+        conn2.Close()
+        libc.free(buf)
+        testing.AssertTrue(n <= 0 || m <= 0, "no response after shutdown")
+    }
+}
+
+// TestLiveMaxConns guards #61: with maxConns=1 a second connection is
+// not served until the first handler finishes (here: read timeout).
+pub fn TestLiveMaxConns() {
+    r := router.NewRouter()
+    r.Get("/hello", liveHello)
+    s := server.Server{port: 18119, handler: &r, tls: nil, maxRequestBytes: 1048576, readTimeoutMs: 600, writeTimeoutMs: 5000, maxConns: 1}
+    spawn liveServe(&s)
+
+    conn1, ok := liveDial(18119)
+    if !ok {
+        testing.FailNow()
+    }
+    // Occupy the single slot with a stalled partial request; the server
+    // holds it until the 600ms read timeout fires.
+    conn1.Send("GET /hel")
+
+    conn2, ok2 := liveDial(18119)
+    if !ok2 {
+        testing.FailNow()
+    }
+    cl2 := liveClientInit(conn2)
+    conn2.SetTimeout(200)
+    conn2.Send("GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    // Within 200ms the second connection must see nothing — its handler
+    // has not spawned because the slot is still held.
+    buf := libc.malloc(256)
+    n := conn2.Read(buf, 256)
+    testing.AssertTrue(n <= 0, "second conn not served while slot held")
+    libc.free(buf)
+    // Once conn1's read timeout frees the slot, conn2 is served.
+    conn2.SetTimeout(5000)
+    resp := liveReadResp(&cl2)
+    testing.AssertContains(resp, "HTTP/1.1 200", "second conn served after slot freed")
+    conn1.Close()
+    conn2.Close()
+}

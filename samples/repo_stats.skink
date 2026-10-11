@@ -1,0 +1,241 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//
+// Purpose: repo_stats — a concurrent source-code analyzer. Recursively
+//          walks a directory tree for .skink files, fans the work out
+//          to a pool of spawned workers over channels, aggregates per-
+//          file and total statistics (lines, comments, fns, structs,
+//          imports), prints a report, and writes a JSON summary.
+//
+//          Exercises: fs.ReadDir recursion, io.ReadFile, str.Split/
+//          TrimSpace/StartsWith-style scanning, maps, slices of structs,
+//          channels (bounded, close, for-in drain), spawn + WaitGroup,
+//          str.Builder, strconv, json.MarshalEntries, os.Args.
+//
+//          Run:  SKINK_HOME=<repo> ./skink -o repo_stats samples/repo_stats.skink
+//                ./repo_stats [dir]        # default dir: "std"
+//
+// Author:  Mark Oxley
+
+module main
+
+import "std/fs"
+import "std/io"
+import "std/str"
+import "std/strconv"
+import "std/os"
+import "std/json"
+import "std/waitgroup"
+import "std/sort"
+
+// FileStat is one analyzed file's contribution, sent over the results
+// channel. ok=false marks a file that could not be read.
+struct FileStat {
+    path:     string
+    ok:       bool
+    size:     int64
+    lines:    int
+    blanks:   int
+    comments: int
+    funcs:    int
+    structs:  int
+    imports:  int
+}
+
+// walk recursively collects .skink file paths under dir.
+fn walk(dir: string, out: []string) -> []string {
+    ents, err := fs.ReadDir(dir)
+    if err != nil {
+        return out
+    }
+    for e in ents {
+        p := dir + "/" + e.Name
+        if e.IsDir {
+            out = walk(p, out)
+        } else if str.EndsWith(e.Name, ".skink") {
+            out = append(out, p)
+        }
+    }
+    return out
+}
+
+// startsWithWord reports whether a trimmed line starts with kw as a
+// whole word (followed by whitespace or end-of-line).
+fn startsWithWord(line: string, kw: string) -> bool {
+    if !str.StartsWith(line, kw) {
+        return false
+    }
+    if str.Len(line) == str.Len(kw) {
+        return true
+    }
+    c := str.Substr(line, str.Len(kw), 1)
+    return c == " " || c == "\t"
+}
+
+// analyze counts lines/comments/decls in one source file.
+fn analyze(path: string, src: string) -> FileStat {
+    st := FileStat{path: path, ok: true, size: int64(str.Len(src)), lines: 0, blanks: 0, comments: 0, funcs: 0, structs: 0, imports: 0}
+    lines := str.Split(src, "\n")
+    for line in lines {
+        st.lines = st.lines + 1
+        t := str.Trim(line)
+        if str.Len(t) == 0 {
+            st.blanks = st.blanks + 1
+        } else if str.StartsWith(t, "//") {
+            st.comments = st.comments + 1
+        } else if startsWithWord(t, "fn") || startsWithWord(t, "pub fn") {
+            st.funcs = st.funcs + 1
+        } else if startsWithWord(t, "struct") || startsWithWord(t, "pub struct") {
+            st.structs = st.structs + 1
+        } else if startsWithWord(t, "import") {
+            st.imports = st.imports + 1
+        }
+    }
+    return st
+}
+
+// worker pulls paths from jobs until the channel closes, analyzes each,
+// and pushes a FileStat (ok=false on read failure) to results.
+fn worker(jobs: chan<string>, results: chan<FileStat>, wg: *waitgroup.WaitGroup) {
+    defer wg.Done()
+    for path in jobs {
+        src, err := io.ReadFile(path)
+        if err != nil {
+            results <- FileStat{path: path, ok: false, size: 0, lines: 0, blanks: 0, comments: 0, funcs: 0, structs: 0, imports: 0}
+            continue
+        }
+        results <- analyze(path, src)
+    }
+}
+
+// topByLines returns the indexes of the n largest-by-lines stats.
+fn topByLines(stats: []FileStat, n: int) -> []int {
+    var picked []int
+    used := make(map[string]bool)
+    for i in 0..len(stats) {
+        // Guard against duplicate selection via path keying.
+        used[strconv.Itoa(i)] = false
+    }
+    for k in 0..n {
+        _ = k
+        best := -1
+        for i in 0..len(stats) {
+            if used[strconv.Itoa(i)] {
+                continue
+            }
+            if best < 0 || stats[i].lines > stats[best].lines {
+                best = i
+            }
+        }
+        if best < 0 {
+            break
+        }
+        used[strconv.Itoa(best)] = true
+        picked = append(picked, best)
+    }
+    return picked
+}
+
+fn main() -> int {
+    root := "std"
+    if os.ArgsCount() > 1 {
+        args := os.Args()
+        root = args[1]
+    }
+
+    files := walk(root, []string{})
+    if len(files) == 0 {
+        io.PrintLine("no .skink files under " + root)
+        return 1
+    }
+
+    jobs := make(chan<string>, 8)
+    results := make(chan<FileStat>, len(files))
+    wg := waitgroup.New()
+
+    workers := 4
+    if len(files) < workers {
+        workers = len(files)
+    }
+    for w in 0..workers {
+        _ = w
+        wg.Add(1)
+        spawn worker(jobs, results, &wg)
+    }
+
+    for p in files {
+        jobs <- p
+    }
+    close(jobs)
+    wg.Wait()
+    close(results)
+
+    // Aggregate.
+    total := FileStat{path: "", ok: true, size: 0, lines: 0, blanks: 0, comments: 0, funcs: 0, structs: 0, imports: 0}
+    var all []FileStat
+    bad := 0
+    for st in results {
+        if !st.ok {
+            bad = bad + 1
+            continue
+        }
+        all = append(all, st)
+        total.lines = total.lines + st.lines
+        total.blanks = total.blanks + st.blanks
+        total.comments = total.comments + st.comments
+        total.funcs = total.funcs + st.funcs
+        total.structs = total.structs + st.structs
+        total.imports = total.imports + st.imports
+        total.size = total.size + st.size
+    }
+
+    // Report.
+    b := str.NewBuilder(1024)
+    b.Write("== repo_stats: " + root + " ==\n")
+    b.Write("files:    " + strconv.Itoa(len(all)))
+    if bad > 0 {
+        b.Write(" (" + strconv.Itoa(bad) + " unreadable)")
+    }
+    b.Write("\nlines:    " + strconv.Itoa(total.lines) + "\n")
+    b.Write("blank:    " + strconv.Itoa(total.blanks) + "\n")
+    b.Write("comments: " + strconv.Itoa(total.comments) + "\n")
+    b.Write("funcs:    " + strconv.Itoa(total.funcs) + "\n")
+    b.Write("structs:  " + strconv.Itoa(total.structs) + "\n")
+    b.Write("imports:  " + strconv.Itoa(total.imports) + "\n")
+    if len(all) > 0 {
+        b.Write("avg lines/file: " + strconv.Itoa(total.lines / len(all)) + "\n")
+    }
+
+    b.Write("\nlargest files by line count:\n")
+    for i in topByLines(all, 5) {
+        b.Write("  " + strconv.Itoa(all[i].lines) + "  " + all[i].path + "\n")
+    }
+    io.Print(b.String())
+
+    // Per-file line counts, sorted by path, as JSON summary.
+    names := make([]string, 0)
+    for st in all {
+        names = append(names, st.path)
+    }
+    sort.SortStrings(names)
+    var keys []string
+    var vals []string
+    keys = append(keys, "root")
+    vals = append(vals, root)
+    keys = append(keys, "files")
+    vals = append(vals, strconv.Itoa(len(all)))
+    keys = append(keys, "lines")
+    vals = append(vals, strconv.Itoa(total.lines))
+    keys = append(keys, "funcs")
+    vals = append(vals, strconv.Itoa(total.funcs))
+    keys = append(keys, "structs")
+    vals = append(vals, strconv.Itoa(total.structs))
+    werr := io.WriteFile("/tmp/repo_stats.json", json.MarshalEntries(keys, vals, len(keys)))
+    if werr != nil {
+        io.PrintLine("json write failed")
+        return 1
+    }
+    io.PrintLine("wrote /tmp/repo_stats.json")
+    return 0
+}

@@ -1,0 +1,286 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    skink.skink
+// Purpose: Main compiler driver; parses CLI flags, resolves modules,
+//          type-checks, emits LLVM IR, and invokes clang to produce
+//          a native executable.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/ast"
+import "std/checker"
+import "std/emitter"
+import "std/resolver"
+import "std/str"
+import "std/strconv"
+import "std/path"
+import "version"
+
+extern fn _skink_runtime_get_argc() -> int
+extern fn _skink_runtime_get_argv() -> []string
+
+extern fn getenv(name: string) -> string
+extern fn system(cmd: string) -> int
+extern fn remove(path: string) -> int
+extern fn fputs(s: string, fp: int64) -> int
+
+// usage prints the command-line usage message for the compiler.
+fn usage() {
+    println("usage: skink [-v | -version] [-t <target>] [-b <target>] [-o <output>] [-check | -emit-ll] <file.skink>")
+}
+
+// main is the compiler entry point; it dispatches to the test/bench
+// harnesses or performs a full compile-and-link cycle.
+fn main() -> int {
+    argc := _skink_runtime_get_argc()
+    argv := _skink_runtime_get_argv()
+
+    // Handle the -v / -version flag to print the version string.
+    if argc == 2 && (argv[1] == "-v" || argv[1] == "-version") {
+        println(version.Version)
+        return 0
+    }
+
+    // Determine the Skink standard library root from SKINK_HOME,
+    // falling back to the default system installation path.
+    skinkHome := getenv("SKINK_HOME")
+    if int64(skinkHome) == 0 || str.Len(skinkHome) == 0 {
+        skinkHome = "/usr/local/lib/skink"
+    }
+
+    // Delegate to the test harness script when -t is given.
+    if argc >= 3 && argv[1] == "-t" {
+        selfBin := argv[0]
+        binDir := path.Dir(selfBin)
+        if str.Equal(binDir, "") {
+            binDir = "."
+        }
+        script := str.Concat(binDir, "/skink_test.sh")
+        cmd := str.Concat("SKINK=", str.Concat(selfBin, str.Concat(" SKINK_HOME=", str.Concat(skinkHome, str.Concat(" ", str.Concat(script, str.Concat(" ", argv[2])))))))
+        testRc := system(cmd)
+        if testRc == 0 {
+            return 0
+        }
+        return 1
+    }
+
+    // Delegate to the benchmark harness script when -b is given.
+    if argc >= 3 && argv[1] == "-b" {
+        selfBin := argv[0]
+        binDir := path.Dir(selfBin)
+        if str.Equal(binDir, "") {
+            binDir = "."
+        }
+        script := str.Concat(binDir, "/skink_bench.sh")
+        cmd := str.Concat("SKINK=", str.Concat(selfBin, str.Concat(" SKINK_HOME=", str.Concat(skinkHome, str.Concat(" ", str.Concat(script, str.Concat(" ", argv[2])))))))
+        benchRc := system(cmd)
+        if benchRc == 0 {
+            return 0
+        }
+        return 1
+    }
+
+    if argc < 2 {
+        usage()
+        return 1
+    }
+
+    outName := ""
+    checkOnly := false
+    emitOnly := false
+    debugInfo := false
+
+    // Parse flags that precede the input file path.
+    i := 1
+    for i < argc - 1 {
+        arg := argv[i]
+        if arg == "-o" {
+            if i + 1 >= argc - 1 {
+                println("missing -o argument")
+                return 1
+            }
+            outName = argv[i + 1]
+            i = i + 2
+            continue
+        }
+        if arg == "-check" {
+            checkOnly = true
+            i = i + 1
+            continue
+        }
+        if arg == "-emit-ll" {
+            emitOnly = true
+            i = i + 1
+            continue
+        }
+        if arg == "-g" {
+            debugInfo = true
+            i = i + 1
+            continue
+        }
+        println(str.Concat("unknown flag: ", arg))
+        usage()
+        return 1
+    }
+
+    // The last argument is always the input source file.
+    fileName := argv[argc - 1]
+    if fileName == "-o" || fileName == "-check" || fileName == "-emit-ll" || fileName == "-g" {
+        println("missing input file")
+        usage()
+        return 1
+    }
+
+    // Derive the output binary name from the input file name if -o was not given.
+    if outName == "" {
+        outName = path.Base(fileName)
+        dot := str.LastIndexOf(outName, ".")
+        if dot >= 0 {
+            outName = str.Substr(outName, 0, dot)
+        }
+    }
+
+    // Resolve all transitive imports and collect top-level declarations.
+    decls, resolveErrs := resolver.Resolve(fileName, skinkHome)
+    if len(resolveErrs) > 0 {
+        j := 0
+        for j < len(resolveErrs) {
+            println(resolveErrs[j])
+            j = j + 1
+        }
+        return 1
+    }
+    c := checker.newChecker()
+    ok := checker.checkProgram(&c, decls)
+    if !ok {
+        errs := checker.Errors(&c)
+        j := 0
+        for j < len(errs) {
+            println(errs[j])
+            j = j + 1
+        }
+        return 1
+    }
+
+    // In -check mode we stop after type checking succeeds.
+    if checkOnly {
+        println("type check passed")
+        return 0
+    }
+
+    // Generate LLVM IR from the type-checked program.
+    cg := emitter.newCodeGen(&c, debugInfo)
+    ir := emitter.emitProgram(&cg, decls)
+    emitErrs := emitter.Errors(&cg)
+    if len(emitErrs) > 0 {
+        j := 0
+        for j < len(emitErrs) {
+            println(emitErrs[j])
+            j = j + 1
+        }
+        return 1
+    }
+
+    // In -emit-ll mode we print the IR to stdout and exit.
+    if emitOnly {
+        print(ir)
+        return 0
+    }
+
+    // Write the IR to a temporary .ll file for clang to consume.
+    llPath := str.Concat(outName, ".ll")
+    fp := fopen(llPath, "w")
+    if fp == 0 {
+        println(str.Concat("cannot open ", llPath))
+        return 1
+    }
+    fputs(ir, fp)
+    fclose(fp)
+
+    // Assemble the full runtime C source list that every Skink binary links against.
+    rt := str.Concat(skinkHome, "/runtime/rc_rt.c ")
+    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/fs_rt.c "))
+    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/regex_rt.c "))
+    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/sync_rt.c "))
+    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/tensor_rt.c "))
+    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/compress_rt.c "))
+    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/conc_rt.c "))
+    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/db_rt.c "))
+    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/reflect_rt.c "))
+    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/rules_rt.c "))
+    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/panic_rt.c "))
+    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/net_rt.c "))
+    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/llm_rt.c "))
+    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/mqtt_rt.c "))
+    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/tls_rt.c "))
+    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/template_bridge.ll "))
+
+    // Detect whether the program imports the UI library — its runtime
+    // shim (ui_rt.c) and SDL2 are only linked in that case so headless
+    // binaries carry no GUI dependency. Covers "std/ui" itself and any
+    // sub-module ("std/ui/binding", ...).
+    needsUI := false
+    uiScan := 0
+    for uiScan < len(decls) {
+        ud := decls[uiScan]
+        if ud.kind == ast.ST_IMPORT {
+            if str.Equal(ud.decl.importPath, "std/ui") || str.StartsWith(ud.decl.importPath, "std/ui/") {
+                needsUI = true
+            }
+        }
+        uiScan = uiScan + 1
+    }
+    if needsUI {
+        rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/ui_rt.c "))
+    }
+    // Detect platform at runtime to choose appropriate linker flags.
+    // Windows sets the OS environment variable to "Windows_NT".
+    osEnv := getenv("OS")
+    isWindows := str.Equal(osEnv, "Windows_NT")
+    // Invoke clang to compile the IR + runtime sources into a native binary.
+    clangFlags := "clang -Wno-override-module"
+    libs := "-lpthread -ldl -lm -lssl -lcrypto -lz -lsqlite3"
+    if isWindows {
+        // Windows (MinGW): winpthreads instead of pthread, Winsock2,
+        // no dl (Windows uses LoadLibrary), bcrypt for OpenSSL 3.x.
+        libs = "-lwinpthread -lws2_32 -lssl -lcrypto -lz -lsqlite3 -lbcrypt"
+    } else {
+        clangFlags = str.Concat(clangFlags, " -march=native")
+    }
+    if needsUI {
+        // SDL2 headers/libs must be installed (sdl2-devel / libsdl2-dev).
+        libs = str.Concat(libs, " -lSDL2")
+    }
+    if debugInfo {
+        clangFlags = str.Concat(clangFlags, " -g -O0")
+    } else {
+        clangFlags = str.Concat(clangFlags, " -O2")
+    }
+    cmd := str.Concat(clangFlags, str.Concat(" -o ", str.Concat(outName, str.Concat(" ", str.Concat(llPath, str.Concat(" ", str.Concat(rt, libs)))))))
+    rc := system(cmd)
+    remove(llPath)
+    if rc != 0 {
+        println("clang failed")
+        return 1
+    }
+    println(str.Concat("built ", outName))
+    return 0
+}

@@ -1,0 +1,124 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/path_operations.skink
+// Purpose: Demonstrates file path manipulation with std/path.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/path"
+import "std/io"
+import "std/fmt"
+
+pub fn main() {
+    io.PrintLine("=== Path Operations Demo ===")
+    io.PrintLine("")
+
+    // --- Join paths ---
+    io.PrintLine("--- Join ---")
+    p1 := path.Join([]string{"/home", "user", "documents", "file.txt"})
+    io.PrintLine("Join /home, user, documents, file.txt = " + p1)
+
+    p2 := path.Join([]string{"var", "log", "app.log"})
+    io.PrintLine("Join var, log, app.log = " + p2)
+
+    p3 := path.Join([]string{"/", "tmp", "skink"})
+    io.PrintLine("Join /, tmp, skink = " + p3)
+    io.PrintLine("")
+
+    // --- Base (last element) ---
+    io.PrintLine("--- Base ---")
+    paths := []string{
+        "/home/user/file.txt",
+        "/var/log/",
+        "file.txt",
+        "/",
+        "/usr/bin/skink",
+    }
+    for i := 0; i < len(paths); i = i + 1 {
+        io.PrintLine("Base(" + paths[i] + ") = " + path.Base(paths[i]))
+    }
+    io.PrintLine("")
+
+    // --- Dir (directory portion) ---
+    io.PrintLine("--- Dir ---")
+    for i := 0; i < len(paths); i = i + 1 {
+        io.PrintLine("Dir(" + paths[i] + ") = " + path.Dir(paths[i]))
+    }
+    io.PrintLine("")
+
+    // --- Extension ---
+    io.PrintLine("--- Extension ---")
+    extPaths := []string{
+        "file.txt",
+        "archive.tar.gz",
+        "README",
+        "/path/to/image.png",
+        "noext.",
+        ".hidden",
+    }
+    for i := 0; i < len(extPaths); i = i + 1 {
+        io.PrintLine("Ext(" + extPaths[i] + ") = " + path.Ext(extPaths[i]))
+    }
+    io.PrintLine("")
+
+    // --- Clean (normalize paths) ---
+    io.PrintLine("--- Clean ---")
+    messy := []string{
+        "/home//user/../user/./file.txt",
+        "var/log/../log/./app.log",
+        "/tmp/././test/../final",
+        "//double//slash",
+    }
+    for i := 0; i < len(messy); i = i + 1 {
+        io.PrintLine("Clean(" + messy[i] + ") = " + path.Clean(messy[i]))
+    }
+    io.PrintLine("")
+
+    // --- IsAbsolute ---
+    io.PrintLine("--- IsAbsolute ---")
+    absPaths := []string{
+        "/home/user",
+        "relative/path",
+        "/tmp",
+        "file.txt",
+        "/",
+    }
+    for i := 0; i < len(absPaths); i = i + 1 {
+        io.PrintLine("IsAbsolute(" + absPaths[i] + ") = " + fmt.Btoa(path.IsAbsolute(absPaths[i])))
+    }
+    io.PrintLine("")
+
+    // --- Practical: build paths dynamically ---
+    io.PrintLine("--- Practical: Building Config Paths ---")
+    configDir := "/etc/skink"
+    configFile := path.Join([]string{configDir, "config.yaml"})
+    logDir := path.Join([]string{configDir, "logs"})
+    logFile := path.Join([]string{logDir, "app.log"})
+    dataFile := path.Join([]string{configDir, "data", "db.sqlite"})
+
+    io.PrintLine("Config file: " + configFile)
+    io.PrintLine("Log directory: " + logDir)
+    io.PrintLine("Log file: " + logFile)
+    io.PrintLine("Data file: " + dataFile)
+    io.PrintLine("Config base: " + path.Base(configFile))
+    io.PrintLine("Config ext: " + path.Ext(configFile))
+    io.PrintLine("Log dir name: " + path.Base(logDir))
+}

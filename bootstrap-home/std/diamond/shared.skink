@@ -1,0 +1,23 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/diamond/shared.skink
+// Purpose: Leaf module for the diamond-import regression test
+//          (diamond_test). Imported both directly by the test and
+//          transitively through mid.skink.
+//
+// Licensed under the Apache License, Version 2.0.
+
+module shared
+
+// SharedFn returns a constant so diamond_test can verify the module was
+// loaded exactly once and its symbols resolve.
+pub fn SharedFn() -> int {
+    return 42
+}
+
+// SharedVal is an exported constant used by mid.
+pub const SharedVal = 10

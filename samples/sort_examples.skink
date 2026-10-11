@@ -1,0 +1,145 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/sort_examples.skink
+// Purpose: Demonstrates sorting integers, floats, strings, and reversal.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/sort"
+import "std/io"
+import "std/strconv"
+
+pub fn main() {
+    io.PrintLine("=== Sort Examples Demo ===")
+    io.PrintLine("")
+
+    // --- Sorting integers ---
+    io.PrintLine("--- Sorting Integers ---")
+    nums := []int{5, 2, 8, 1, 9, 3, 7, 4, 6}
+    io.Print("Before: ")
+    printInts(nums)
+    sort.SortInts(nums)
+    io.Print("After:  ")
+    printInts(nums)
+    io.PrintLine("")
+
+    // --- Sorting strings ---
+    io.PrintLine("--- Sorting Strings ---")
+    names := []string{"Charlie", "Alice", "Bob", "Eve", "Dave"}
+    io.Print("Before: ")
+    printStrings(names)
+    sort.SortStrings(names)
+    io.Print("After:  ")
+    printStrings(names)
+    io.PrintLine("")
+
+    // --- Sorting floats ---
+    io.PrintLine("--- Sorting Floats ---")
+    floats := []float{3.14, 1.41, 2.72, 0.58, 1.62}
+    io.Print("Before: ")
+    printFloats(floats)
+    sort.SortFloats(floats)
+    io.Print("After:  ")
+    printFloats(floats)
+    io.PrintLine("")
+
+    // --- Reverse sorting ---
+    io.PrintLine("--- Reverse Sorting ---")
+    nums2 := []int{5, 2, 8, 1, 9, 3, 7, 4, 6}
+    sort.SortInts(nums2)
+    sort.Reverse<int>(nums2)
+    io.Print("Reversed: ")
+    printInts(nums2)
+    io.PrintLine("")
+
+    // --- Sort already sorted ---
+    io.PrintLine("--- Already Sorted ---")
+    sorted := []int{1, 2, 3, 4, 5}
+    io.Print("Input:  ")
+    printInts(sorted)
+    sort.SortInts(sorted)
+    io.Print("Output: ")
+    printInts(sorted)
+    io.PrintLine("")
+
+    // --- Sort with duplicates ---
+    io.PrintLine("--- Sorting With Duplicates ---")
+    dups := []int{3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5}
+    io.Print("Before: ")
+    printInts(dups)
+    sort.SortInts(dups)
+    io.Print("After:  ")
+    printInts(dups)
+    io.PrintLine("")
+
+    // --- Sort strings alphabetically ---
+    io.PrintLine("--- Sorting Strings Alphabetically ---")
+    fruits := []string{"zebra", "apple", "mango", "banana", "cherry"}
+    io.Print("Before: ")
+    printStrings(fruits)
+    sort.SortStrings(fruits)
+    io.Print("After:  ")
+    printStrings(fruits)
+    io.PrintLine("")
+
+    // --- Reverse strings ---
+    io.PrintLine("--- Reverse Sorted Strings ---")
+    sort.SortStrings(fruits)
+    sort.Reverse<string>(fruits)
+    io.Print("Reversed: ")
+    printStrings(fruits)
+}
+
+// printInts prints a slice of integers.
+fn printInts(arr: []int) {
+    io.PrintString("[")
+    for i := 0; i < len(arr); i = i + 1 {
+        if i > 0 {
+            io.PrintString(", ")
+        }
+        io.PrintString(strconv.Itoa(arr[i]))
+    }
+    io.PrintLine("]")
+}
+
+// printStrings prints a slice of strings.
+fn printStrings(arr: []string) {
+    io.PrintString("[")
+    for i := 0; i < len(arr); i = i + 1 {
+        if i > 0 {
+            io.PrintString(", ")
+        }
+        io.PrintString(arr[i])
+    }
+    io.PrintLine("]")
+}
+
+// printFloats prints a slice of floats.
+fn printFloats(arr: []float) {
+    io.PrintString("[")
+    for i := 0; i < len(arr); i = i + 1 {
+        if i > 0 {
+            io.PrintString(", ")
+        }
+        io.PrintString(strconv.FormatFloat(arr[i], 2))
+    }
+    io.PrintLine("]")
+}

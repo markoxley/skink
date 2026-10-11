@@ -1,0 +1,637 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/ui/binding.skink
+// Purpose: Data binding for the ui toolkit. `Observable` is a mutable
+//          cell with subscribers; `Bind*` adapters wrap ui controls so
+//          widget state and application data stay in sync both ways.
+//          `RowModel` adapters expose tables from slices, functions, or
+//          channels — the table re-queries its model every frame, so
+//          source changes show up without explicit refresh calls.
+//
+//          Two-way sync is poll-based: each Draw frame compares widget
+//          state to the observable and writes whichever side changed.
+//          No copy is needed for read-only views — implement
+//          ui.RowModel directly for custom sources (db rows, files,
+//          remote data).
+//
+// Author:  Mark Oxley
+// Created: 2026
+
+module binding
+
+import "std/ui"
+import "std/str"
+import "std/strconv"
+
+// Re-declared externs — C symbols are global, so bound widgets can draw
+// straight to the frame handle without owning a *ui.Window.
+extern fn Skink_ui_label(h: int64, s: string, align: int)
+extern fn Skink_ui_progress(h: int64, cur: int64, max: int64, modifiable: int64) -> int64
+
+// ============================================================================
+// Observable — mutable cell + subscribers
+// ============================================================================
+
+// Kind tags for the value stored in an Observable.
+pub const OBS_STRING = 0
+pub const OBS_INT    = 1
+pub const OBS_FLOAT  = 2
+pub const OBS_BOOL   = 3
+
+// Observable is a mutable value cell. `Set`/`SetInt`/`SetInt64`/
+// `SetFloat`/`SetBool` write and invoke every subscriber — but only
+// when the stored value actually changes (kind or content); a same-
+// value set is a no-op. Bound widgets pick changes up on their next
+// Draw frame (per-frame polling keeps widgets and data in sync without
+// an event queue).
+pub struct Observable {
+    kind: int
+    s:    string
+    i:    int64
+    f:    float
+    b:    bool
+    subs: []fn()
+
+    // Get reads the string value.
+    pub fn Get(self: Observable) -> string {
+        return self.s
+    }
+
+    // GetInt reads the int value.
+    pub fn GetInt(self: Observable) -> int {
+        return int(self.i)
+    }
+
+    // GetInt64 reads the int64 value.
+    pub fn GetInt64(self: Observable) -> int64 {
+        return self.i
+    }
+
+    // GetFloat reads the float value.
+    pub fn GetFloat(self: Observable) -> float {
+        return self.f
+    }
+
+    // GetBool reads the bool value.
+    pub fn GetBool(self: Observable) -> bool {
+        return self.b
+    }
+
+    // Kind reports the stored value's type tag (OBS_*).
+    pub fn Kind(self: Observable) -> int {
+        return self.kind
+    }
+
+    // Set writes a string and notifies subscribers. A set that would not
+    // change the observable (same kind AND same value) is a no-op —
+    // subscribers fire only on actual changes.
+    pub fn Set(self: *Observable, v: string) {
+        if self.kind == OBS_STRING && self.s == v {
+            return
+        }
+        self.kind = OBS_STRING
+        self.s = v
+        self.Notify()
+    }
+
+    // SetInt writes an int and notifies subscribers on change only.
+    pub fn SetInt(self: *Observable, v: int) {
+        if self.kind == OBS_INT && self.i == int64(v) {
+            return
+        }
+        self.kind = OBS_INT
+        self.i = int64(v)
+        self.Notify()
+    }
+
+    // SetInt64 writes an int64 and notifies subscribers on change only.
+    pub fn SetInt64(self: *Observable, v: int64) {
+        if self.kind == OBS_INT && self.i == v {
+            return
+        }
+        self.kind = OBS_INT
+        self.i = v
+        self.Notify()
+    }
+
+    // SetFloat writes a float and notifies subscribers on change only.
+    pub fn SetFloat(self: *Observable, v: float) {
+        if self.kind == OBS_FLOAT && self.f == v {
+            return
+        }
+        self.kind = OBS_FLOAT
+        self.f = v
+        self.Notify()
+    }
+
+    // SetBool writes a bool and notifies subscribers on change only.
+    pub fn SetBool(self: *Observable, v: bool) {
+        if self.kind == OBS_BOOL && self.b == v {
+            return
+        }
+        self.kind = OBS_BOOL
+        self.b = v
+        self.Notify()
+    }
+
+    // Subscribe registers fn to run on every value change.
+    pub fn Subscribe(self: *Observable, cb: fn()) {
+        self.subs = append(self.subs, cb)
+    }
+
+    // Notify runs all subscribers (called by every Set).
+    pub fn Notify(self: *Observable) {
+        i := 0
+        for i < len(self.subs) {
+            self.subs[i]()
+            i = i + 1
+        }
+    }
+}
+
+// NewObservable makes a string observable.
+pub fn NewObservable(v: string) -> *Observable {
+    o := Observable{kind: OBS_STRING, s: v}
+    return &o
+}
+
+// NewObservableInt makes an int observable.
+pub fn NewObservableInt(v: int) -> *Observable {
+    o := Observable{kind: OBS_INT, i: int64(v)}
+    return &o
+}
+
+// NewObservableFloat makes a float observable.
+pub fn NewObservableFloat(v: float) -> *Observable {
+    o := Observable{kind: OBS_FLOAT, f: v}
+    return &o
+}
+
+// NewObservableBool makes a bool observable.
+pub fn NewObservableBool(v: bool) -> *Observable {
+    o := Observable{kind: OBS_BOOL, b: v}
+    return &o
+}
+
+// ============================================================================
+// BoundTextBox — TextBox <-> Observable(string), two-way
+// ============================================================================
+
+// BoundTextBox keeps a ui.TextBox and a string Observable in sync.
+// While the box is being edited, user input wins (push); otherwise
+// observable writes update the box (pull).
+pub struct BoundTextBox {
+    Win:  *ui.Window
+    Box:  *ui.TextBox
+    Obs:  *Observable
+
+    pub fn Draw(self: *BoundTextBox, h: int64) {
+        cur := self.Box.Text(self.Win)
+        obs := self.Obs.Get()
+        // Pull: data changed elsewhere → refresh the editor unless the
+        // user is actively typing in a text field right now.
+        if cur != obs && !ui.AnyTextActive(self.Win) {
+            self.Box.SetText(self.Win, obs)
+            cur = obs
+        }
+        self.Box.Draw(h)
+        // Push: editor differs → write back.
+        after := self.Box.Text(self.Win)
+        if after != obs {
+            self.Obs.Set(after)
+        }
+    }
+
+    pub fn Height(self: *BoundTextBox) -> int {
+        return self.Box.Height()
+    }
+}
+
+// BindTextBox wires a TextBox to a string observable.
+pub fn BindTextBox(win: *ui.Window, box: *ui.TextBox, obs: *Observable) -> *BoundTextBox {
+    b := BoundTextBox{Win: win, Box: box, Obs: obs}
+    box.SetText(win, obs.Get())
+    return &b
+}
+
+// ============================================================================
+// BoundCheck — CheckBoxC <-> Observable(bool)
+// ============================================================================
+
+// BoundCheck keeps a checkbox and a bool observable in sync both ways.
+pub struct BoundCheck {
+    Cb:  *ui.CheckBoxC
+    Obs: *Observable
+
+    pub fn Draw(self: *BoundCheck, h: int64) {
+        if self.Cb.Checked != self.Obs.GetBool() {
+            self.Cb.Checked = self.Obs.GetBool()
+        }
+        self.Cb.Draw(h)
+        if self.Cb.Checked != self.Obs.GetBool() {
+            self.Obs.SetBool(self.Cb.Checked)
+        }
+    }
+
+    pub fn Height(self: *BoundCheck) -> int {
+        return self.Cb.Height()
+    }
+}
+
+// BindCheck wires a checkbox to a bool observable.
+pub fn BindCheck(cb: *ui.CheckBoxC, obs: *Observable) -> *BoundCheck {
+    b := BoundCheck{Cb: cb, Obs: obs}
+    cb.Checked = obs.GetBool()
+    return &b
+}
+
+// ============================================================================
+// BoundSliderInt / BoundSliderFloat — sliders <-> numeric observables
+// ============================================================================
+
+// BoundSliderInt keeps an int slider in sync with an int observable.
+pub struct BoundSliderInt {
+    S:   *ui.SliderInt
+    Obs: *Observable
+
+    pub fn Draw(self: *BoundSliderInt, h: int64) {
+        if self.S.Value != self.Obs.GetInt() {
+            self.S.Value = self.Obs.GetInt()
+        }
+        self.S.Draw(h)
+        if self.S.Value != self.Obs.GetInt() {
+            self.Obs.SetInt(self.S.Value)
+        }
+    }
+
+    pub fn Height(self: *BoundSliderInt) -> int {
+        return self.S.Height()
+    }
+}
+
+// BindSliderInt wires a slider to an int observable.
+pub fn BindSliderInt(s: *ui.SliderInt, obs: *Observable) -> *BoundSliderInt {
+    b := BoundSliderInt{S: s, Obs: obs}
+    s.Value = obs.GetInt()
+    return &b
+}
+
+// BoundSliderFloat keeps a float slider in sync with a float observable.
+pub struct BoundSliderFloat {
+    S:   *ui.SliderFloat
+    Obs: *Observable
+
+    pub fn Draw(self: *BoundSliderFloat, h: int64) {
+        if self.S.Value != self.Obs.GetFloat() {
+            self.S.Value = self.Obs.GetFloat()
+        }
+        self.S.Draw(h)
+        if self.S.Value != self.Obs.GetFloat() {
+            self.Obs.SetFloat(self.S.Value)
+        }
+    }
+
+    pub fn Height(self: *BoundSliderFloat) -> int {
+        return self.S.Height()
+    }
+}
+
+// BindSliderFloat wires a float slider to a float observable.
+pub fn BindSliderFloat(s: *ui.SliderFloat, obs: *Observable) -> *BoundSliderFloat {
+    b := BoundSliderFloat{S: s, Obs: obs}
+    s.Value = obs.GetFloat()
+    return &b
+}
+
+// BoundProperty keeps a PropertyInt spinbox in sync with an int
+// observable.
+pub struct BoundProperty {
+    P:   *ui.PropertyInt
+    Obs: *Observable
+
+    pub fn Draw(self: *BoundProperty, h: int64) {
+        if self.P.Value != self.Obs.GetInt() {
+            self.P.Value = self.Obs.GetInt()
+        }
+        self.P.Draw(h)
+        if self.P.Value != self.Obs.GetInt() {
+            self.Obs.SetInt(self.P.Value)
+        }
+    }
+
+    pub fn Height(self: *BoundProperty) -> int {
+        return self.P.Height()
+    }
+}
+
+// BindProperty wires a PropertyInt to an int observable.
+pub fn BindProperty(p: *ui.PropertyInt, obs: *Observable) -> *BoundProperty {
+    b := BoundProperty{P: p, Obs: obs}
+    p.Value = obs.GetInt()
+    return &b
+}
+
+// ============================================================================
+// Selection bindings — ComboBox/RadioGroup/ListBox <-> Observable(int)
+// ============================================================================
+
+// BoundCombo keeps a ComboBox selection in sync with an int observable.
+pub struct BoundCombo {
+    Cb:  *ui.ComboBox
+    Obs: *Observable
+
+    pub fn Draw(self: *BoundCombo, h: int64) {
+        if self.Cb.Selected() != self.Obs.GetInt() {
+            self.Cb.Select(self.Obs.GetInt())
+        }
+        self.Cb.Draw(h)
+        if self.Cb.Selected() != self.Obs.GetInt() {
+            self.Obs.SetInt(self.Cb.Selected())
+        }
+    }
+
+    pub fn Height(self: *BoundCombo) -> int {
+        return self.Cb.Height()
+    }
+}
+
+// BindCombo wires a ComboBox selection index to an int observable.
+pub fn BindCombo(cb: *ui.ComboBox, obs: *Observable) -> *BoundCombo {
+    b := BoundCombo{Cb: cb, Obs: obs}
+    cb.Select(obs.GetInt())
+    return &b
+}
+
+// BoundRadio keeps a RadioGroup selection in sync with an int
+// observable.
+pub struct BoundRadio {
+    Rg:  *ui.RadioGroup
+    Obs: *Observable
+
+    pub fn Draw(self: *BoundRadio, h: int64) {
+        if self.Rg.Selected() != self.Obs.GetInt() {
+            self.Rg.Select(self.Obs.GetInt())
+        }
+        self.Rg.Draw(h)
+        if self.Rg.Selected() != self.Obs.GetInt() {
+            self.Obs.SetInt(self.Rg.Selected())
+        }
+    }
+
+    pub fn Height(self: *BoundRadio) -> int {
+        return self.Rg.Height()
+    }
+}
+
+// BindRadio wires a RadioGroup selection index to an int observable.
+pub fn BindRadio(rg: *ui.RadioGroup, obs: *Observable) -> *BoundRadio {
+    b := BoundRadio{Rg: rg, Obs: obs}
+    rg.Select(obs.GetInt())
+    return &b
+}
+
+// BoundList keeps a ListBox selection in sync with an int observable.
+pub struct BoundList {
+    Lb:  *ui.ListBox
+    Obs: *Observable
+
+    pub fn Draw(self: *BoundList, h: int64) {
+        // Selection observable syncs the highlighted row; Items are
+        // already re-read every frame, so mutating Lb.Items is how a
+        // dynamic source updates the list.
+        self.Lb.Draw(h)
+        if self.Lb.Selected() != self.Obs.GetInt() {
+            self.Obs.SetInt(self.Lb.Selected())
+        }
+    }
+
+    pub fn Height(self: *BoundList) -> int {
+        return self.Lb.Height()
+    }
+}
+
+// BindList wires a ListBox selection index to an int observable.
+pub fn BindList(lb: *ui.ListBox, obs: *Observable) -> *BoundList {
+    b := BoundList{Lb: lb, Obs: obs}
+    return &b
+}
+
+// ============================================================================
+// One-way bindings (display only)
+// ============================================================================
+
+// BoundLabel renders a computed string every frame — the cheapest way
+// to surface live state ("counter", status text, formatted values).
+pub struct BoundLabel {
+    Src: fn() -> string
+
+    pub fn Draw(self: *BoundLabel, h: int64) {
+        Skink_ui_label(h, self.Src(), 0)
+    }
+
+    pub fn Height(self: *BoundLabel) -> int {
+        return 24
+    }
+}
+
+// BindLabel makes a label that re-reads `src` every frame.
+pub fn BindLabel(src: fn() -> string) -> *BoundLabel {
+    l := BoundLabel{Src: src}
+    return &l
+}
+
+// BoundProgress shows an int observable as a progress bar.
+pub struct BoundProgress {
+    Obs: *Observable
+    Max: int
+
+    pub fn Draw(self: *BoundProgress, h: int64) {
+        mx := self.Max
+        if mx <= 0 {
+            mx = 100
+        }
+        Skink_ui_progress(h, int64(self.Obs.GetInt()), int64(mx), 0)
+    }
+
+    pub fn Height(self: *BoundProgress) -> int {
+        return 22
+    }
+}
+
+// BindProgress wires an int observable to a progress bar (one-way).
+pub fn BindProgress(obs: *Observable, max: int) -> *BoundProgress {
+    b := BoundProgress{Obs: obs, Max: max}
+    return &b
+}
+
+// BoundColor keeps a ColorPicker in sync with an int64 RGBA observable.
+pub struct BoundColor {
+    Cp:  *ui.ColorPicker
+    Obs: *Observable
+
+    pub fn Draw(self: *BoundColor, h: int64) {
+        if self.Cp.RGBA != self.Obs.GetInt64() {
+            self.Cp.RGBA = self.Obs.GetInt64()
+        }
+        self.Cp.Draw(h)
+        if self.Cp.RGBA != self.Obs.GetInt64() {
+            self.Obs.SetInt64(self.Cp.RGBA)
+        }
+    }
+
+    pub fn Height(self: *BoundColor) -> int {
+        return self.Cp.Height()
+    }
+}
+
+// BindColor wires a ColorPicker to an int64 (0xRRGGBBAA) observable.
+pub fn BindColor(cp: *ui.ColorPicker, obs: *Observable) -> *BoundColor {
+    b := BoundColor{Cp: cp, Obs: obs}
+    cp.RGBA = obs.GetInt64()
+    return &b
+}
+
+// ============================================================================
+// RowModel adapters — expose data sources to ui.Table
+// ============================================================================
+
+// SliceModel backs a Table from a [][]string — the simplest source.
+// Mutate `rows` any time; the table re-queries each frame.
+pub struct SliceModel {
+    Rows: [][]string
+
+    pub fn RowCount(self: *SliceModel) -> int {
+        return len(self.Rows)
+    }
+
+    pub fn CellText(self: *SliceModel, row: int, col: int) -> string {
+        if row < 0 || row >= len(self.Rows) {
+            return ""
+        }
+        r := self.Rows[row]
+        if col < 0 || col >= len(r) {
+            return ""
+        }
+        return r[col]
+    }
+}
+
+// FromSlice adapts [][]string rows to a ui.RowModel for ui.NewTable.
+pub fn FromSlice(rows: [][]string) -> *SliceModel {
+    m := SliceModel{Rows: rows}
+    return &m
+}
+
+// FuncModel backs a Table from callbacks — the "any source" adapter:
+// wire db queries, file contents, computed views, remote data.
+pub struct FuncModel {
+    CountFn: fn() -> int
+    CellFn:  fn(int, int) -> string
+
+    pub fn RowCount(self: *FuncModel) -> int {
+        return self.CountFn()
+    }
+
+    pub fn CellText(self: *FuncModel, row: int, col: int) -> string {
+        return self.CellFn(row, col)
+    }
+}
+
+// FromFunc adapts count/cell callbacks to a ui.RowModel.
+pub fn FromFunc(count: fn() -> int, cell: fn(int, int) -> string) -> *FuncModel {
+    m := FuncModel{CountFn: count, CellFn: cell}
+    return &m
+}
+
+// ChanModel drains a chan<string> into rows — feed a table (or list)
+// from producers without coupling them to the frame loop.
+pub struct ChanModel {
+    ch:   chan<string>
+    col:  int
+    Rows: [][]string
+
+    // drain moves every pending channel message into Rows. Called by
+    // RowCount each frame, so senders never block on the UI.
+    // drain moves every queued channel value into Rows. len() is used as
+    // the loop guard rather than a select/default probe because a closed
+    // channel stays "ready" forever — select would loop infinitely.
+    fn drain(self: *ChanModel) {
+        for len(self.ch) > 0 {
+            s := <-self.ch
+            var row []string
+            row = append(row, s)
+            self.Rows = append(self.Rows, row)
+        }
+    }
+
+    pub fn RowCount(self: *ChanModel) -> int {
+        self.drain()
+        return len(self.Rows)
+    }
+
+    pub fn CellText(self: *ChanModel, row: int, col: int) -> string {
+        if row < 0 || row >= len(self.Rows) {
+            return ""
+        }
+        if col >= len(self.Rows[row]) {
+            return ""
+        }
+        return self.Rows[row][col]
+    }
+}
+
+// FromChan adapts a chan<string> to a ui.RowModel; each message becomes
+// a one-column row appended to the table.
+pub fn FromChan(ch: chan<string>) -> *ChanModel {
+    m := ChanModel{ch: ch}
+    return &m
+}
+
+// ============================================================================
+// Convenience: bound column lists for dynamic item sets
+// ============================================================================
+
+// ItemsOf refreshes a ListBox's Items from a callback every frame —
+// for sources that change identity as well as content.
+pub struct ItemsOf {
+    Src: fn() -> []string
+    Lb:  *ui.ListBox
+
+    pub fn Draw(self: *ItemsOf, h: int64) {
+        self.Lb.Items = self.Src()
+        self.Lb.Draw(h)
+    }
+
+    pub fn Height(self: *ItemsOf) -> int {
+        return self.Lb.Height()
+    }
+}
+
+// BindItems refreshes ListBox items from `src` every frame.
+pub fn BindItems(lb: *ui.ListBox, src: fn() -> []string) -> *ItemsOf {
+    i := ItemsOf{Src: src, Lb: lb}
+    return &i
+}
+
+// ============================================================================
+// Format helpers for BoundLabel
+// ============================================================================
+
+// IntText returns a fn producing an observable's int value as text.
+pub fn IntText(obs: *Observable) -> fn() -> string {
+    // NB: closing over obs keeps the pointer live; each call re-reads.
+    return fn() -> string {
+        return strconv.Itoa(obs.GetInt())
+    }
+}
+
+// StrText returns a fn producing an observable's string value.
+pub fn StrText(obs: *Observable) -> fn() -> string {
+    return fn() -> string {
+        return obs.Get()
+    }
+}

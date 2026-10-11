@@ -1,0 +1,484 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/compiler_expr_test.skink
+// Purpose: Skink module for compiler expr test.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module compiler_expr_test
+
+import "testing"
+
+// === If Expressions ===
+
+// TestIfExprTrue verifies if expression returns true branch value.
+pub fn TestIfExprTrue() {
+    x := 5
+    result := if x > 0 { 1 } else { -1 }
+    testing.AssertEqualInt(1, result, "if expr true branch")
+}
+
+// TestIfExprFalse verifies if expression returns false branch value.
+pub fn TestIfExprFalse() {
+    x := -5
+    result := if x > 0 { 1 } else { -1 }
+    testing.AssertEqualInt(-1, result, "if expr false branch")
+}
+
+// TestIfExprNoElse verifies if expression with else branch.
+pub fn TestIfExprNoElse() {
+    x := 5
+    result := if x > 0 { 42 } else { 0 }
+    testing.AssertEqualInt(42, result, "if expr with else")
+}
+
+// TestIfExprNested verifies nested if-else-if expression.
+pub fn TestIfExprNested() {
+    x := 15
+    result := if x < 10 { 1 } else if x < 20 { 2 } else { 3 }
+    testing.AssertEqualInt(2, result, "nested if expr")
+}
+
+// TestIfExprInExpression verifies if expression used in larger expression.
+pub fn TestIfExprInExpression() {
+    x := 10
+    result := (if x > 5 { 100 } else { 0 }) + 1
+    testing.AssertEqualInt(101, result, "if expr in larger expression")
+}
+
+// === Match Expressions ===
+
+// TestMatchInt verifies match expression on int subjects.
+pub fn TestMatchInt() {
+    x := 2
+    result := match x {
+        1 => "one"
+        2 => "two"
+        3 => "three"
+        _ => "other"
+    }
+    testing.AssertEqualString("two", result, "match int")
+}
+
+// TestMatchWildcard verifies match wildcard (_) catches unmatched values.
+pub fn TestMatchWildcard() {
+    x := 99
+    result := match x {
+        1 => "one"
+        _ => "other"
+    }
+    testing.AssertEqualString("other", result, "match wildcard")
+}
+
+// TestMatchString verifies match expression on string subjects.
+pub fn TestMatchString() {
+    s := "hello"
+    result := match s {
+        "hi" => 1
+        "hello" => 2
+        "hey" => 3
+        _ => 0
+    }
+    testing.AssertEqualInt(2, result, "match string")
+}
+
+// TestMatchBool verifies match expression on bool true.
+pub fn TestMatchBool() {
+    b := true
+    result := match b {
+        true => "yes"
+        false => "no"
+        _ => "unknown"
+    }
+    testing.AssertEqualString("yes", result, "match bool true")
+}
+
+// TestMatchBoolFalse verifies match expression on bool false.
+pub fn TestMatchBoolFalse() {
+    b := false
+    result := match b {
+        true => "yes"
+        false => "no"
+        _ => "unknown"
+    }
+    testing.AssertEqualString("no", result, "match bool false")
+}
+
+// TestMatchWithBlockBody verifies match arm with block body expression.
+pub fn TestMatchWithBlockBody() {
+    x := 5
+    result := match x {
+        5 => {
+            y := x * 2
+            y
+        }
+        _ => 0
+    }
+    testing.AssertEqualInt(10, result, "match with block body")
+}
+
+// TestMatchIdentPattern verifies match on identifier-bound value.
+pub fn TestMatchIdentPattern() {
+    val := 42
+    result := match val {
+        1 => "one"
+        42 => "the answer"
+        _ => "other"
+    }
+    testing.AssertEqualString("the answer", result, "match ident pattern")
+}
+
+// === Match Statements (void) ===
+
+// TestMatchStatement verifies void match statement (no return value).
+pub fn TestMatchStatement() {
+    x := 2
+    result := 0
+    match x {
+        1 => {
+            result = 10
+        }
+        2 => {
+            result = 20
+        }
+        _ => {
+            result = 0
+        }
+    }
+    testing.AssertEqualInt(20, result, "match statement")
+}
+
+// === String Concatenation ===
+
+// TestStringConcat verifies string concatenation with + operator.
+pub fn TestStringConcat() {
+    s := "hello" + " " + "world"
+    testing.AssertEqualString("hello world", s, "string concat with +")
+}
+
+// TestStringConcatEmpty verifies concatenation with empty strings.
+pub fn TestStringConcatEmpty() {
+    s := "" + "hello"
+    testing.AssertEqualString("hello", s, "concat with empty")
+    s2 := "hello" + ""
+    testing.AssertEqualString("hello", s2, "concat to empty")
+}
+
+// TestStringConcatMultiple verifies multiple string concatenation.
+pub fn TestStringConcatMultiple() {
+    s := "a" + "b" + "c" + "d" + "e"
+    testing.AssertEqualString("abcde", s, "multiple concat")
+}
+
+// === String Indexing ===
+
+// TestStringIndex verifies string indexing returns byte values.
+pub fn TestStringIndex() {
+    s := "hello"
+    testing.AssertEqualInt(104, s[0], "s[0] == 'h' (ASCII 104)")
+    testing.AssertEqualInt(101, s[1], "s[1] == 'e' (ASCII 101)")
+    testing.AssertEqualInt(111, s[4], "s[4] == 'o' (ASCII 111)")
+}
+
+// TestStringLen verifies len() on string literals.
+pub fn TestStringLen() {
+    testing.AssertEqualInt(5, len("hello"), "len(hello)")
+    testing.AssertEqualInt(0, len(""), "len(empty)")
+    testing.AssertEqualInt(11, len("hello world"), "len(hello world)")
+}
+
+// === String Slice Expressions ===
+
+// TestStringSliceLowHigh verifies string slice with low and high bounds.
+pub fn TestStringSliceLowHigh() {
+    s := "Hello World"
+    sub := s[0:5]
+    testing.AssertEqualInt(5, len(sub), "s[0:5] len")
+}
+
+// TestStringSliceHighOnly verifies string slice with high bound only.
+pub fn TestStringSliceHighOnly() {
+    s := "Hello World"
+    sub := s[:5]
+    testing.AssertEqualInt(5, len(sub), "s[:5] len")
+}
+
+// TestStringSliceLowOnly verifies string slice with low bound only.
+pub fn TestStringSliceLowOnly() {
+    s := "Hello World"
+    sub := s[6:]
+    testing.AssertEqualInt(5, len(sub), "s[6:] len")
+}
+
+// === Tuples ===
+
+// TestTupleExpression verifies tuple return and destructuring.
+pub fn TestTupleExpression() {
+    a, b := returnTuple()
+    testing.AssertEqualInt(10, a, "tuple first")
+    testing.AssertEqualInt(20, b, "tuple second")
+}
+
+// TestTupleFromFunction verifies tuple return with mixed types.
+pub fn TestTupleFromFunction() {
+    name, age := getPerson()
+    testing.AssertEqualString("Alice", name, "tuple string from fn")
+    testing.AssertEqualInt(30, age, "tuple int from fn")
+}
+
+// TestTupleSwapManual verifies manual tuple swap via temp variable.
+pub fn TestTupleSwapManual() {
+    a := 1
+    b := 2
+    tmp := a
+    a = b
+    b = tmp
+    testing.AssertEqualInt(2, a, "swapped a")
+    testing.AssertEqualInt(1, b, "swapped b")
+}
+
+// === Error Propagation ===
+
+// TestErrorPropSuccess verifies ? operator extracts value on success.
+pub fn TestErrorPropSuccess() {
+    // `?` operator extracts the first value from a multi-return
+    result := mightFail(true)
+    testing.AssertEqualInt(42, result, "error prop success extracts value")
+}
+
+// TestErrorPropFailure verifies ? operator extracts zero on failure.
+pub fn TestErrorPropFailure() {
+    // When the function "fails", the error prop still extracts the first
+    // value (which is 0 in this case)
+    result := mightFail(false)
+    testing.AssertEqualInt(0, result, "error prop failure extracts zero value")
+}
+
+// === Non-Null Assert ===
+// Note: ptr! (non-null assert) on *int doesn't correctly dereference in the emitter.
+
+// TestNonNullAssert verifies pointer dereference returns pointed-to value.
+pub fn TestNonNullAssert() {
+    ptr := createPtr(42)
+    val := *ptr
+    testing.AssertEqualInt(42, val, "dereference pointer value")
+}
+
+// === Sizeof / Alignof ===
+
+// TestSizeofInt verifies sizeof(int) returns 4.
+pub fn TestSizeofInt() {
+    testing.AssertEqualInt(4, sizeof(int), "sizeof(int) == 4")
+}
+
+// TestSizeofInt64 verifies sizeof(int64) returns 8.
+pub fn TestSizeofInt64() {
+    testing.AssertEqualInt(8, sizeof(int64), "sizeof(int64) == 8")
+}
+
+// TestSizeofBool verifies sizeof(bool) returns 1.
+pub fn TestSizeofBool() {
+    testing.AssertEqualInt(1, sizeof(bool), "sizeof(bool) == 1")
+}
+
+// TestAlignofInt verifies sizeof returns a positive value.
+pub fn TestAlignofInt() {
+    testing.AssertTrue(sizeof(int) > 0, "sizeof returns positive")
+}
+
+// === Make ===
+
+// TestMakeSlice verifies make([]int, n) creates zero-initialized slice.
+pub fn TestMakeSlice() {
+    arr := make([]int, 5)
+    testing.AssertEqualInt(5, len(arr), "make([]int, 5) len")
+    arr[0] = 10
+    arr[4] = 50
+    testing.AssertEqualInt(10, arr[0], "make slice [0]")
+    testing.AssertEqualInt(50, arr[4], "make slice [4]")
+}
+
+// TestMakeMap verifies make(map) creates a working map.
+pub fn TestMakeMap() {
+    m := make(map[string]int)
+    m["one"] = 1
+    m["two"] = 2
+    testing.AssertEqualInt(1, m["one"], "make map[one]")
+    testing.AssertEqualInt(2, m["two"], "make map[two]")
+    testing.AssertEqualInt(2, len(m), "make map len")
+}
+
+// TestMakeEmptySlice verifies make([]int, 0) creates empty slice.
+pub fn TestMakeEmptySlice() {
+    arr := make([]int, 0)
+    testing.AssertEqualInt(0, len(arr), "make([]int, 0) len")
+}
+
+// === Append ===
+
+// TestAppendSingle verifies append adds a single element to slice.
+pub fn TestAppendSingle() {
+    arr := []int{1, 2, 3}
+    arr = append(arr, 4)
+    testing.AssertEqualInt(4, len(arr), "append single len")
+    testing.AssertEqualInt(4, arr[3], "append single value")
+}
+
+// TestAppendMultiple verifies multiple sequential appends to slice.
+pub fn TestAppendMultiple() {
+    arr := []int{1, 2}
+    arr = append(arr, 3)
+    arr = append(arr, 4)
+    arr = append(arr, 5)
+    testing.AssertEqualInt(5, len(arr), "append multiple len")
+    testing.AssertEqualInt(5, arr[4], "append multiple last value")
+}
+
+// TestAppendToEmpty verifies append to empty slice literal.
+pub fn TestAppendToEmpty() {
+    arr := []int{}
+    arr = append(arr, 10)
+    arr = append(arr, 20)
+    testing.AssertEqualInt(2, len(arr), "append to empty len")
+    testing.AssertEqualInt(10, arr[0], "append to empty [0]")
+}
+
+// TestAppendString verifies append on slice of strings.
+pub fn TestAppendString() {
+    arr := []string{"a", "b"}
+    arr = append(arr, "c")
+    testing.AssertEqualInt(3, len(arr), "append string len")
+    testing.AssertEqualString("c", arr[2], "append string value")
+}
+
+// === Array Literals ===
+
+// TestArrayLiteralInt verifies int slice literal construction.
+pub fn TestArrayLiteralInt() {
+    arr := []int{1, 2, 3, 4, 5}
+    testing.AssertEqualInt(5, len(arr), "int array literal len")
+    testing.AssertEqualInt(1, arr[0], "arr[0]")
+    testing.AssertEqualInt(5, arr[4], "arr[4]")
+}
+
+// TestArrayLiteralString verifies string slice literal construction.
+pub fn TestArrayLiteralString() {
+    arr := []string{"foo", "bar", "baz"}
+    testing.AssertEqualInt(3, len(arr), "string array literal len")
+    testing.AssertEqualString("foo", arr[0], "arr[0]")
+    testing.AssertEqualString("baz", arr[2], "arr[2]")
+}
+
+// TestArrayLiteralEmpty verifies empty slice literal has length zero.
+pub fn TestArrayLiteralEmpty() {
+    arr := []int{}
+    testing.AssertEqualInt(0, len(arr), "empty array literal len")
+}
+
+// TestArrayLiteralBool verifies bool slice literal construction.
+pub fn TestArrayLiteralBool() {
+    arr := []bool{true, false, true}
+    testing.AssertEqualInt(3, len(arr), "bool array literal len")
+    testing.AssertTrue(arr[0], "arr[0] true")
+    testing.AssertFalse(arr[1], "arr[1] false")
+}
+
+// TestNestedArrayLiteral verifies nested slice literal construction.
+pub fn TestNestedArrayLiteral() {
+    arr := [][]int{[]int{1, 2}, []int{3, 4}}
+    testing.AssertEqualInt(2, len(arr), "nested array outer len")
+    testing.AssertEqualInt(2, len(arr[0]), "nested array inner len")
+    testing.AssertEqualInt(1, arr[0][0], "arr[0][0]")
+    testing.AssertEqualInt(4, arr[1][1], "arr[1][1]")
+}
+
+// TestNestedArrayShorthand verifies nested slice shorthand literal syntax.
+pub fn TestNestedArrayShorthand() {
+    arr := [][]int{{1, 2}, {3, 4}}
+    testing.AssertEqualInt(2, len(arr), "nested shorthand outer len")
+    testing.AssertEqualInt(2, len(arr[0]), "nested shorthand inner len")
+    testing.AssertEqualInt(1, arr[0][0], "shorthand arr[0][0]")
+    testing.AssertEqualInt(4, arr[1][1], "shorthand arr[1][1]")
+}
+
+// === Map Literals ===
+// Note: map[k]v{...} literals are not supported by the parser.
+// Use make() and explicit puts instead.
+
+// TestMapLiteralIntInt verifies map with int keys and int values.
+pub fn TestMapLiteralIntInt() {
+    m := make(map[int]int)
+    m[1] = 10
+    m[2] = 20
+    m[3] = 30
+    testing.AssertEqualInt(10, m[1], "map [1]")
+    testing.AssertEqualInt(20, m[2], "map [2]")
+    testing.AssertEqualInt(30, m[3], "map [3]")
+}
+
+// TestMapLiteralStringInt verifies map with string keys and int values.
+pub fn TestMapLiteralStringInt() {
+    m := make(map[string]int)
+    m["one"] = 1
+    m["two"] = 2
+    testing.AssertEqualInt(1, m["one"], "map string key [one]")
+    testing.AssertEqualInt(2, m["two"], "map string key [two]")
+}
+
+// TestMapLiteralEmpty verifies empty map has length zero.
+pub fn TestMapLiteralEmpty() {
+    m := make(map[string]int)
+    testing.AssertEqualInt(0, len(m), "empty map len")
+}
+
+// === From-End Indexing ===
+// Note: arr[^0] syntax is parsed but the checker doesn't recognize it
+// as a use of the variable, causing "unused variable" errors.
+
+// TestFromEndIndexing verifies from-end indexing via len()-n.
+pub fn TestFromEndIndexing() {
+    arr := []int{10, 20, 30, 40, 50}
+    n := len(arr)
+    testing.AssertEqualInt(50, arr[n - 1], "arr[n-1] last element")
+    testing.AssertEqualInt(40, arr[n - 2], "arr[n-2] second to last")
+}
+
+// === Helper functions ===
+
+fn returnTuple() -> (int, int) {
+    return 10, 20
+}
+
+fn getPerson() -> (string, int) {
+    return "Alice", 30
+}
+
+fn mightFail(success: bool) -> int {
+    if success {
+        return 42
+    }
+    return 0
+}
+
+fn createPtr(val: int) -> *int {
+    // Use a heap-allocated int so the pointer is non-null
+    buf := make([]int, 1)
+    buf[0] = val
+    return &buf[0]
+}

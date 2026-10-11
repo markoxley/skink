@@ -1,0 +1,365 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/encrypt.skink
+// Purpose: High-level encryption and decryption helpers built on OpenSSL's
+//          EVP (AES-GCM authenticated encryption) and RSA (PEM keys, OAEP
+//          padding) APIs.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+module encrypt
+
+import "std/libc"
+import "std/errors"
+import "std/str"
+
+// --- OpenSSL EVP API (AES-GCM authenticated encryption) ---
+
+extern fn EVP_CIPHER_CTX_new() -> string
+extern fn EVP_CIPHER_CTX_free(ctx: string)
+extern fn EVP_aes_128_gcm() -> string
+extern fn EVP_aes_192_gcm() -> string
+extern fn EVP_aes_256_gcm() -> string
+extern fn EVP_EncryptInit_ex(ctx: string, cipher: string, engine: string, key: string, iv: string) -> int
+extern fn EVP_EncryptUpdate(ctx: string, out: string, outl: string, input: string, inl: int) -> int
+extern fn EVP_EncryptFinal_ex(ctx: string, out: string, outl: string) -> int
+extern fn EVP_DecryptInit_ex(ctx: string, cipher: string, engine: string, key: string, iv: string) -> int
+extern fn EVP_DecryptUpdate(ctx: string, out: string, outl: string, input: string, inl: int) -> int
+extern fn EVP_DecryptFinal_ex(ctx: string, out: string, outl: string) -> int
+extern fn EVP_CIPHER_CTX_ctrl(ctx: string, ctrlType: int, arg: int, ptr: string) -> int
+extern fn RAND_bytes(buf: string, num: int) -> int
+
+// --- OpenSSL RSA API (PEM keys, OAEP padding) ---
+
+extern fn BIO_new_mem_buf(buf: string, len: int) -> string
+extern fn BIO_free(bio: string) -> int
+extern fn PEM_read_bio_RSA_PUBKEY(bio: string, x: string, cb: string, u: string) -> string
+extern fn PEM_read_bio_RSAPrivateKey(bio: string, x: string, cb: string, u: string) -> string
+extern fn RSA_public_encrypt(flen: int, src: string, to: string, rsa: string, padding: int) -> int
+extern fn RSA_private_decrypt(flen: int, src: string, to: string, rsa: string, padding: int) -> int
+extern fn RSA_size(rsa: string) -> int
+extern fn RSA_free(rsa: string)
+
+// RSA_PKCS1_OAEP_PADDING is the OpenSSL constant for OAEP padding mode.
+pub const RSA_PKCS1_OAEP_PADDING = 4
+// AES_BLOCK_SIZE is the AES block size in bytes (128 bits).
+pub const AES_BLOCK_SIZE = 16
+// GCM_NONCE_SIZE is the GCM nonce/IV size in bytes (96 bits).
+pub const GCM_NONCE_SIZE = 12
+// GCM_TAG_SIZE is the GCM authentication tag size in bytes (128 bits).
+pub const GCM_TAG_SIZE = 16
+// EVP_CTRL_GCM_SET_IVLEN is the OpenSSL ctrl code to set the GCM IV length.
+pub const EVP_CTRL_GCM_SET_IVLEN = 9
+// EVP_CTRL_GCM_GET_TAG is the OpenSSL ctrl code to retrieve the GCM tag.
+pub const EVP_CTRL_GCM_GET_TAG = 16
+// EVP_CTRL_GCM_SET_TAG is the OpenSSL ctrl code to set the expected GCM tag.
+pub const EVP_CTRL_GCM_SET_TAG = 17
+
+// CipherResult holds the output of an encryption or decryption operation.
+// The data field is a raw byte buffer (may contain null bytes); use length
+// to determine how many bytes are valid.
+pub struct CipherResult {
+    data: string
+    length: int
+
+    // Data returns the encrypted/decrypted bytes (may contain NULs).
+    pub fn Data(self: CipherResult) -> string {
+        return self.data
+    }
+
+    // Length returns the byte length of the result.
+    pub fn Length(self: CipherResult) -> int {
+        return self.length
+    }
+}
+
+// AESCipher provides AES-GCM authenticated encryption.
+// The key must be 16, 24, or 32 bytes (128, 192, or 256 bits).
+pub struct AESCipher {
+    key: string
+    keyLen: int
+
+    // Encrypt encrypts plaintext using AES-GCM with a random nonce.
+    // The result format is: nonce (12 bytes) || tag (16 bytes) || ciphertext.
+    // The length field is the total byte count (nonce + tag + ciphertext).
+    pub fn Encrypt(self: AESCipher, plaintext: string, ptLen: int) -> (CipherResult, errors.Error) {
+        if self.keyLen != 16 && self.keyLen != 24 && self.keyLen != 32 {
+            return CipherResult{}, errors.New("AES key must be 16, 24, or 32 bytes")
+        }
+        if ptLen < 0 {
+            return CipherResult{}, errors.New("plaintext length must be non-negative")
+        }
+
+        // Generate random 12-byte nonce
+        nonce := libc.malloc(GCM_NONCE_SIZE)
+        if RAND_bytes(nonce, GCM_NONCE_SIZE) != 1 {
+            libc.free(nonce)
+            return CipherResult{}, errors.New("failed to generate nonce")
+        }
+
+        // Select cipher based on key length
+        cipher := EVP_aes_128_gcm()
+        if self.keyLen == 24 {
+            cipher = EVP_aes_192_gcm()
+        }
+        if self.keyLen == 32 {
+            cipher = EVP_aes_256_gcm()
+        }
+
+        ctx := EVP_CIPHER_CTX_new()
+        if int64(ctx) == 0 {
+            libc.free(nonce)
+            return CipherResult{}, errors.New("failed to create cipher context")
+        }
+
+        // Initialize encryption with GCM cipher (no key/IV yet)
+        if EVP_EncryptInit_ex(ctx, cipher, string(int64(0)), string(int64(0)), string(int64(0))) != 1 {
+            EVP_CIPHER_CTX_free(ctx)
+            libc.free(nonce)
+            return CipherResult{}, errors.New("encrypt init failed")
+        }
+
+        // Set IV/nonce length to 12 bytes
+        if EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, GCM_NONCE_SIZE, string(int64(0))) != 1 {
+            EVP_CIPHER_CTX_free(ctx)
+            libc.free(nonce)
+            return CipherResult{}, errors.New("set IV length failed")
+        }
+
+        // Set key and nonce
+        if EVP_EncryptInit_ex(ctx, string(int64(0)), string(int64(0)), self.key, nonce) != 1 {
+            EVP_CIPHER_CTX_free(ctx)
+            libc.free(nonce)
+            return CipherResult{}, errors.New("set key/nonce failed")
+        }
+
+        // Output layout: nonce (12) + tag (16) + ciphertext (ptLen)
+        outBuf := libc.malloc(GCM_NONCE_SIZE + GCM_TAG_SIZE + ptLen)
+        // Copy nonce to the beginning of the output buffer
+        libc.memcpy(outBuf, nonce, GCM_NONCE_SIZE)
+        libc.free(nonce)
+
+        // Encrypt: ciphertext starts after nonce+tag
+        ctStart := string(int64(outBuf) + int64(GCM_NONCE_SIZE + GCM_TAG_SIZE))
+        dummyLen := libc.malloc(4)
+        if EVP_EncryptUpdate(ctx, ctStart, dummyLen, plaintext, ptLen) != 1 {
+            EVP_CIPHER_CTX_free(ctx)
+            libc.free(dummyLen)
+            return CipherResult{}, errors.New("encrypt update failed")
+        }
+
+        // Final (no more data for GCM, but call to finalize)
+        finalLen := libc.malloc(4)
+        if EVP_EncryptFinal_ex(ctx, string(int64(ctStart) + int64(ptLen)), finalLen) != 1 {
+            EVP_CIPHER_CTX_free(ctx)
+            libc.free(dummyLen)
+            libc.free(finalLen)
+            return CipherResult{}, errors.New("encrypt final failed")
+        }
+
+        // Get the GCM tag and store it after the nonce
+        tagStart := string(int64(outBuf) + int64(GCM_NONCE_SIZE))
+        if EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, GCM_TAG_SIZE, tagStart) != 1 {
+            EVP_CIPHER_CTX_free(ctx)
+            libc.free(dummyLen)
+            libc.free(finalLen)
+            return CipherResult{}, errors.New("get tag failed")
+        }
+
+        EVP_CIPHER_CTX_free(ctx)
+        libc.free(dummyLen)
+        libc.free(finalLen)
+
+        return CipherResult{data: outBuf, length: GCM_NONCE_SIZE + GCM_TAG_SIZE + ptLen}, errors.New("")
+    }
+
+    // Decrypt decrypts nonce+tag+ciphertext using AES-GCM.
+    // ctLen is the total length (nonce + tag + ciphertext).
+    // The result length field is the plaintext length. If the tag
+    // verification fails, an error is returned.
+    pub fn Decrypt(self: AESCipher, ivCiphertext: string, ctLen: int) -> (CipherResult, errors.Error) {
+        if self.keyLen != 16 && self.keyLen != 24 && self.keyLen != 32 {
+            return CipherResult{}, errors.New("AES key must be 16, 24, or 32 bytes")
+        }
+        if ctLen < GCM_NONCE_SIZE + GCM_TAG_SIZE {
+            return CipherResult{}, errors.New("ciphertext too short (must include 12-byte nonce and 16-byte tag)")
+        }
+
+        // Split input into nonce, tag, and ciphertext regions
+        nonce := ivCiphertext
+        tag := string(int64(ivCiphertext) + int64(GCM_NONCE_SIZE))
+        ctStart := string(int64(ivCiphertext) + int64(GCM_NONCE_SIZE + GCM_TAG_SIZE))
+        ctDataLen := ctLen - GCM_NONCE_SIZE - GCM_TAG_SIZE
+
+        // Select cipher based on key length
+        cipher := EVP_aes_128_gcm()
+        if self.keyLen == 24 {
+            cipher = EVP_aes_192_gcm()
+        }
+        if self.keyLen == 32 {
+            cipher = EVP_aes_256_gcm()
+        }
+
+        ctx := EVP_CIPHER_CTX_new()
+        if int64(ctx) == 0 {
+            return CipherResult{}, errors.New("failed to create cipher context")
+        }
+
+        // Initialize decryption with GCM cipher
+        if EVP_DecryptInit_ex(ctx, cipher, string(int64(0)), string(int64(0)), string(int64(0))) != 1 {
+            EVP_CIPHER_CTX_free(ctx)
+            return CipherResult{}, errors.New("decrypt init failed")
+        }
+
+        // Set IV/nonce length to 12 bytes
+        if EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, GCM_NONCE_SIZE, string(int64(0))) != 1 {
+            EVP_CIPHER_CTX_free(ctx)
+            return CipherResult{}, errors.New("set IV length failed")
+        }
+
+        // Set key and nonce
+        if EVP_DecryptInit_ex(ctx, string(int64(0)), string(int64(0)), self.key, nonce) != 1 {
+            EVP_CIPHER_CTX_free(ctx)
+            return CipherResult{}, errors.New("set key/nonce failed")
+        }
+
+        outBuf := libc.malloc(ctDataLen + 1)
+        dummyLen := libc.malloc(4)
+        if EVP_DecryptUpdate(ctx, outBuf, dummyLen, ctStart, ctDataLen) != 1 {
+            EVP_CIPHER_CTX_free(ctx)
+            libc.free(dummyLen)
+            return CipherResult{}, errors.New("decrypt update failed")
+        }
+
+        // Set the expected tag before calling Final
+        if EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, GCM_TAG_SIZE, tag) != 1 {
+            EVP_CIPHER_CTX_free(ctx)
+            libc.free(dummyLen)
+            return CipherResult{}, errors.New("set tag failed")
+        }
+
+        // Final verifies the tag; returns 1 on success, 0 on tag mismatch
+        finalLen := libc.malloc(4)
+        if EVP_DecryptFinal_ex(ctx, string(int64(outBuf) + int64(ctDataLen)), finalLen) != 1 {
+            EVP_CIPHER_CTX_free(ctx)
+            libc.free(dummyLen)
+            libc.free(finalLen)
+            return CipherResult{}, errors.New("authentication tag verification failed (wrong key or tampered data)")
+        }
+
+        EVP_CIPHER_CTX_free(ctx)
+        libc.free(dummyLen)
+        libc.free(finalLen)
+
+        // Null-terminate for safe string comparison
+        outBuf[ctDataLen] = 0
+
+        return CipherResult{data: outBuf, length: ctDataLen}, errors.New("")
+    }
+}
+
+// RSACipher provides RSA encryption and decryption using PEM-encoded keys.
+pub struct RSACipher {
+    pubKey: string
+    privKey: string
+
+    // Encrypt encrypts plaintext using the RSA public key (PKCS1 padding).
+    pub fn Encrypt(self: RSACipher, plaintext: string, ptLen: int) -> (CipherResult, errors.Error) {
+        if str.Len(self.pubKey) == 0 {
+            return CipherResult{}, errors.New("no public key available")
+        }
+
+        // Parse the PEM-encoded public key via a memory BIO
+        bio := BIO_new_mem_buf(self.pubKey, str.Len(self.pubKey))
+        if int64(bio) == 0 {
+            return CipherResult{}, errors.New("failed to create BIO")
+        }
+        rsa := PEM_read_bio_RSA_PUBKEY(bio, string(int64(0)), string(int64(0)), string(int64(0)))
+        BIO_free(bio)
+        if int64(rsa) == 0 {
+            return CipherResult{}, errors.New("failed to parse public key")
+        }
+
+        rsaSize := RSA_size(rsa)
+        outBuf := libc.malloc(rsaSize + 1)
+        n := RSA_public_encrypt(ptLen, plaintext, outBuf, rsa, RSA_PKCS1_OAEP_PADDING)
+        RSA_free(rsa)
+        if n <= 0 {
+            return CipherResult{}, errors.New("RSA encrypt failed")
+        }
+        // Null-terminate for safe string comparison
+        outBuf[n] = 0
+        return CipherResult{data: outBuf, length: n}, errors.New("")
+    }
+
+    // Decrypt decrypts ciphertext using the RSA private key (PKCS1 padding).
+    pub fn Decrypt(self: RSACipher, ciphertext: string, ctLen: int) -> (CipherResult, errors.Error) {
+        if str.Len(self.privKey) == 0 {
+            return CipherResult{}, errors.New("no private key available")
+        }
+
+        // Parse the PEM-encoded private key via a memory BIO
+        bio := BIO_new_mem_buf(self.privKey, str.Len(self.privKey))
+        if int64(bio) == 0 {
+            return CipherResult{}, errors.New("failed to create BIO")
+        }
+        rsa := PEM_read_bio_RSAPrivateKey(bio, string(int64(0)), string(int64(0)), string(int64(0)))
+        BIO_free(bio)
+        if int64(rsa) == 0 {
+            return CipherResult{}, errors.New("failed to parse private key")
+        }
+
+        rsaSize := RSA_size(rsa)
+        outBuf := libc.malloc(rsaSize + 1)
+        n := RSA_private_decrypt(ctLen, ciphertext, outBuf, rsa, RSA_PKCS1_OAEP_PADDING)
+        RSA_free(rsa)
+        if n <= 0 {
+            return CipherResult{}, errors.New("RSA decrypt failed")
+        }
+        // Null-terminate for safe string comparison
+        outBuf[n] = 0
+        return CipherResult{data: outBuf, length: n}, errors.New("")
+    }
+}
+
+// NewAES creates an AES cipher with the given key.
+// Key must be 16, 24, or 32 bytes (128, 192, or 256 bits).
+pub fn NewAES(key: string) -> AESCipher {
+    return AESCipher{key: key, keyLen: str.Len(key)}
+}
+
+// AESEncrypt is a one-shot convenience wrapper matching the book's
+// encrypt.AESEncrypt(key, plaintext) usage. Returns the binary result
+// (nonce || tag || ciphertext) or an error.
+pub fn AESEncrypt(key: string, plaintext: string) -> (CipherResult, errors.Error) {
+    c := NewAES(key)
+    return c.Encrypt(plaintext, str.Len(plaintext))
+}
+
+// AESDecrypt is the matching one-shot decrypt wrapper.
+pub fn AESDecrypt(key: string, ivCiphertext: string, ctLen: int) -> (CipherResult, errors.Error) {
+    c := NewAES(key)
+    return c.Decrypt(ivCiphertext, ctLen)
+}
+
+// NewRSA creates an RSA cipher with PEM-encoded keys.
+// Either pubKeyPEM or privKeyPEM may be empty if not needed
+// (e.g. encrypt-only with just a public key).
+pub fn NewRSA(pubKeyPEM: string, privKeyPEM: string) -> RSACipher {
+    return RSACipher{pubKey: pubKeyPEM, privKey: privKeyPEM}
+}

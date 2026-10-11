@@ -1,0 +1,282 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/hashmap.skink
+// Purpose: Generic hash-map implementation using open addressing with
+//          linear probing and automatic resizing.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+module hashmap
+
+import "std/reflect"
+import "std/errors"
+
+// Entry represents a single key-value slot in the hash map. The occupied
+// flag distinguishes empty slots from valid entries.
+pub struct Entry<K, V> {
+    key: K
+    value: V
+    occupied: bool
+}
+
+// HashMap is a generic associative array using open addressing with linear
+// probing. It grows automatically when the load factor exceeds 70%.
+pub struct HashMap<K, V> {
+    entries: []Entry<K, V>
+    count: int
+    capacity: int
+
+    // Put inserts or updates a key-value pair in the map. If the key already
+    // exists, its value is replaced. The map resizes when load factor > 0.7.
+    fn Put(self: *HashMap<K, V>, key: K, val: V) {
+        // Lazy initialization: allocate the backing array on first insert.
+        if self.capacity == 0 {
+            self.Resize(8)
+        } else {
+            // Resize when load factor exceeds 70% to keep probe chains short.
+            if self.count * 10 > self.capacity * 7 {
+                self.Resize(self.capacity * 2)
+            }
+        }
+
+        // Compute the hash and map it to a bucket index.
+        kAddr := key
+        t := reflect.TypeOf<K>(key)
+        h := reflect.Hash(kAddr, t.name)
+        idx := h % self.capacity
+        // Ensure the index is non-negative (modulo can yield negatives).
+        if idx < 0 {
+            idx = -idx
+        }
+
+        // Linear probe until we find the key or an empty slot.
+        startIdx := idx
+        while self.entries[idx].occupied {
+            if reflect.Equals(self.entries[idx].key, key, t.name) {
+                // Key found: update in place and return.
+                self.entries[idx].value = val
+                return
+            }
+            idx = (idx + 1) % self.capacity
+            if idx == startIdx {
+                // Wrapped around: table is full (should not happen after resize).
+                break
+            }
+        }
+
+        // Insert the new entry into the empty slot.
+        self.entries[idx].key = key
+        self.entries[idx].value = val
+        self.entries[idx].occupied = true
+        self.count = self.count + 1
+    }
+
+    // Get retrieves the value associated with key. Returns the zero value
+    // and an error if the key is not present.
+    fn Get(self: *HashMap<K, V>, key: K) -> (V, errors.Error) {
+        if self.capacity == 0 {
+            var defaultVal V
+            return defaultVal, errors.New("key not found")
+        }
+
+        // Compute hash and bucket index.
+        kAddr := key
+        t := reflect.TypeOf<K>(key)
+        h := reflect.Hash(kAddr, t.name)
+        idx := h % self.capacity
+        if idx < 0 {
+            idx = -idx
+        }
+
+        // Linear probe to find the matching key.
+        startIdx := idx
+        while self.entries[idx].occupied {
+            if reflect.Equals(self.entries[idx].key, key, t.name) {
+                return self.entries[idx].value, errors.None()
+            }
+            idx = (idx + 1) % self.capacity
+            if idx == startIdx {
+                break
+            }
+        }
+
+        // Key not found: return zero value with error.
+        var defaultVal V
+        return defaultVal, errors.New("key not found")
+    }
+
+    // Has reports whether the key exists in the map.
+    fn Has(self: *HashMap<K, V>, key: K) -> bool {
+        if self.capacity == 0 {
+            return false
+        }
+
+        // Compute hash and bucket index.
+        kAddr := key
+        t := reflect.TypeOf<K>(key)
+        h := reflect.Hash(kAddr, t.name)
+        idx := h % self.capacity
+        if idx < 0 {
+            idx = -idx
+        }
+
+        // Linear probe to find the matching key.
+        startIdx := idx
+        while self.entries[idx].occupied {
+            if reflect.Equals(self.entries[idx].key, key, t.name) {
+                return true
+            }
+            idx = (idx + 1) % self.capacity
+            if idx == startIdx {
+                break
+            }
+        }
+        return false
+    }
+
+    // Delete removes the entry with the given key from the map. Returns
+    // errors.None() if the key was found and removed, or an error if the
+    // key was not present. Uses backward-shift deletion to maintain probe
+    // chain integrity (no tombstones needed).
+    fn Delete(self: *HashMap<K, V>, key: K) -> errors.Error {
+        if self.capacity == 0 {
+            return errors.New("key not found")
+        }
+
+        // Compute hash and bucket index.
+        kAddr := key
+        t := reflect.TypeOf<K>(key)
+        h := reflect.Hash(kAddr, t.name)
+        idx := h % self.capacity
+        if idx < 0 {
+            idx = -idx
+        }
+
+        // Linear probe to find the matching key.
+        startIdx := idx
+        found := false
+        while self.entries[idx].occupied {
+            if reflect.Equals(self.entries[idx].key, key, t.name) {
+                found = true
+                break
+            }
+            idx = (idx + 1) % self.capacity
+            if idx == startIdx {
+                break
+            }
+        }
+
+        if !found {
+            return errors.New("key not found")
+        }
+
+        // Backward-shift deletion: remove the entry at idx, then scan
+        // forward and pull back any entries that probed past the gap.
+        self.entries[idx].occupied = false
+        self.count = self.count - 1
+
+        gap := idx
+        j := (idx + 1) % self.capacity
+        while self.entries[j].occupied {
+            // Recompute the ideal bucket for the entry at j.
+            jAddr := self.entries[j].key
+            jt := reflect.TypeOf<K>(jAddr)
+            jh := reflect.Hash(jAddr, jt.name)
+            k := jh % self.capacity
+            if k < 0 {
+                k = -k
+            }
+
+            // Distance from ideal position to current slot j.
+            distJ := (j - k + self.capacity) % self.capacity
+            // Distance from ideal position to the gap.
+            distGap := (gap - k + self.capacity) % self.capacity
+
+            // If the gap is closer to the ideal position than j, the
+            // entry probed past the gap and should be moved into it.
+            if distGap < distJ {
+                self.entries[gap].key = self.entries[j].key
+                self.entries[gap].value = self.entries[j].value
+                self.entries[gap].occupied = true
+                self.entries[j].occupied = false
+                gap = j
+            }
+            j = (j + 1) % self.capacity
+        }
+
+        return errors.None()
+    }
+
+    // Len returns the number of entries currently in the map.
+    fn Len(self: *HashMap<K, V>) -> int {
+        return self.count
+    }
+
+    // Resize grows or shrinks the backing array and re-inserts all existing
+    // entries. This is called automatically when the load factor is too high.
+    fn Resize(self: *HashMap<K, V>, newCap: int) {
+        oldEntries := self.entries
+        oldCap := self.capacity
+
+        // Allocate a fresh backing array with default-zeroed entries.
+        var newEntries []Entry<K, V>
+        var defaultK K
+        var defaultV V
+        for i := 0; i < newCap; i = i + 1 {
+            newEntries = append(newEntries, Entry<K, V>{key: defaultK, value: defaultV, occupied: false})
+        }
+
+        self.entries = newEntries
+        self.capacity = newCap
+        self.count = 0
+
+        // Re-insert entries directly without calling Put (which would
+        // check for resize again, causing unnecessary overhead).
+        for i := 0; i < oldCap; i = i + 1 {
+            if oldEntries[i].occupied {
+                // Recompute hash for the new capacity.
+                kAddr := oldEntries[i].key
+                t := reflect.TypeOf<K>(kAddr)
+                h := reflect.Hash(kAddr, t.name)
+                idx := h % newCap
+                if idx < 0 {
+                    idx = -idx
+                }
+                // Linear probe for empty slot
+                while self.entries[idx].occupied {
+                    idx = (idx + 1) % newCap
+                }
+                self.entries[idx].key = oldEntries[i].key
+                self.entries[idx].value = oldEntries[i].value
+                self.entries[idx].occupied = true
+                self.count = self.count + 1
+            }
+        }
+    }
+}
+
+// New creates and returns an empty HashMap. The backing array is allocated
+// lazily on the first Put call.
+pub fn New<K, V>() -> HashMap<K, V> {
+    var entries []Entry<K, V>
+    return HashMap<K, V>{
+        entries: entries,
+        count: 0,
+        capacity: 0
+    }
+}

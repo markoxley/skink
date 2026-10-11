@@ -1,0 +1,113 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/str_bench.skink
+// Purpose: Benchmarks for the std/str module, measuring throughput of
+//          string concatenation, builder, split, case conversion, and
+//          integer-to-string conversion.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Module str_bench contains benchmarks for the std/str module.
+module str_bench
+
+import "std/benchmark"
+import "std/str"
+import "std/strconv"
+import "std/libc"
+
+// BenchConcat benchmarks string concatenation with str.Concat.
+pub fn BenchConcat() {
+    n := 10000
+    b := benchmark.NewB("str.Concat")
+    b.SetN(n)
+    b.StartTimer()
+    for i := 0; i < n; i = i + 1 {
+        s := ""
+        // Build a 100-character string one character at a time.
+        for j := 0; j < 100; j = j + 1 {
+            s = str.Concat(s, "x")
+        }
+        libc.free(s)
+    }
+    b.StopTimer()
+    b.Report()
+}
+
+// BenchBuilder benchmarks string building with str.Builder.
+pub fn BenchBuilder() {
+    n := 10000
+    b := benchmark.NewB("str.Builder")
+    b.SetN(n)
+    b.StartTimer()
+    for i := 0; i < n; i = i + 1 {
+        bld := str.NewBuilder(256)
+        for j := 0; j < 100; j = j + 1 {
+            bld.Write("x")
+        }
+        result := bld.String()
+        libc.free(result)
+        bld.Free()
+    }
+    b.StopTimer()
+    b.Report()
+}
+
+// BenchSplit benchmarks string splitting.
+pub fn BenchSplit() {
+    n := 10000
+    b := benchmark.NewB("str.Split")
+    b.SetN(n)
+    b.StartTimer()
+    for i := 0; i < n; i = i + 1 {
+        parts := str.Split("a,b,c,d,e,f,g,h", ",")
+        if len(parts) == 0 {
+            return
+        }
+    }
+    b.StopTimer()
+    b.Report()
+}
+
+// BenchToUpper benchmarks case conversion.
+pub fn BenchToUpper() {
+    n := 100000
+    b := benchmark.NewB("str.ToUpper")
+    b.SetN(n)
+    b.StartTimer()
+    for i := 0; i < n; i = i + 1 {
+        result := str.ToUpper("Hello, World!")
+        libc.free(result)
+    }
+    b.StopTimer()
+    b.Report()
+}
+
+// BenchItoa benchmarks integer-to-string conversion.
+pub fn BenchItoa() {
+    n := 100000
+    b := benchmark.NewB("strconv.Itoa")
+    b.SetN(n)
+    b.StartTimer()
+    for i := 0; i < n; i = i + 1 {
+        result := strconv.Itoa(1234567)
+        libc.free(result)
+    }
+    b.StopTimer()
+    b.Report()
+}

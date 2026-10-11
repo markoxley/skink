@@ -1,0 +1,157 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/crypto.skink
+// Purpose: Cryptographic hash functions (MD5, SHA1, SHA256, HMAC-SHA256)
+//          and hex encoding utilities backed by OpenSSL.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+module crypto
+
+import "std/str"
+import "std/libc"
+
+// External OpenSSL hash function declarations.
+extern fn MD5(d: string, n: int, md: string) -> string
+extern fn SHA1(d: string, n: int, md: string) -> string
+extern fn SHA256(d: string, n: int, md: string) -> string
+
+// Deprecated: MD5 is cryptographically broken and should not be used for
+// security purposes. Use Sha256 instead.
+// Md5 computes the MD5 hash of data and returns the 16-byte raw digest.
+pub fn Md5(data: string) -> string {
+    len := str.Len(data)
+    out := libc.malloc(16)
+    MD5(data, len, out)
+    return out
+}
+
+// Deprecated: MD5 is cryptographically broken and should not be used for
+// security purposes. Use Sha256Hex instead.
+// Md5Hex computes the MD5 hash of data and returns it as a 32-character
+// lowercase hex string.
+pub fn Md5Hex(data: string) -> string {
+    raw := Md5(data)
+    return bytesToHex(raw, 16)
+}
+
+// Deprecated: SHA1 is cryptographically broken and should not be used for
+// security purposes. Use Sha256 instead.
+// Sha1 computes the SHA1 hash of data and returns the 20-byte raw digest.
+pub fn Sha1(data: string) -> string {
+    len := str.Len(data)
+    out := libc.malloc(20)
+    SHA1(data, len, out)
+    return out
+}
+
+// Deprecated: SHA1 is cryptographically broken and should not be used for
+// security purposes. Use Sha256Hex instead.
+// Sha1Hex computes the SHA1 hash of data and returns it as a 40-character
+// lowercase hex string.
+pub fn Sha1Hex(data: string) -> string {
+    raw := Sha1(data)
+    return bytesToHex(raw, 20)
+}
+
+// Sha256 computes the SHA-256 hash of data and returns the 32-byte raw digest.
+pub fn Sha256(data: string) -> string {
+    len := str.Len(data)
+    out := libc.malloc(32)
+    SHA256(data, len, out)
+    return out
+}
+
+// Sha256Hex computes the SHA-256 hash of data and returns it as a 64-character
+// lowercase hex string.
+pub fn Sha256Hex(data: string) -> string {
+    raw := Sha256(data)
+    return bytesToHex(raw, 32)
+}
+
+// HmacSha256 computes HMAC-SHA256 per RFC 2104.
+// Returns the 32-byte raw HMAC digest.
+pub fn HmacSha256(key: string, message: string) -> string {
+    blockSize := 64
+    keyLen := str.Len(key)
+
+    // If key is longer than block size, hash it down to 32 bytes
+    if keyLen > blockSize {
+        key = Sha256(key)
+        keyLen = 32
+    }
+
+    // Pad key to block size with zeros
+    paddedKey := libc.calloc(blockSize, 1)
+    libc.memcpy(paddedKey, key, keyLen)
+
+    // Create inner and outer padding keys (ipad=0x36, opad=0x5c)
+    ipad := libc.calloc(blockSize, 1)
+    opad := libc.calloc(blockSize, 1)
+    for i := 0; i < blockSize; i = i + 1 {
+        ipad[i] = paddedKey[i] ^ 54  // 0x36
+        opad[i] = paddedKey[i] ^ 92  // 0x5c
+    }
+
+    // Inner hash: H(ipad || message)
+    msgLen := str.Len(message)
+    innerData := libc.calloc(blockSize + msgLen, 1)
+    libc.memcpy(innerData, ipad, blockSize)
+    libc.memcpy(string(int64(innerData) + int64(blockSize)), message, msgLen)
+
+    inner := libc.malloc(32)
+    SHA256(innerData, blockSize + msgLen, inner)
+    libc.free(innerData)
+
+    // Outer hash: H(opad || innerHash)
+    resultData := libc.calloc(blockSize + 32, 1)
+    libc.memcpy(resultData, opad, blockSize)
+    libc.memcpy(string(int64(resultData) + int64(blockSize)), inner, 32)
+
+    result := libc.malloc(32)
+    SHA256(resultData, blockSize + 32, result)
+    // Free all intermediate buffers
+    libc.free(resultData)
+    libc.free(opad)
+    libc.free(ipad)
+    libc.free(paddedKey)
+    libc.free(inner)
+
+    return result
+}
+
+// HexEncode encodes raw bytes to a lowercase hex string.
+pub fn HexEncode(data: string, length: int) -> string {
+    return bytesToHex(data, length)
+}
+
+// bytesToHex converts each byte in data to two lowercase hex characters.
+fn bytesToHex(data: string, length: int) -> string {
+    hexChars := "0123456789abcdef"
+    result := ""
+    for i := 0; i < length; i = i + 1 {
+        b := int(data[i])
+        // High nibble → first hex char
+        hi := (b >> 4) & 15
+        // Low nibble → second hex char
+        lo := b & 15
+        result = str.Concat(result, str.Substr(hexChars, hi, 1))
+        result = str.Concat(result, str.Substr(hexChars, lo, 1))
+    }
+    return result
+}

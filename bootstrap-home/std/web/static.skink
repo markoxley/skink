@@ -1,0 +1,144 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/web/static.skink
+// Purpose: Static file server handler with MIME-type detection and
+//          directory-traversal protection for the Skink web framework.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module static
+
+import "std/str"
+import "std/fs"
+import "std/errors"
+import "std/web/types"
+import "std/libc"
+
+extern fn Skink_mem_alloc(size: int64) -> string
+extern fn Skink_mem_realloc(ptr: string, size: int64) -> string
+
+// mimeType returns a Content-Type string based on the file extension.
+fn mimeType(path: string) -> string {
+    if str.EndsWith(path, ".html") { return "text/html; charset=utf-8" }
+    if str.EndsWith(path, ".css")  { return "text/css" }
+    if str.EndsWith(path, ".js")   { return "application/javascript" }
+    if str.EndsWith(path, ".json") { return "application/json" }
+    if str.EndsWith(path, ".png")  { return "image/png" }
+    if str.EndsWith(path, ".jpg")  { return "image/jpeg" }
+    if str.EndsWith(path, ".jpeg") { return "image/jpeg" }
+    if str.EndsWith(path, ".gif")  { return "image/gif" }
+    if str.EndsWith(path, ".svg")  { return "image/svg+xml" }
+    if str.EndsWith(path, ".ico")  { return "image/x-icon" }
+    if str.EndsWith(path, ".txt")  { return "text/plain" }
+    if str.EndsWith(path, ".xml")  { return "application/xml" }
+    if str.EndsWith(path, ".wasm") { return "application/wasm" }
+    // Unknown extensions default to a binary stream.
+    return "application/octet-stream"
+}
+
+// serveFile streams a file from rootDir to the response writer with MIME
+// detection and traversal checks. The whole file is read into a managed
+// buffer sized from fs.Stat: binary content survives intact (the old
+// chunked str.Concat loop truncated at NUL bytes and ran in O(n²) time)
+// and it is written via the explicit-length WriteBytes path
+// (comp_error.md #52).
+fn serveFile(rootDir: string, req: types.Request, w: *types.ResponseWriter) {
+    path := req.Path()
+    if path == "" {
+        path = "/"
+    }
+
+    // Prevent directory traversal.
+    if str.Contains(path, "..") {
+        w.WriteHeader(403)
+        w.Write("Forbidden")
+        return
+    }
+
+    // Strip leading slash and join with root.
+    filePath := rootDir
+    rel := path
+    if str.StartsWith(rel, "/") {
+        rel = str.Substr(rel, 1, str.Len(rel) - 1)
+    }
+    if str.Len(rel) > 0 {
+        filePath = str.Concat(str.Concat(rootDir, "/"), rel)
+    } else {
+        filePath = str.Concat(rootDir, "/")
+    }
+
+    // Try opening as file first ("rb" so Windows does not translate
+    // newlines in binary content). On POSIX, fopen() succeeds on
+    // directories, so an IsDir hit must be treated as "not a file"
+    // for the index.html fallback below to run.
+    f, openErr := fs.Open(filePath, "rb")
+    if openErr.message == "" && fs.IsDir(filePath) {
+        f.Close()
+        openErr = errors.New("is a directory")
+    }
+    if openErr.message != "" {
+        // Try index.html fallback for directories.
+        indexPath := str.Concat(filePath, "index.html")
+        f, openErr = fs.Open(indexPath, "rb")
+        if openErr.message != "" {
+            w.WriteHeader(404)
+            w.Write("Not Found")
+            return
+        }
+        filePath = indexPath
+    }
+
+    // Size the buffer from fs.Stat; grow on demand if it under-reports.
+    allocCap := 4096
+    info, statErr := fs.Stat(filePath)
+    if statErr.message == "" && int(info.Size) + 1 > allocCap {
+        allocCap = int(info.Size) + 1
+    }
+    content := Skink_mem_alloc(int64(allocCap))
+    total := 0
+    for {
+        if total >= allocCap - 1 {
+            allocCap = allocCap * 2
+            content = Skink_mem_realloc(content, int64(allocCap))
+        }
+        n := f.Read(string(int64(content) + int64(total)), allocCap - total - 1)
+        if n <= 0 {
+            break
+        }
+        total = total + n
+    }
+    f.Close()
+    content[total] = 0
+
+    // Set the Content-Type based on the file extension and send the body
+    // with an explicit byte count so NUL bytes are preserved.
+    w.Header("Content-Type", mimeType(filePath))
+    w.WriteHeader(200)
+    w.WriteBytes(content, total)
+}
+
+// FileServer returns a Handler that serves files from rootDir. The root
+// is captured by the returned closure, so multiple file servers with
+// different roots can be mounted on one router (comp_error.md #60).
+// Directory traversal attempts (paths containing "..") are rejected.
+pub fn FileServer(rootDir: string) -> types.Handler {
+    return fn(req: types.Request, w: *types.ResponseWriter) {
+        serveFile(rootDir, req, w)
+    }
+}

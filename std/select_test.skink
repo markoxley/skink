@@ -1,0 +1,205 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/select_test.skink
+// Purpose: Tests for the select statement with channel operations.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module select_test
+
+import "testing"
+import "std/strconv"
+
+// TestSelectReceive verifies that select can receive from a ready channel.
+pub fn TestSelectReceive() {
+    ch := make(chan<int>, 1)
+    ch <- 42
+
+    result := 0
+    select {
+        case val := <-ch:
+            result = val
+        default:
+            testing.Errorf("select should have received from ready channel")
+    }
+
+    if result != 42 {
+        testing.Errorf("expected 42, got " + strconv.Itoa(result))
+    }
+}
+
+// TestSelectDefault verifies that select executes default when no channel is ready.
+pub fn TestSelectDefault() {
+    ch := make(chan<int>, 1)
+
+    ran := false
+    select {
+        case <-ch:
+            testing.Errorf("select should not have received from empty channel")
+        default:
+            ran = true
+    }
+
+    if ran == false {
+        testing.Errorf("default case should have executed")
+    }
+}
+
+// TestSelectReceiveBinding verifies that case val := <-ch binds the value.
+pub fn TestSelectReceiveBinding() {
+    ch := make(chan<int>, 1)
+    ch <- 99
+
+    received := 0
+    select {
+        case v := <-ch:
+            received = v
+        default:
+            testing.Errorf("should have received value")
+    }
+
+    if received != 99 {
+        testing.Errorf("expected 99, got " + strconv.Itoa(received))
+    }
+}
+
+// TestSelectSend verifies that select can send on a channel.
+pub fn TestSelectSend() {
+    ch := make(chan<int>, 1)
+
+    select {
+        case ch <- 77:
+            // Send succeeded
+        default:
+            testing.Errorf("send should have succeeded on empty channel")
+    }
+
+    // Verify the value was sent
+    val := <-ch
+    if val != 77 {
+        testing.Errorf("expected 77, got " + strconv.Itoa(val))
+    }
+}
+
+// TestSelectMultipleReceive verifies select picks one of multiple ready channels.
+pub fn TestSelectMultipleReceive() {
+    ch1 := make(chan<int>, 1)
+    ch2 := make(chan<int>, 1)
+    ch1 <- 10
+    ch2 <- 20
+
+    got1 := 0
+    got2 := 0
+    // First select picks ch1 (first ready in order)
+    select {
+        case v := <-ch1:
+            got1 = v
+        case v := <-ch2:
+            got2 = v
+    }
+
+    // At least one should have been received
+    if got1 == 0 && got2 == 0 {
+        testing.Errorf("select should have received from one channel")
+    }
+}
+
+// TestSelectClosedChannel verifies that receiving from a closed channel
+// is immediately ready in a select.
+pub fn TestSelectClosedChannel() {
+    ch := make(chan<int>, 1)
+    close(ch)
+
+    ran := false
+    select {
+        case <-ch:
+            ran = true
+        default:
+            testing.Errorf("closed channel should be immediately ready")
+    }
+
+    if ran == false {
+        testing.Errorf("should have received from closed channel")
+    }
+}
+
+// TestSelectSendThenReceive verifies a full send-then-receive cycle through select.
+pub fn TestSelectSendThenReceive() {
+    ch := make(chan<int>, 1)
+
+    // Send via select
+    select {
+        case ch <- 55:
+            // ok
+        default:
+            testing.Errorf("send should succeed")
+    }
+
+    // Receive via select
+    val := 0
+    select {
+        case v := <-ch:
+            val = v
+        default:
+            testing.Errorf("receive should succeed")
+    }
+
+    if val != 55 {
+        testing.Errorf("expected 55, got " + strconv.Itoa(val))
+    }
+}
+
+// TestSelectDefaultDoesNotBlock verifies that select with default
+// does not block when no channels are ready.
+pub fn TestSelectDefaultDoesNotBlock() {
+    ch1 := make(chan<int>, 1)
+    ch2 := make(chan<int>, 1)
+
+    ran := false
+    select {
+        case <-ch1:
+            testing.Errorf("ch1 should not be ready")
+        case <-ch2:
+            testing.Errorf("ch2 should not be ready")
+        default:
+            ran = true
+    }
+
+    if ran == false {
+        testing.Errorf("default should have run without blocking")
+    }
+}
+
+// TestSelectStringChannel verifies select works with string channels.
+pub fn TestSelectStringChannel() {
+    ch := make(chan<string>, 1)
+    ch <- "hello"
+
+    result := ""
+    select {
+        case v := <-ch:
+            result = v
+        default:
+            testing.Errorf("should have received string")
+    }
+
+    if result != "hello" {
+        testing.Errorf("expected 'hello', got '" + result + "'")
+    }
+}

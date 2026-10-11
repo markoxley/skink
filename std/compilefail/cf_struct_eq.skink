@@ -1,0 +1,11 @@
+// expect: cannot compare struct values
+module main
+struct P { x: int }
+fn main() -> int {
+    a := P{x: 1}
+    b := P{x: 1}
+    if a == b {
+        return 1
+    }
+    return 0
+}

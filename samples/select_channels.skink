@@ -1,0 +1,175 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/select_channels.skink
+// Purpose: Demonstrates the select statement for channel operations,
+//          including receive-binding, send cases, default, and
+//          multi-channel coordination.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/io"
+import "std/strconv"
+
+// producer sends a sequence of numbers into a channel, then closes it.
+fn producer(ch: chan<int>, start: int, count: int) {
+    for i := 0; i < count; i = i + 1 {
+        ch <- start + i
+    }
+    close(ch)
+}
+
+pub fn main() {
+    io.PrintLine("=== Select Channels Demo ===")
+    io.PrintLine("")
+
+    // --- Basic select with receive-binding ---
+    io.PrintLine("--- Basic Select (Receive) ---")
+    ch1 := make(chan<int>, 1)
+    ch1 <- 42
+
+    select {
+        case val := <-ch1:
+            io.PrintLine("  Received: " + strconv.Itoa(val))
+        default:
+            io.PrintLine("  No value ready")
+    }
+    io.PrintLine("")
+
+    // --- Select with default (non-blocking) ---
+    io.PrintLine("--- Select With Default ---")
+    ch2 := make(chan<int>, 1)
+    // Channel is empty, so default should fire
+    select {
+        case <-ch2:
+            io.PrintLine("  Received from empty channel (unexpected)")
+        default:
+            io.PrintLine("  Default: channel was empty, no blocking")
+    }
+    io.PrintLine("")
+
+    // --- Select with send case ---
+    io.PrintLine("--- Select With Send ---")
+    ch3 := make(chan<int>, 1)
+    select {
+        case ch3 <- 99:
+            io.PrintLine("  Sent 99 via select")
+        default:
+            io.PrintLine("  Send failed (channel full)")
+    }
+
+    // Now receive what we sent
+    val := <-ch3
+    io.PrintLine("  Received: " + strconv.Itoa(val))
+    io.PrintLine("")
+
+    // --- Select between multiple channels ---
+    io.PrintLine("--- Multi-Channel Select ---")
+    chA := make(chan<int>, 1)
+    chB := make(chan<int>, 1)
+    chA <- 100
+    chB <- 200
+
+    // Select will pick one of the ready channels
+    for i := 0; i < 2; i = i + 1 {
+        select {
+            case v := <-chA:
+                io.PrintLine("  From chA: " + strconv.Itoa(v))
+            case v := <-chB:
+                io.PrintLine("  From chB: " + strconv.Itoa(v))
+        }
+    }
+    io.PrintLine("")
+
+    // --- Select with closed channel ---
+    io.PrintLine("--- Select With Closed Channel ---")
+    chClosed := make(chan<int>, 1)
+    close(chClosed)
+
+    select {
+        case <-chClosed:
+            io.PrintLine("  Closed channel is immediately ready")
+        default:
+            io.PrintLine("  Default fired (unexpected)")
+    }
+    io.PrintLine("")
+
+    // --- Select with string channels ---
+    io.PrintLine("--- Select With String Channels ---")
+    strCh := make(chan<string>, 1)
+    strCh <- "hello world"
+
+    select {
+        case msg := <-strCh:
+            io.PrintLine("  Received string: " + msg)
+        default:
+            io.PrintLine("  No string ready")
+    }
+    io.PrintLine("")
+
+    // --- Producer with select consumer ---
+    io.PrintLine("--- Producer/Consumer With Select ---")
+    dataCh := make(chan<int>, 10)
+    spawn producer(dataCh, 1, 5)
+
+    // Consume 5 values using select
+    received := 0
+    for received < 5 {
+        select {
+            case v := <-dataCh:
+                io.PrintLine("  Got: " + strconv.Itoa(v))
+            received = received + 1
+        }
+    }
+    io.PrintLine("  All values consumed")
+    io.PrintLine("")
+
+    // --- Select with send and receive cases ---
+    io.PrintLine("--- Mixed Send/Receive Select ---")
+    reqCh := make(chan<int>, 1)
+    respCh := make(chan<string>, 1)
+
+    // Send a request
+    reqCh <- 7
+
+    // Process: receive request, send response
+    select {
+        case req := <-reqCh:
+            io.PrintLine("  Request: " + strconv.Itoa(req))
+            // Send response via select
+            select {
+                case respCh <- "OK:" + strconv.Itoa(req * req):
+                    // Response sent
+                default:
+                    io.PrintLine("  Failed to send response")
+            }
+    }
+
+    // Receive the response
+    select {
+        case resp := <-respCh:
+            io.PrintLine("  Response: " + resp)
+        default:
+            io.PrintLine("  No response ready")
+    }
+    io.PrintLine("")
+
+    io.PrintLine("=== Select Demo Complete ===")
+}

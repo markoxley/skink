@@ -1,0 +1,60 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/rules_engine_test.skink
+// Purpose: Tests for the procedural rules engine (Phase 4 rules.skink).
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module rules_engine_test
+
+import "testing"
+import "std/rules"
+
+var engFired: int
+
+fn engineFire() {
+    engFired = engFired + 1
+}
+
+var engTemp: float
+
+fn isHot() -> bool {
+    return engTemp > 30.0
+}
+
+fn isCold() -> bool {
+    return engTemp < 10.0
+}
+
+// TestEngineEval verifies rules engine fires actions on matching conditions.
+pub fn TestEngineEval() {
+    engFired = 0
+    engTemp = 35.0
+    e := rules.NewEngine()
+    e.AddRule("hot", isHot)
+    e.AddRule("cold", isCold)
+    e.AddAction("hot", engineFire)
+    e.Evaluate()
+    testing.AssertEqualInt(1, engFired, "hot rule fired once")
+    e.Evaluate()
+    testing.AssertEqualInt(2, engFired, "hot rule fires each tick")
+    engTemp = 5.0
+    e.Evaluate()
+    testing.AssertEqualInt(2, engFired, "cold has no action")
+}

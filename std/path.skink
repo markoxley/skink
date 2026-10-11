@@ -1,0 +1,256 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/path.skink
+// Purpose: Path manipulation utilities including join, base, dir, ext,
+//          clean, abs, and isAbsolute.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+module path
+
+import "std/buf"
+import "std/libc"
+import "std/str"
+
+// Join joins path elements with a single '/' separator.
+pub fn Join(paths: []string) -> string {
+    if len(paths) == 0 {
+        return ""
+    }
+    b := buf.NewBuffer()
+    for i := 0; i < len(paths); i = i + 1 {
+        // Insert a separator before every element except the first.
+        if i > 0 {
+            b.WriteByte(47) // '/'
+        }
+        b.WriteString(paths[i])
+    }
+    result := b.String()
+    b.Free()
+    return result
+}
+
+// Base returns the last element of a path, stripping trailing '/'.
+pub fn Base(p: string) -> string {
+    n := int(libc.strlen(p))
+    if n == 0 {
+        return ""
+    }
+    last := n - 1
+    // Strip trailing slashes to find the real end of the path.
+    for last >= 0 && p[last] == 47 {
+        last = last - 1
+    }
+    if last < 0 {
+        return "/"
+    }
+    // Scan backwards to find the start of the last component.
+    start := last
+    for start >= 0 && p[start] != 47 {
+        start = start - 1
+    }
+    start = start + 1
+    length := last - start + 1
+    result := libc.malloc(length + 1)
+    libc.memcpy(result, string(int64(p) + int64(start)), length)
+    result[length] = 0
+    return result
+}
+
+// Dir returns the directory portion of a path.
+pub fn Dir(p: string) -> string {
+    n := int(libc.strlen(p))
+    if n == 0 {
+        return ""
+    }
+    last := n - 1
+    // Strip trailing slashes.
+    for last >= 0 && p[last] == 47 {
+        last = last - 1
+    }
+    if last < 0 {
+        return "/"
+    }
+    // Skip past the last path component (non-slash characters).
+    for last >= 0 && p[last] != 47 {
+        last = last - 1
+    }
+    if last < 0 {
+        return "."
+    }
+    // Strip trailing slashes after the last component.
+    for last >= 0 && p[last] == 47 {
+        last = last - 1
+    }
+    if last < 0 {
+        return "/"
+    }
+    length := last + 1
+    result := libc.malloc(length + 1)
+    libc.memcpy(result, p, length)
+    result[length] = 0
+    return result
+}
+
+// Ext returns the file extension (including the leading '.'), or "" if none.
+pub fn Ext(p: string) -> string {
+    n := int(libc.strlen(p))
+    if n == 0 {
+        return ""
+    }
+    // Scan backwards for a '.', stopping at the last path separator.
+    for i := n - 1; i >= 0; i = i - 1 {
+        if p[i] == 47 { // '/'
+            return ""
+        }
+        if p[i] == 46 { // '.'
+            extLen := n - i
+            result := libc.malloc(extLen + 1)
+            libc.memcpy(result, string(int64(p) + int64(i)), extLen)
+            result[extLen] = 0
+            return result
+        }
+    }
+    return ""
+}
+
+// realpath is a C library function that resolves a path to an absolute path.
+extern fn realpath(path: string, resolved: string) -> string
+extern fn getcwd(buf: string, size: int) -> string
+
+// Abs returns an absolute version of the path. When the path exists,
+// symlinks and relative components are resolved via realpath(3). When it
+// does not exist (realpath fails), falls back to joining the path onto the
+// current working directory and lexical cleaning, so Abs still returns a
+// usable absolute path.
+pub fn Abs(p: string) -> string {
+    buf := libc.malloc(4096)
+    result := realpath(p, buf)
+    if str.Len(result) > 0 {
+        // realpath returns the same buffer pointer as `resolved` on success.
+        // The buffer is already null-terminated by realpath.
+        return result
+    }
+    libc.free(buf)
+    // Fallback: path doesn't exist (or has dangling symlinks). Build an
+    // absolute path lexically from the cwd.
+    cleaned := Clean(p)
+    if IsAbsolute(cleaned) {
+        return cleaned
+    }
+    cwdbuf := libc.malloc(4096)
+    cwd := getcwd(cwdbuf, 4096)
+    if str.Len(cwd) == 0 {
+        return cleaned
+    }
+    return str.Concat(cwd, str.Concat("/", cleaned))
+}
+
+// Clean simplifies a path by removing redundant separators, resolving "."
+// and ".." components, and stripping trailing slashes.
+pub fn Clean(p: string) -> string {
+    n := int(libc.strlen(p))
+    if n == 0 {
+        return ""
+    }
+    b := buf.NewBuffer()
+    start := 0
+    stackLen := 0
+    // Use a simple approach: write components to buffer, tracking positions
+    // to allow backtracking for ".."
+    for i := 0; i <= n; i = i + 1 {
+        isEnd := i == n
+        isSep := false
+        if !isEnd {
+            isSep = p[i] == 47
+        }
+        if isEnd || isSep {
+            if i > start {
+                compLen := i - start
+                // Check if component is "."
+                isDot := compLen == 1 && p[start] == 46
+                // Check if component is ".."
+                isDotDot := compLen == 2 && p[start] == 46 && p[start + 1] == 46
+                if isDotDot {
+                    if stackLen > 0 {
+                        // Remove last component from buffer by finding the
+                        // previous separator.
+                        curLen := int(libc.strlen(b.String()))
+                        // Find last separator in buffer
+                        s := b.String()
+                        j := curLen - 1
+                        for j >= 0 && s[j] != 47 {
+                            j = j - 1
+                        }
+                        // Truncate buffer at j (remove separator and component)
+                        b.Truncate(j)
+                        stackLen = stackLen - 1
+                    } else {
+                        // Keep ".." at root level
+                        if b.Len() > 0 {
+                            b.WriteByte(47)
+                        }
+                        b.WriteString("..")
+                    }
+                } else if !isDot {
+                    // Normal component: add separator (if not first) and text.
+                    if b.Len() > 0 {
+                        b.WriteByte(47)
+                    }
+                    b.WriteString(substring(p, start, compLen))
+                    stackLen = stackLen + 1
+                }
+                // "." components are silently skipped.
+            }
+            start = i + 1
+        }
+    }
+    // Handle the case where cleaning produced an empty result.
+    if b.Len() == 0 {
+        if p[0] == 47 {
+            return "/"
+        }
+        return "."
+    }
+    result := b.String()
+    b.Free()
+    return result
+}
+
+// IsAbsolute reports whether the path is absolute (starts with '/').
+pub fn IsAbsolute(p: string) -> bool {
+    n := int(libc.strlen(p))
+    if n == 0 {
+        return false
+    }
+    return p[0] == 47
+}
+
+// substring returns a substring of s starting at offset with the given length.
+// The caller owns the returned string.
+fn substring(s: string, offset: int, length: int) -> string {
+    result := libc.malloc(length + 1)
+    libc.memcpy(result, string(int64(s) + int64(offset)), length)
+    result[length] = 0
+    return result
+}
+
+// strEq compares two strings for equality.
+fn strEq(a: string, b: string) -> bool {
+    return libc.strcmp(a, b) == 0
+}

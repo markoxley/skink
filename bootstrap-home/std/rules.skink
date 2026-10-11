@@ -1,0 +1,126 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/rules.skink
+// Purpose: Defines the RuleSource template interface for dynamic rule
+//          sources that can be registered with a ruleset at runtime.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module rules
+
+import "std/str"
+import "std/time"
+
+// RuleSource defines the interface for dynamic rule sources that can be
+// registered with a ruleset at runtime.
+template RuleSource {
+    // name returns the name of the rule.
+    fn name(self: RuleSource) -> string
+    // start starts the source and provides a callback loop for incoming data.
+    fn start(self: RuleSource)
+    // stop safely stops the background listeners or connections.
+    fn stop(self: RuleSource)
+    // triggered returns true when the rule condition is met.
+    fn triggered(self: RuleSource) -> bool
+    // action executes the rule's action body.
+    fn Action(self: RuleSource)
+    // priority returns the rule priority (lower number means higher priority).
+    fn Priority(self: RuleSource) -> int
+}
+
+// === Simple procedural rules engine ===
+//
+// The book's tooling chapter uses a small engine where conditions and
+// actions are ordinary functions. The engine stores parallel slices of
+// named condition/action functions; a spawned evaluation loop checks each
+// condition on every tick and runs the matching action when it fires.
+
+// Engine is a small procedural rules engine.
+pub struct Engine {
+    condNames:  []string
+    conds:      []fn() -> bool
+    actNames:   []string
+    acts:       []fn()
+    running:    bool
+
+    // AddRule registers a named condition. When the condition returns
+    // true on a tick, the action with the same name (if any) runs.
+    pub fn AddRule(self: *Engine, name: string, cond: fn() -> bool) {
+        self.condNames = append(self.condNames, name)
+        self.conds = append(self.conds, cond)
+    }
+
+    // AddAction registers a named action that runs when the rule of the
+    // same name's condition fires.
+    pub fn AddAction(self: *Engine, name: string, act: fn()) {
+        self.actNames = append(self.actNames, name)
+        self.acts = append(self.acts, act)
+    }
+
+    // Evaluate runs one evaluation pass: for every registered rule whose
+    // condition is true, run the matching action once. Useful for tests
+    // and manual stepping without Start().
+    pub fn Evaluate(self: *Engine) {
+        i := 0
+        for i < len(self.conds) {
+            if self.conds[i]() {
+                j := 0
+                for j < len(self.actNames) {
+                    if str.Equal(self.actNames[j], self.condNames[i]) {
+                        self.acts[j]()
+                        break
+                    }
+                    j = j + 1
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    // Start spawns the background evaluation loop (1ms tick).
+    pub fn Start(self: *Engine) {
+        if self.running {
+            return
+        }
+        self.running = true
+        spawn engineLoop(self)
+    }
+
+    // Stop halts the evaluation loop.
+    pub fn Stop(self: *Engine) {
+        self.running = false
+    }
+}
+
+// NewEngine creates an empty rules engine.
+pub fn NewEngine() -> Engine {
+    var cn []string
+    var cs []fn() -> bool
+    var an []string
+    var ac []fn()
+    return Engine{condNames: cn, conds: cs, actNames: an, acts: ac, running: false}
+}
+
+// engineLoop is the background evaluation thread.
+fn engineLoop(e: *Engine) {
+    for e.running {
+        e.Evaluate()
+        time.SleepMs(1)
+    }
+}

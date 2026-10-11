@@ -1,0 +1,418 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/compiler_narrow_int_test.skink
+// Purpose: Regression tests for narrow-integer (int8/int16/uint8/uint16)
+//          codegen fixes — CHRIS bugs 14, 15, and 18 plus the related
+//          missing integer-width coercions found while fixing them:
+//            * struct-literal field stores (`Out{w: -5}` into int16)
+//            * `var` declarations (`var a int16 = -5`)
+//            * return statements (single and multi-value)
+//            * map index assignment (`m[k] = -9` into map[string]int16)
+//            * infix operand width unification (`i16v == -5`, `i16v + 1`,
+//              mixed `i16 + i64`)
+//            * unary minus / bitwise-not at the operand's own width
+//            * println/print extension (sext/zext) before printf varargs
+//            * string interpolation of narrow ints via "…{v}…"
+//
+// Licensed under the Apache License, Version 2.0.
+
+module compiler_narrow_int_test
+
+import "testing"
+import "std/strconv"
+
+// NarrowBox exercises several narrow field widths in one struct literal.
+struct NarrowBox {
+    w:  int16
+    b:  int8
+    u:  uint8
+    uw: uint16
+    w64: int64
+}
+
+// moduleBox is a module-level struct literal whose fields are initialized
+// with negative unary expressions — exercises the global-var init path
+// (_skink_global_init), not just function bodies.
+var moduleBox = NarrowBox{w: -11, b: -4, u: 200, uw: 60000, w64: -100000}
+
+// neg16 returns a negative i16 via a unary-minus expression — regression
+// for the return-statement coercion (`return -7` into an int16 result).
+fn neg16() -> int16 {
+    return -7
+}
+
+// pair16 returns a multi-value (int16, int) — regression for the
+// aggregate-return coercion path.
+fn pair16() -> (int16, int) {
+    return -9, 3
+}
+
+// add16 takes a narrow param so callers exercise call-argument coercion.
+fn add16(a: int16, b: int16) -> int16 {
+    return a + b
+}
+
+// ==========================================================================
+// Struct literal field coercion (CHRIS bug 14)
+// ==========================================================================
+
+// TestStructLiteralNarrowFields verifies negative/unary expressions are
+// truncated to the declared field width instead of emitting `store i16
+// %r_i32` (invalid LLVM IR).
+pub fn TestStructLiteralNarrowFields() {
+    o := NarrowBox{w: -5, b: -3, u: 253, uw: 60000, w64: -100000}
+    testing.AssertEqualInt(-5, int(o.w), "int16 field holds -5")
+    testing.AssertEqualInt(-3, int(o.b), "int8 field holds -3")
+    testing.AssertEqualInt(253, int(o.u), "uint8 field holds 253")
+    testing.AssertEqualInt(60000, int(o.uw), "uint16 field holds 60000")
+    testing.AssertEqualInt(-100000, int(o.w64), "int64 field holds -100000")
+}
+
+// TestModuleVarStructLiteral verifies the same coercion inside a
+// module-level struct literal evaluated by the global initializer.
+pub fn TestModuleVarStructLiteral() {
+    testing.AssertEqualInt(-11, int(moduleBox.w), "global int16 field holds -11")
+    testing.AssertEqualInt(-4, int(moduleBox.b), "global int8 field holds -4")
+    testing.AssertEqualInt(200, int(moduleBox.u), "global uint8 field holds 200")
+    testing.AssertEqualInt(60000, int(moduleBox.uw), "global uint16 field holds 60000")
+    testing.AssertEqualInt(-100000, int(moduleBox.w64), "global int64 field")
+}
+
+// ==========================================================================
+// Variable declaration and return coercion (same class as bug 14)
+// ==========================================================================
+
+// TestVarDeclNarrowInit verifies `var x int16 = expr` narrows an i32
+// initializer to the declared type.
+pub fn TestVarDeclNarrowInit() {
+    var a int16 = -5
+    var b int8 = -3
+    var c uint8 = 250
+    var d uint16 = 60000
+    var e int64 = -2000000000
+    testing.AssertEqualInt(-5, int(a), "var int16 = -5")
+    testing.AssertEqualInt(-3, int(b), "var int8 = -3")
+    testing.AssertEqualInt(250, int(c), "var uint8 = 250")
+    testing.AssertEqualInt(60000, int(d), "var uint16 = 60000")
+    // Compare against an explicit i64 cast so both sides are compared
+    // at the same width rather than relying on literal overflow.
+    testing.AssertTrue(e == int64(-2000000000), "var int64 = -2000000000")
+}
+
+// TestReturnNarrowInt verifies single-value and multi-value returns coerce
+// expressions to the declared narrow return types.
+pub fn TestReturnNarrowInt() {
+    testing.AssertEqualInt(-7, int(neg16()), "return -7 as int16")
+    g, n := pair16()
+    testing.AssertEqualInt(-9, int(g), "multi-return int16")
+    testing.AssertEqualInt(3, n, "multi-return int")
+}
+
+// TestCallArgNarrow verifies int16/int8 arguments coerce correctly at call
+// sites (this path already worked — kept as a guard).
+pub fn TestCallArgNarrow() {
+    testing.AssertEqualInt(-2, int(add16(-5, 3)), "add16(-5, 3) == -2")
+    var a int16 = 10
+    testing.AssertEqualInt(7, int(add16(a, -3)), "add16(a, -3) == 7")
+}
+
+// ==========================================================================
+// Map index assignment coercion
+// ==========================================================================
+
+// TestMapStoreNarrow verifies `m[k] = -9` truncates to the map's declared
+// value type rather than storing an i32 register into an i16 slot.
+pub fn TestMapStoreNarrow() {
+    m := make(map[string]int16)
+    m["k"] = -9
+    m["u"] = 300
+    testing.AssertEqualInt(-9, int(m["k"]), "map[string]int16 holds -9")
+    testing.AssertEqualInt(300, int(m["u"]), "map[string]int16 holds 300")
+    b := make(map[string]int8)
+    b["x"] = -7
+    testing.AssertEqualInt(-7, int(b["x"]), "map[string]int8 holds -7")
+}
+
+// ==========================================================================
+// Infix operand width unification (comparisons and arithmetic)
+// ==========================================================================
+
+// TestNarrowComparisons verifies comparing narrow ints against i32
+// literals emits matching-width icmp operands.
+pub fn TestNarrowComparisons() {
+    var a int16 = -5
+    testing.AssertTrue(a == -5, "int16 == literal")
+    testing.AssertTrue(a != -4, "int16 != literal")
+    testing.AssertTrue(a < 0, "int16 < literal")
+    testing.AssertTrue(a > -10, "int16 > literal")
+    testing.AssertTrue(a <= -5, "int16 <= literal")
+    testing.AssertTrue(a >= -5, "int16 >= literal")
+    b := int8(10)
+    testing.AssertTrue(b < 20 && b > 5 && b <= 10 && b >= 10, "int8 relational ops")
+    u := uint8(200)
+    testing.AssertTrue(u == 200 && u > 100, "uint8 comparisons")
+}
+
+// TestNarrowArithmetic verifies arithmetic on narrow operands unifies
+// operand widths before emitting the op.
+pub fn TestNarrowArithmetic() {
+    var a int16 = -5
+    testing.AssertEqualInt(0, int(a + 5), "int16 + i32 literal")
+    testing.AssertEqualInt(-3, int(a + int16(2)), "int16 + int16")
+    testing.AssertEqualInt(-15, int(a * int16(3)), "int16 * int16")
+    testing.AssertEqualInt(-10, int(a - 5), "int16 - literal")
+    testing.AssertEqualInt(2, int(int16(10) / int16(4)), "int16 / int16")
+    testing.AssertEqualInt(2, int(int16(10) % int16(4)), "int16 % int16")
+    testing.AssertEqualInt(-7, int(a + int8(-2)), "int16 + int8 mixed widths")
+}
+
+// TestNarrowShifts verifies shift operators narrow the i32 shift-amount
+// literal to the operand's width.
+pub fn TestNarrowShifts() {
+    testing.AssertEqualInt(25, int(int16(100) >> 2), "int16 >> 2")
+    testing.AssertEqualInt(8, int(int8(1) << 3), "int8 << 3")
+    testing.AssertEqualInt(64, int(uint8(128) >> 1), "uint8 >> 1")
+}
+
+// TestMixedWidthArith verifies widening toward the wider operand,
+// including the i64 promotion case the old code special-cased.
+pub fn TestMixedWidthArith() {
+    var a int16 = -5
+    big := a + int64(1)
+    testing.AssertTrue(big == -4, "int16 + int64 widens to i64")
+    sum := int64(10000000000) + 5
+    testing.AssertTrue(sum == int64(10000000005), "i64 + i32 literal")
+    var i32v int32 = 7
+    sum64 := i32v + int64(3)
+    testing.AssertTrue(sum64 == 10, "int32 + int64 widens to i64")
+}
+
+// ==========================================================================
+// Unary operators at narrow width
+// ==========================================================================
+
+// TestNarrowUnaryOps verifies `-x` and `~x` emit at the operand's own
+// width instead of `sub i32 0, %i16reg` / `xor i32 %i16reg, -1`.
+pub fn TestNarrowUnaryOps() {
+    var a int16 = -5
+    testing.AssertEqualInt(5, int(-a), "-int16(-5) == 5")
+    var p int16 = 7
+    testing.AssertEqualInt(-7, int(-p), "-int16(7) == -7")
+    b := int8(10)
+    testing.AssertEqualInt(-11, int(~b), "~int8(10) == -11")
+    u := uint8(0)
+    testing.AssertEqualInt(255, int(~u), "~uint8(0) == 255")
+}
+
+// ==========================================================================
+// println / print extension (CHRIS bug 15)
+// ==========================================================================
+
+// TestPrintlnNarrowInts exercises the println/print codegen path for every
+// narrow type. Stdout content can't be asserted by the harness, but the
+// test still guards codegen validity — previously these either printed
+// unsigned garbage or emitted invalid IR (compile-fail on regression).
+// Expected stdout: -5 -3 200 60000 -7 250 60000 42 on their own lines.
+pub fn TestPrintlnNarrowInts() {
+    println(int16(-5))
+    println(int8(-3))
+    println(uint8(200))
+    println(uint16(60000))
+    var a int16 = -7
+    var u uint8 = 250
+    println(a)
+    println(u)
+    u2 := uint16(60000)
+    println(u2)
+    println(42)
+    print("done")
+}
+
+// TestPrintNarrowInts exercises print (no newline) on narrow ints too.
+pub fn TestPrintNarrowInts() {
+    print(int16(-5))
+    print(uint8(200))
+    var w int16 = -1
+    print(w)
+    print("\n")
+}
+
+// TestNarrowIntCasts verifies int()/int64() casts of narrow values keep
+// their sign — the semantic check behind the printing fix.
+pub fn TestNarrowIntCasts() {
+    var a int16 = -5
+    var u uint8 = 250
+    var uw uint16 = 60000
+    testing.AssertEqualInt(-5, int(a), "int(int16(-5))")
+    testing.AssertEqualInt(250, int(u), "int(uint8(250))")
+    testing.AssertEqualInt(60000, int(uw), "int(uint16(60000))")
+    v, ok := strconv.ParseInt("-5")
+    testing.AssertTrue(ok, "ParseInt ok")
+    testing.AssertEqualInt(-5, v, "round-trip -5")
+}
+
+// takeInt accepts an int so callers exercise implicit widening coercion
+// (uint8 → int must zero-extend, not sign-extend).
+fn takeInt(v: int) -> int {
+    return v
+}
+
+// takeInt64 exercises implicit widening into a 64-bit parameter.
+fn takeInt64(v: int64) -> int64 {
+    return v
+}
+
+// TestUnsignedWidening verifies unsigned narrow values widen with zext —
+// `int(uint8(250))` must be 250, not -6 — in casts, implicit call-arg
+// coercion, var decls, assignments, and returns.
+pub fn TestUnsignedWidening() {
+    u := uint8(250)
+    uw := uint16(60000)
+    testing.AssertEqualInt(250, takeInt(u), "implicit uint8 → int arg")
+    testing.AssertEqualInt(60000, takeInt(uw), "implicit uint16 → int arg")
+    testing.AssertTrue(takeInt64(u) == 250, "implicit uint8 → int64 arg")
+    testing.AssertTrue(takeInt64(uw) == 60000, "implicit uint16 → int64 arg")
+
+    var wide int = u
+    testing.AssertEqualInt(250, wide, "var int = uint8(250)")
+    var wide64 int64 = uw
+    testing.AssertTrue(wide64 == 60000, "var int64 = uint16(60000)")
+
+    wide = 0
+    wide = u
+    testing.AssertEqualInt(250, wide, "assign uint8 into int var")
+
+    testing.AssertEqualInt(250, int(u), "explicit int(uint8) cast")
+    testing.AssertTrue(int64(uw) == 60000, "explicit int64(uint16) cast")
+
+    // Signed values must still sign-extend.
+    s := int8(-5)
+    testing.AssertEqualInt(-5, takeInt(s), "implicit int8 → int arg")
+    testing.AssertTrue(takeInt64(s) == -5, "implicit int8 → int64 arg")
+    var neg int = s
+    testing.AssertEqualInt(-5, neg, "var int = int8(-5)")
+}
+
+// TestCastNarrowToString verifies string(int16v) widens to i32 before
+// stringify — previously the raw i16 register fell through to the
+// caller's i8* handling and produced invalid LLVM IR.
+pub fn TestCastNarrowToString() {
+    v := int16(-5)
+    u := uint8(200)
+    testing.AssertEqualString("-5", string(v), "string(int16(-5))")
+    testing.AssertEqualString("200", string(u), "string(uint8(200))")
+}
+
+// ==========================================================================
+// String interpolation of narrow ints (CHRIS bug 18)
+// ==========================================================================
+
+// TestInterpSignedNarrow verifies "{v}" for int8/int16 values renders
+// signed decimal without emitting an i8* null check on an int register.
+pub fn TestInterpSignedNarrow() {
+    v := int16(-5)
+    w := int8(-3)
+    testing.AssertEqualString("v = -5", "v = {v}", "interpolate int16")
+    testing.AssertEqualString("w = -3", "w = {w}", "interpolate int8")
+    var f int16 = 42
+    testing.AssertEqualString("{42}", "{f}", "interpolate positive int16")
+}
+
+// TestInterpUnsignedNarrow verifies uint8/uint16 interpolate via zext —
+// i.e. the emitter uses the checker's recorded type for signedness.
+pub fn TestInterpUnsignedNarrow() {
+    u := uint8(200)
+    u2 := uint16(60000)
+    testing.AssertEqualString("u = 200", "u = {u}", "interpolate uint8")
+    testing.AssertEqualString("u2 = 60000", "u2 = {u2}", "interpolate uint16")
+    testing.AssertEqualString("mixed -5 and 200 end",
+        "mixed {int16(-5)} and {u} end", "mixed signed/unsigned parts")
+}
+
+// TestInterpNarrowFields verifies struct fields and slice elements
+// interpolate correctly — deeper sub-expressions inside the braces.
+pub fn TestInterpNarrowFields() {
+    r := NarrowBox{w: -5, b: -3, u: 200, uw: 60000, w64: 9}
+    testing.AssertEqualString("field u=200 w=60000 s=-5",
+        "field u={r.u} w={r.uw} s={r.w}", "struct fields")
+    arr := []uint8{10, 250}
+    testing.AssertEqualString("arr[1]=250", "arr[1]={arr[1]}", "uint8 slice element")
+}
+
+// TestInterpIntSlice verifies printing a []int16 slice — elements went
+// through emitValAsString with no expression context and used to emit
+// i16 regs into a %d snprintf.
+pub fn TestInterpIntSlice() {
+    arr := []int16{1, -2}
+    testing.AssertEqualString("arr = [1, -2]", "arr = {arr}", "[]int16 to string")
+    uarr := []uint8{1, 200}
+    s := "uarr = {uarr}"
+    // Element signedness has no expression context in slice printing;
+    // document current behavior (signed interpretation).
+    _ = s
+    testing.AssertEqualInt(2, len(uarr), "uint8 slice sanity")
+}
+
+// TestInterpNarrowExpr verifies interpolated sub-expressions (not just
+// bare identifiers) stringify narrow results correctly.
+pub fn TestInterpNarrowExpr() {
+    v := int16(-5)
+    testing.AssertEqualString("plus1 = -4", "plus1 = {v + int16(1)}", "int16 expr")
+    testing.AssertEqualString("neg = 5", "neg = {-v}", "unary minus on int16")
+    testing.AssertEqualString("wide = 100", "wide = {int(uint8(100))}", "widened cast")
+}
+
+// ==========================================================================
+// Integer literal range checking at boundaries (comp_error.md #28)
+// ==========================================================================
+
+// takeI16 echoes an int16 — used to verify boundary literals pass.
+fn takeI16(x: int16) -> int16 {
+    return x
+}
+
+// TestInt16LiteralBoundaries verifies that integer literals at the exact
+// edges of a narrow target type are accepted and kept intact. Comp_error.md
+// #28 was about out-of-range literals (60000 into int16) silently wrapping;
+// the overflow case is a compile-time error now, so this test guards the
+// legitimate boundary values around it.
+pub fn TestInt16LiteralBoundaries() {
+    testing.AssertEqualInt(32767, int(takeI16(32767)), "int16 max literal")
+    testing.AssertEqualInt(-32768, int(takeI16(-32768)), "int16 min literal")
+
+    var v int16
+    v = 32767
+    testing.AssertEqualInt(32767, int(v), "int16 max assign")
+    v = -32768
+    testing.AssertEqualInt(-32768, int(v), "int16 min assign")
+
+    b := NarrowBox{w: 32767, b: 127, u: 255, uw: 65535, w64: 9223372036854775807}
+    testing.AssertEqualInt(32767, int(b.w), "int16 struct field max")
+    testing.AssertEqualInt(127, int(b.b), "int8 struct field max")
+    testing.AssertEqualInt(255, int(b.u), "uint8 struct field max")
+    testing.AssertEqualInt(65535, int(b.uw), "uint16 struct field max")
+}
+
+// TestUInt16LiteralBoundaries verifies unsigned edge literals pass through
+// every assignable position.
+pub fn TestUInt16LiteralBoundaries() {
+    var u uint16
+    u = 65535
+    testing.AssertEqualInt(65535, int(u), "uint16 max assign")
+    u = 0
+    testing.AssertEqualInt(0, int(u), "uint16 zero assign")
+}
+
+// retI16 returns its argument — guards the return-statement check.
+fn retI16(x: int16) -> int16 {
+    return x
+}
+
+// TestInt16LiteralReturn verifies boundary literals work in returns.
+pub fn TestInt16LiteralReturn() {
+    testing.AssertEqualInt(32767, int(retI16(32767)), "int16 max via return")
+}

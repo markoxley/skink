@@ -1,0 +1,574 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/fuzz_test.skink
+// Purpose: Skink module for fuzz test.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module fuzz_test
+
+import "std/json"
+import "std/xml"
+import "std/yaml"
+import "std/csv"
+import "std/regex"
+import "std/rand"
+import "std/str"
+import "std/libc"
+import "testing"
+
+// fuzzIterations is the number of random inputs to generate per parser.
+// Kept modest to avoid excessive memory usage during testing.
+const fuzzIterations = 100
+
+// genRandomString generates a random string of length n using printable
+// ASCII characters (32-126).
+fn genRandomString(n: int) -> string {
+    if n <= 0 {
+        return ""
+    }
+    buf := libc.malloc(n + 1)
+    for i := 0; i < n; i = i + 1 {
+        b := rand.Intn(95) + 32
+        buf[i] = b
+    }
+    buf[n] = 0
+    return buf
+}
+
+// genDeepJSON generates a string with n nested brackets/braces.
+fn genDeepJSON(n: int, useBraces: bool) -> string {
+    openChar := 91   // '['
+    closeChar := 93  // ']'
+    if useBraces {
+        openChar = 123  // '{'
+        closeChar = 125 // '}'
+    }
+    buf := libc.malloc(n * 2 + 2)
+    for i := 0; i < n; i = i + 1 {
+        buf[i] = openChar
+    }
+    buf[n] = 48 // '0'
+    for i := 0; i < n; i = i + 1 {
+        buf[n + 1 + i] = closeChar
+    }
+    buf[n * 2 + 1] = 0
+    return buf
+}
+
+// genDeepXML generates deeply nested XML tags.
+fn genDeepXML(n: int) -> string {
+    total := n * 7 + 1
+    buf := libc.malloc(total + 1)
+    pos := 0
+    for i := 0; i < n; i = i + 1 {
+        buf[pos] = 60     // '<'
+        buf[pos + 1] = 97 // 'a'
+        buf[pos + 2] = 62 // '>'
+        pos = pos + 3
+    }
+    buf[pos] = 120 // 'x'
+    pos = pos + 1
+    for i := 0; i < n; i = i + 1 {
+        buf[pos] = 60      // '<'
+        buf[pos + 1] = 47  // '/'
+        buf[pos + 2] = 97  // 'a'
+        buf[pos + 3] = 62  // '>'
+        pos = pos + 4
+    }
+    buf[pos] = 0
+    return buf
+}
+
+// genDeepYAML generates deeply nested YAML indentation.
+fn genDeepYAML(n: int) -> string {
+    total := 0
+    for i := 0; i < n; i = i + 1 {
+        total = total + i + 5
+    }
+    total = total + n + 3
+    buf := libc.malloc(total + 1)
+    pos := 0
+    for i := 0; i < n; i = i + 1 {
+        for j := 0; j < i; j = j + 1 {
+            buf[pos] = 32
+            pos = pos + 1
+        }
+        buf[pos] = 107     // 'k'
+        buf[pos + 1] = 101 // 'e'
+        buf[pos + 2] = 121 // 'y'
+        buf[pos + 3] = 58  // ':'
+        buf[pos + 4] = 10  // '\n'
+        pos = pos + 5
+    }
+    for j := 0; j < n; j = j + 1 {
+        buf[pos] = 32
+        pos = pos + 1
+    }
+    buf[pos] = 118     // 'v'
+    buf[pos + 1] = 97  // 'a'
+    buf[pos + 2] = 108 // 'l'
+    pos = pos + 3
+    buf[pos] = 0
+    return buf
+}
+
+// genMalformed takes a valid string and flips random bytes.
+fn genMalformed(base: string, flips: int) -> string {
+    n := str.Len(base)
+    if n == 0 {
+        return ""
+    }
+    buf := libc.malloc(n + 1)
+    libc.memcpy(buf, base, n)
+    buf[n] = 0
+    for i := 0; i < flips; i = i + 1 {
+        pos := rand.Intn(n)
+        buf[pos] = rand.Intn(128)
+    }
+    return buf
+}
+
+// genCSVWithQuotes generates CSV data with random quoting and escaping.
+fn genCSVWithQuotes(rows: int, cols: int) -> string {
+    // Worst case per field: 2 (surrounding quotes) + 19*2 (doubled quotes) = 40 bytes.
+    // Plus comma separator (1) and newline (1) per row.
+    maxLen := rows * (cols * 42 + 1) + 1
+    buf := libc.malloc(maxLen + 1)
+    pos := 0
+    for r := 0; r < rows; r = r + 1 {
+        for c := 0; c < cols; c = c + 1 {
+            if c > 0 {
+                buf[pos] = 44 // ','
+                pos = pos + 1
+            }
+            if rand.Intn(3) == 0 {
+                buf[pos] = 34 // '"'
+                pos = pos + 1
+                fieldLen := rand.Intn(20)
+                for k := 0; k < fieldLen; k = k + 1 {
+                    ch := rand.Intn(128)
+                    if ch == 34 {
+                        buf[pos] = 34
+                        buf[pos + 1] = 34
+                        pos = pos + 2
+                    } else {
+                        buf[pos] = ch
+                        pos = pos + 1
+                    }
+                }
+                buf[pos] = 34 // '"'
+                pos = pos + 1
+            } else {
+                fieldLen := rand.Intn(20)
+                for k := 0; k < fieldLen; k = k + 1 {
+                    ch := rand.Intn(128)
+                    if ch != 44 && ch != 10 && ch != 13 && ch != 34 {
+                        buf[pos] = ch
+                        pos = pos + 1
+                    }
+                }
+            }
+        }
+        buf[pos] = 10 // '\n'
+        pos = pos + 1
+    }
+    buf[pos] = 0
+    return buf
+}
+
+// genRandomRegex generates a random regex pattern from safe characters.
+fn genRandomRegex(n: int) -> string {
+    buf := libc.malloc(n + 1)
+    chars := "abcdefghij0123456789.*+?()[]"
+    clen := str.Len(chars)
+    for i := 0; i < n; i = i + 1 {
+        buf[i] = chars[rand.Intn(clen)]
+    }
+    buf[n] = 0
+    return buf
+}
+
+// === Fuzz Tests ===
+
+// TestFuzzJSONRandom feeds random byte strings to json.Unmarshal.
+pub fn TestFuzzJSONRandom() {
+    for i := 0; i < fuzzIterations; i = i + 1 {
+        n := rand.Intn(256)
+        input := genRandomString(n)
+        _, err := json.Unmarshal(input)
+        if err.message != "" {
+            // Expected for random input; just verifying no crash.
+        }
+        
+        libc.free(input)
+    }
+}
+
+// TestFuzzJSONDeepNesting feeds deeply nested JSON to verify the depth
+// limit prevents stack overflow.
+pub fn TestFuzzJSONDeepNesting() {
+    input := genDeepJSON(2000, true)
+    _, err := json.Unmarshal(input)
+    if err.message == "" {
+        Errorf("Deeply nested JSON (2000 braces) should fail")
+    }
+    
+    libc.free(input)
+
+    input = genDeepJSON(2000, false)
+    _, err = json.Unmarshal(input)
+    if err.message == "" {
+        Errorf("Deeply nested JSON (2000 brackets) should fail")
+    }
+    
+    libc.free(input)
+
+    // Just under the depth limit (999) should parse without error.
+    input = genDeepJSON(999, false)
+    _, err = json.Unmarshal(input)
+    if err.message != "" {
+        // May or may not error depending on parser strictness; no crash is what matters.
+    }
+    
+    libc.free(input)
+}
+
+// TestFuzzJSONMalformed takes valid JSON and flips random bytes.
+pub fn TestFuzzJSONMalformed() {
+    validJSONs := []string{
+        "{\"key\": \"value\", \"num\": 42, \"arr\": [1, 2, 3]}",
+        "[true, false, null, 3.14, \"hello\"]",
+        "{\"nested\": {\"a\": {\"b\": {\"c\": 1}}}}",
+    }
+    for i := 0; i < fuzzIterations; i = i + 1 {
+        base := validJSONs[i % 3]
+        flips := rand.Intn(10) + 1
+        input := genMalformed(base, flips)
+        _, err := json.Unmarshal(input)
+        if err.message != "" {
+            // Expected for malformed input; just verifying no crash.
+        }
+        
+        libc.free(input)
+    }
+}
+
+// TestFuzzJSONTruncated feeds truncated JSON at various positions.
+pub fn TestFuzzJSONTruncated() {
+    base := "{\"key\": \"value\", \"num\": 42, \"arr\": [1, 2, 3]}"
+    n := str.Len(base)
+    for i := 1; i < n; i = i + 1 {
+        input := str.Substr(base, 0, i)
+        _, err := json.Unmarshal(input)
+        if err.message != "" {
+            // Expected for truncated input.
+        }
+        
+    }
+}
+
+// TestFuzzXMLRandom feeds random byte strings to xml.Unmarshal.
+pub fn TestFuzzXMLRandom() {
+    for i := 0; i < fuzzIterations; i = i + 1 {
+        n := rand.Intn(256)
+        input := genRandomString(n)
+        _, err := xml.Unmarshal(input)
+        if err.message != "" {
+            // Expected for random input.
+        }
+        
+        libc.free(input)
+    }
+}
+
+// TestFuzzXMLDeepNesting feeds deeply nested XML to verify the depth limit.
+pub fn TestFuzzXMLDeepNesting() {
+    input := genDeepXML(2000)
+    _, err := xml.Unmarshal(input)
+    if err.message == "" {
+        Errorf("Deeply nested XML (2000 levels) should fail")
+    }
+    
+    libc.free(input)
+
+    input = genDeepXML(999)
+    _, err = xml.Unmarshal(input)
+    if err.message != "" {
+        // May error; no crash is what matters.
+    }
+    
+    libc.free(input)
+}
+
+// TestFuzzXMLMalformed takes valid XML and flips random bytes.
+pub fn TestFuzzXMLMalformed() {
+    validXMLs := []string{
+        "<root><child>text</child></root>",
+        "<a x=\"1\" y=\"2\"><b/></a>",
+        "<doc><item id=\"1\">hello</item><item id=\"2\">world</item></doc>",
+    }
+    for i := 0; i < fuzzIterations; i = i + 1 {
+        base := validXMLs[i % 3]
+        flips := rand.Intn(10) + 1
+        input := genMalformed(base, flips)
+        _, err := xml.Unmarshal(input)
+        if err.message != "" {
+            // Expected for malformed input.
+        }
+        
+        libc.free(input)
+    }
+}
+
+// TestFuzzXMLTruncated feeds truncated XML at various positions.
+pub fn TestFuzzXMLTruncated() {
+    base := "<root><child>text</child><sibling attr=\"val\"/></root>"
+    n := str.Len(base)
+    for i := 1; i < n; i = i + 1 {
+        input := str.Substr(base, 0, i)
+        _, err := xml.Unmarshal(input)
+        if err.message != "" {
+            // Expected for truncated input.
+        }
+        
+    }
+}
+
+// TestFuzzYAMLRandom feeds random byte strings to yaml.Unmarshal.
+pub fn TestFuzzYAMLRandom() {
+    for i := 0; i < fuzzIterations; i = i + 1 {
+        n := rand.Intn(256)
+        input := genRandomString(n)
+        _, err := yaml.Unmarshal(input)
+        if err.message != "" {
+            // Expected for random input.
+        }
+        
+        libc.free(input)
+    }
+}
+
+// TestFuzzYAMLDeepNesting feeds deeply nested YAML to verify no crash.
+pub fn TestFuzzYAMLDeepNesting() {
+    input := genDeepYAML(500)
+    _, err := yaml.Unmarshal(input)
+    if err.message != "" {
+        // May error; no crash is what matters.
+    }
+    
+    libc.free(input)
+}
+
+// TestFuzzYAMLMalformed takes valid YAML and flips random bytes.
+pub fn TestFuzzYAMLMalformed() {
+    validYAMLs := []string{
+        "key: value\nnum: 42\nlist:\n  - a\n  - b\n",
+        "name: test\nnested:\n  inner: yes\n  deep:\n    deeper: ok\n",
+        "items:\n  - name: foo\n    value: 1\n  - name: bar\n    value: 2\n",
+    }
+    for i := 0; i < fuzzIterations; i = i + 1 {
+        base := validYAMLs[i % 3]
+        flips := rand.Intn(10) + 1
+        input := genMalformed(base, flips)
+        _, err := yaml.Unmarshal(input)
+        if err.message != "" {
+            // Expected for malformed input.
+        }
+        
+        libc.free(input)
+    }
+}
+
+// TestFuzzCSVRandom feeds random byte strings to csv.NewReader.Read.
+pub fn TestFuzzCSVRandom() {
+    for i := 0; i < fuzzIterations; i = i + 1 {
+        n := rand.Intn(256)
+        input := genRandomString(n)
+        r := csv.NewReader(input)
+        for {
+            _, err := r.Read()
+            if err.message != "" {
+                break
+            }
+            
+        }
+        libc.free(input)
+    }
+}
+
+// TestFuzzCSVStructured feeds CSV data with random quoting and escaping.
+pub fn TestFuzzCSVStructured() {
+    for i := 0; i < fuzzIterations; i = i + 1 {
+        rows := rand.Intn(20) + 1
+        cols := rand.Intn(10) + 1
+        input := genCSVWithQuotes(rows, cols)
+        r := csv.NewReader(input)
+        for {
+            _, err := r.Read()
+            if err.message != "" {
+                break
+            }
+            
+        }
+        libc.free(input)
+    }
+}
+
+// TestFuzzCSVUnclosedQuote feeds CSV with unclosed quotes.
+pub fn TestFuzzCSVUnclosedQuote() {
+    inputs := []string{
+        "\"unclosed quote\n",
+        "\"field1\",\"unclosed\n",
+        "a,b,\"c,d,e",
+    }
+    for i := 0; i < len(inputs); i = i + 1 {
+        r := csv.NewReader(inputs[i])
+        _, err := r.Read()
+        if err.message == "" {
+            // Some parsers might accept this; that's OK too.
+        }
+        
+    }
+}
+
+// TestFuzzRegexRandom compiles random regex patterns and matches them.
+pub fn TestFuzzRegexRandom() {
+    for i := 0; i < fuzzIterations; i = i + 1 {
+        patLen := rand.Intn(20) + 1
+        pattern := genRandomRegex(patLen)
+        r, err := regex.Compile(pattern)
+        if err.message == "" {
+            textLen := rand.Intn(100)
+            text := genRandomString(textLen)
+            r.Match(text)
+            r.MatchString(text)
+            r.Find(text)
+            r.FindAll(text)
+            libc.free(text)
+            r.Free()
+        }
+        libc.free(pattern)
+    }
+}
+
+// TestFuzzRegexPathological feeds patterns that could cause exponential
+// backtracking in naive regex engines. We use short text to avoid hanging.
+pub fn TestFuzzRegexPathological() {
+    patterns := []string{
+        "(a+)+b",
+        "(a|a)*b",
+        "((((((((((a))))))))))",
+    }
+    // Keep text short (<= 20 chars) to avoid catastrophic backtracking.
+    texts := []string{
+        "aaaaaaaaaa",
+        "aaaaaaaaaab",
+        "",
+        "a",
+    }
+    for i := 0; i < len(patterns); i = i + 1 {
+        r, err := regex.Compile(patterns[i])
+        if err.message != "" {
+            continue
+        }
+        for j := 0; j < len(texts); j = j + 1 {
+            r.Match(texts[j])
+        }
+        r.Free()
+    }
+}
+
+// TestFuzzRegexMalformed compiles malformed regex patterns.
+pub fn TestFuzzRegexMalformed() {
+    patterns := []string{
+        "(",
+        ")",
+        "[",
+        "]",
+        "*",
+        "+abc",
+        "\\",
+        "[a-",
+        "(((",
+        ")))",
+        "a{",
+        "a{2,",
+    }
+    for i := 0; i < len(patterns); i = i + 1 {
+        _, err := regex.Compile(patterns[i])
+        if err.message == "" {
+            // Some malformed patterns may compile; no crash is what matters.
+        }
+    }
+}
+
+// TestFuzzAllParsersEmpty feeds empty strings to all parsers.
+pub fn TestFuzzAllParsersEmpty() {
+    _, e1 := json.Unmarshal("")
+    if e1.message == "" {
+        // Empty string may or may not be valid; no crash is what matters.
+    }
+    
+    _, e2 := xml.Unmarshal("")
+    if e2.message == "" {
+        // Same as above.
+    }
+    
+    _, e3 := yaml.Unmarshal("")
+    if e3.message == "" {
+        // Same as above.
+    }
+    
+    r := csv.NewReader("")
+    _, e4 := r.Read()
+    if e4.message == "" {
+        // Same as above.
+    }
+    
+}
+
+// TestFuzzAllParsersLarge feeds a large random document to each parser.
+pub fn TestFuzzAllParsersLarge() {
+    input := genRandomString(4096)
+    _, e1 := json.Unmarshal(input)
+    if e1.message == "" {
+        // Random data unlikely to be valid JSON.
+    }
+    
+    _, e2 := xml.Unmarshal(input)
+    if e2.message == "" {
+        // Random data unlikely to be valid XML.
+    }
+    
+    _, e3 := yaml.Unmarshal(input)
+    if e3.message == "" {
+        // Random data unlikely to be valid YAML.
+    }
+    
+    r := csv.NewReader(input)
+    for {
+        _, err := r.Read()
+        if err.message != "" {
+            break
+        }
+        
+    }
+    libc.free(input)
+}

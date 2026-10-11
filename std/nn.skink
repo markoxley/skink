@@ -1,0 +1,228 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/nn.skink
+// Purpose: Skink module for nn.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module nn
+
+import "std/math"
+import "std/libc"
+
+// sigmoid is the activation function.
+fn sigmoid(x: float) -> float {
+    return 1.0 / (1.0 + math.Exp(-x))
+}
+
+// sigmoidDerivative returns the derivative of sigmoid.
+fn sigmoidDerivative(x: float) -> float {
+    s := sigmoid(x)
+    return s * (1.0 - s)
+}
+
+// Network is a single-hidden-layer feedforward neural network.
+pub struct Network {
+    inputSize:   int
+    hiddenSize:  int
+    outputSize:  int
+    // Weights: hiddenWeights[i][j] = weight from input j to hidden i
+    hiddenWeights: [][]float
+    hiddenBiases:  []float
+    // Weights: outputWeights[i][j] = weight from hidden j to output i
+    outputWeights: [][]float
+    outputBiases:  []float
+    learningRate:  float
+
+    // Forward stores intermediate values for backprop.
+    hiddenInputs:  []float
+    hiddenOutputs: []float
+    outputInputs:  []float
+    outputOutputs: []float
+
+    // Init initializes the network with random weights.
+    pub fn Init(self: *Network, input: int, hidden: int, output: int) {
+        self.inputSize = input
+        self.hiddenSize = hidden
+        self.outputSize = output
+        self.learningRate = 0.1
+        // Allocate hidden weights [hidden][input]
+        self.hiddenWeights = make([][]float, hidden)
+        self.hiddenBiases = make([]float, hidden)
+        i := 0
+        for i < hidden {
+            self.hiddenWeights[i] = make([]float, input)
+            j := 0
+            for j < input {
+                self.hiddenWeights[i][j] = randFloat()
+                j = j + 1
+            }
+            self.hiddenBiases[i] = randFloat()
+            i = i + 1
+        }
+        // Allocate output weights [output][hidden]
+        self.outputWeights = make([][]float, output)
+        self.outputBiases = make([]float, output)
+        i = 0
+        for i < output {
+            self.outputWeights[i] = make([]float, hidden)
+            j := 0
+            for j < hidden {
+                self.outputWeights[i][j] = randFloat()
+                j = j + 1
+            }
+            self.outputBiases[i] = randFloat()
+            i = i + 1
+        }
+        self.hiddenInputs = make([]float, hidden)
+        self.hiddenOutputs = make([]float, hidden)
+        self.outputInputs = make([]float, output)
+        self.outputOutputs = make([]float, output)
+    }
+
+    // SetLearningRate sets the learning rate for training.
+    pub fn SetLearningRate(self: *Network, rate: float) {
+        self.learningRate = rate
+    }
+
+    // Forward performs a forward pass and returns the output values.
+    pub fn Forward(self: *Network, inputs: []float) -> []float {
+        // Hidden layer
+        i := 0
+        for i < self.hiddenSize {
+            sum := self.hiddenBiases[i]
+            j := 0
+            for j < self.inputSize {
+                sum = sum + self.hiddenWeights[i][j] * inputs[j]
+                j = j + 1
+            }
+            self.hiddenInputs[i] = sum
+            self.hiddenOutputs[i] = sigmoid(sum)
+            i = i + 1
+        }
+        // Output layer
+        i = 0
+        for i < self.outputSize {
+            sum := self.outputBiases[i]
+            j := 0
+            for j < self.hiddenSize {
+                sum = sum + self.outputWeights[i][j] * self.hiddenOutputs[j]
+                j = j + 1
+            }
+            self.outputInputs[i] = sum
+            self.outputOutputs[i] = sigmoid(sum)
+            i = i + 1
+        }
+        return self.outputOutputs
+    }
+
+    // Train performs one step of backpropagation training.
+    // inputs is the training input, targets is the desired output.
+    // Returns the error (sum of squared errors / 2).
+    pub fn Train(self: *Network, inputs: []float, targets: []float) -> float {
+        // Forward pass
+        self.Forward(inputs)
+        // Calculate output layer deltas
+        outputDeltas := make([]float, self.outputSize)
+        i := 0
+        for i < self.outputSize {
+            error := targets[i] - self.outputOutputs[i]
+            outputDeltas[i] = error * sigmoidDerivative(self.outputInputs[i])
+            i = i + 1
+        }
+        // Calculate hidden layer deltas
+        hiddenDeltas := make([]float, self.hiddenSize)
+        i = 0
+        for i < self.hiddenSize {
+            error := 0.0
+            j := 0
+            for j < self.outputSize {
+                error = error + outputDeltas[j] * self.outputWeights[j][i]
+                j = j + 1
+            }
+            hiddenDeltas[i] = error * sigmoidDerivative(self.hiddenInputs[i])
+            i = i + 1
+        }
+        // Update output weights and biases
+        i = 0
+        for i < self.outputSize {
+            j := 0
+            for j < self.hiddenSize {
+                self.outputWeights[i][j] = self.outputWeights[i][j] +
+                    self.learningRate * outputDeltas[i] * self.hiddenOutputs[j]
+                j = j + 1
+            }
+            self.outputBiases[i] = self.outputBiases[i] +
+                self.learningRate * outputDeltas[i]
+            i = i + 1
+        }
+        // Update hidden weights and biases
+        i = 0
+        for i < self.hiddenSize {
+            j := 0
+            for j < self.inputSize {
+                self.hiddenWeights[i][j] = self.hiddenWeights[i][j] +
+                    self.learningRate * hiddenDeltas[i] * inputs[j]
+                j = j + 1
+            }
+            self.hiddenBiases[i] = self.hiddenBiases[i] +
+                self.learningRate * hiddenDeltas[i]
+            i = i + 1
+        }
+        // Return total error
+        totalError := 0.0
+        i = 0
+        for i < self.outputSize {
+            diff := targets[i] - self.outputOutputs[i]
+            totalError = totalError + diff * diff
+            i = i + 1
+        }
+        return totalError / 2.0
+    }
+
+    // Predict performs a forward pass and returns the output values.
+    // This is an alias for Forward.
+    pub fn Predict(self: *Network, inputs: []float) -> []float {
+        return self.Forward(inputs)
+    }
+}
+
+// NewNetwork creates a new Network with the given architecture.
+pub fn NewNetwork(inputSize: int, hiddenSize: int, outputSize: int) -> Network {
+    n := Network{}
+    n.Init(inputSize, hiddenSize, outputSize)
+    return n
+}
+
+// randFloat returns a random float in [-1, 1].
+var randState: int64 = 42
+
+// randFloat returns a random float in [-1, 1] using an LCG.
+fn randFloat() -> float {
+    // Simple LCG random number generator
+    randState = randState * int64(6364136223846793005) + int64(1442695040888963407)
+    // Use the raw bits to produce a float in [0, 1)
+    bits := randState
+    if bits < int64(0) {
+        bits = int64(0) - bits
+    }
+    // Map to [-1, 1]
+    val := (float(bits % int64(1000000)) / 500000.0) - 1.0
+    return val
+}

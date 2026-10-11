@@ -1,0 +1,99 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/stridx_test.skink
+// Purpose: Tests for the stridx.StrIndex open-addressing string→slot
+//          index used by the type checker's hash tables.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module stridx_test
+
+import "std/stridx"
+import "std/strconv"
+import "std/str"
+import "testing"
+
+// TestEnsureBasic verifies Ensure assigns stable sequential slots and
+// returns the same slot for a repeated key.
+pub fn TestEnsureBasic() {
+    var idx stridx.StrIndex
+    a := idx.Ensure("alpha")
+    b := idx.Ensure("beta")
+    a2 := idx.Ensure("alpha")
+    testing.AssertEqualInt(0, a, "first key gets slot 0")
+    testing.AssertEqualInt(1, b, "second key gets slot 1")
+    testing.AssertEqualInt(a, a2, "duplicate key returns same slot")
+    testing.AssertEqualInt(2, idx.Len(), "Len counts unique keys")
+}
+
+// TestFind verifies Find returns -1 for missing keys and the stored
+// slot for present keys.
+pub fn TestFind() {
+    var idx stridx.StrIndex
+    idx.Ensure("x")
+    idx.Ensure("y")
+    testing.AssertEqualInt(0, idx.Find("x"), "Find x")
+    testing.AssertEqualInt(1, idx.Find("y"), "Find y")
+    testing.AssertEqualInt(-1, idx.Find("z"), "Find missing returns -1")
+}
+
+// TestResizeManyKeys guards the regression where StrIndex.resize built
+// its entries array with an append-per-element loop. append() reallocates
+// the backing array at exactly len+1 and copies every element (slices
+// carry no capacity), so building a cap-N table that way is O(N^2) and
+// consumed many GB of memory during stage-2 self-compiles. Inserting
+// several thousand keys forces resizes through cap 8192; with the fix
+// this completes quickly in a few MB.
+pub fn TestResizeManyKeys() {
+    var idx stridx.StrIndex
+    n := 5000
+    for i := 0; i < n; i = i + 1 {
+        slot := idx.Ensure(str.Concat("key-", strconv.Itoa(i)))
+        testing.AssertEqualInt(i, slot, "sequential slot assignment")
+    }
+    testing.AssertEqualInt(n, idx.Len(), "Len after bulk insert")
+    // Re-ensuring every key must return the original slot — duplicates
+    // must never be inserted after resizes.
+    for i := 0; i < n; i = i + 1 {
+        testing.AssertEqualInt(i, idx.Ensure(str.Concat("key-", strconv.Itoa(i))), "stable slot after resize")
+    }
+    testing.AssertEqualInt(n, idx.Len(), "no duplicate insertion")
+    for i := 0; i < n; i = i + 1 {
+        testing.AssertEqualInt(i, idx.Find(str.Concat("key-", strconv.Itoa(i))), "Find after resizes")
+    }
+}
+
+// TestStrIndexFieldReceiver verifies Ensure/Find work when the StrIndex
+// is a field of another struct accessed through a pointer — the pattern
+// used by the checker's table wrappers (self.idx.Ensure).
+pub fn TestStrIndexFieldReceiver() {
+    w := IdxBox{}
+    w.idx.Ensure("one")
+    w.idx.Ensure("two")
+    w.idx.Ensure("one")
+    testing.AssertEqualInt(0, w.idx.Find("one"), "field Find one")
+    testing.AssertEqualInt(1, w.idx.Find("two"), "field Find two")
+    testing.AssertEqualInt(2, w.idx.Len(), "field Len")
+}
+
+// IdxBox wraps a StrIndex in a struct to exercise field-receiver access.
+struct IdxBox {
+    idx:  stridx.StrIndex
+    name: string
+}

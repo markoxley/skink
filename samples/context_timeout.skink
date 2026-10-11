@@ -1,0 +1,81 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/context_timeout.skink
+// Purpose: Demonstrates context cancellation, timeouts, and value propagation.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/context"
+import "std/time"
+import "std/io"
+import "std/fmt"
+
+pub fn main() {
+    io.PrintLine("=== Context Timeout Demo ===")
+    io.PrintLine("")
+
+    // --- Background context ---
+    io.PrintLine("--- Background Context ---")
+    bg := context.Background()
+    io.PrintLine("Background done: " + fmt.Btoa(bg.Done()))
+    io.PrintLine("")
+
+    // --- Context with value ---
+    io.PrintLine("--- Context With Value ---")
+    ctx := context.WithValue(nil, "user", "alice")
+    io.PrintLine("Done: " + fmt.Btoa(ctx.Done()))
+    io.PrintLine("")
+
+    // --- Context with cancel ---
+    io.PrintLine("--- Context With Cancel ---")
+    cancelCtx := context.WithCancel(nil)
+    io.PrintLine("Before cancel - done: " + fmt.Btoa(cancelCtx.Done()))
+    io.PrintLine("")
+
+    // --- Context with timeout ---
+    io.PrintLine("--- Context With Timeout (200ms) ---")
+    timeoutCtx := context.WithTimeout(nil, time.FromMilliseconds(200))
+    io.PrintLine("Immediately after creation - done: " + fmt.Btoa(timeoutCtx.ctx.Done()))
+    io.PrintLine("Waiting 300ms for timeout...")
+    time.SleepMs(300)
+    io.PrintLine("After 300ms - done: " + fmt.Btoa(timeoutCtx.ctx.Done()))
+    io.PrintLine("")
+
+    // --- Context with deadline ---
+    io.PrintLine("--- Context With Deadline ---")
+    deadline := time.NowUnixNano() + int64(100000000) // 100ms from now
+    dlCtx := context.WithDeadline(nil, deadline)
+    io.PrintLine("Created with deadline 100ms from now")
+    io.PrintLine("Done immediately: " + fmt.Btoa(dlCtx.ctx.Done()))
+    time.SleepMs(150)
+    io.PrintLine("Done after 150ms: " + fmt.Btoa(dlCtx.ctx.Done()))
+    io.PrintLine("")
+
+    // --- Nested contexts ---
+    io.PrintLine("--- Nested Context Values ---")
+    parent := context.WithValue(nil, "request_id", "req-123")
+    child := context.WithValue(&parent, "user", "bob")
+    grandchild := context.WithValue(&child, "action", "delete")
+
+    // The grandchild should be able to access values from parent chain
+    io.PrintLine("Created parent -> child -> grandchild context chain")
+    io.PrintLine("Grandchild done: " + fmt.Btoa(grandchild.Done()))
+}

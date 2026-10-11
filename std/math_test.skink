@@ -1,0 +1,318 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/math_test.skink
+// Purpose: Skink module for math test.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module math_test
+
+import "std/math"
+import "testing"
+
+// TestConstants verifies that the exported math constants are positive.
+pub fn TestConstants() {
+    if math.Pi <= 0.0 {
+        Errorf("Pi should be positive")
+    }
+    if math.E <= 0.0 {
+        Errorf("E should be positive")
+    }
+    if math.Sqrt2 <= 0.0 {
+        Errorf("Sqrt2 should be positive")
+    }
+}
+
+// TestMinMax verifies Min and Max.
+pub fn TestMinMax() {
+    if math.Min(3.0, 7.0) != 3.0 {
+        Errorf("Min should return the smaller value")
+    }
+    if math.Max(3.0, 7.0) != 7.0 {
+        Errorf("Max should return the larger value")
+    }
+}
+
+// TestClamp verifies Clamp restricts values to the given range.
+pub fn TestClamp() {
+    if math.Clamp(5.0, 0.0, 10.0) != 5.0 {
+        Errorf("Clamp inside range should return value")
+    }
+    if math.Clamp(-3.0, 0.0, 10.0) != 0.0 {
+        Errorf("Clamp below min should return min")
+    }
+    if math.Clamp(15.0, 0.0, 10.0) != 10.0 {
+        Errorf("Clamp above max should return max")
+    }
+}
+
+// TestSign verifies Sign returns the correct sign indicator.
+pub fn TestSign() {
+    if math.Sign(-5.0) != -1.0 {
+        Errorf("Sign of negative should be -1")
+    }
+    if math.Sign(5.0) != 1.0 {
+        Errorf("Sign of positive should be 1")
+    }
+    if math.Sign(0.0) != 0.0 {
+        Errorf("Sign of zero should be 0")
+    }
+}
+
+// TestDegreesRadians verifies round-trip conversion.
+pub fn TestDegreesRadians() {
+    deg := math.Degrees(math.Pi)
+    if deg != 180.0 {
+        Errorf("Pi radians should be 180 degrees")
+    }
+    rad := math.Radians(180.0)
+    if rad != math.Pi {
+        Errorf("180 degrees should be Pi radians")
+    }
+}
+
+// TestSqrtSmoke verifies Sqrt of a perfect square.
+pub fn TestSqrtSmoke() {
+    r := math.Sqrt(4.0)
+    if r != 2.0 {
+        Errorf("Sqrt(4) should be 2")
+    }
+}
+
+// TestAbs verifies Abs returns non-negative values.
+pub fn TestAbs() {
+    if math.Abs(-3.5) != 3.5 {
+        Errorf("Abs of negative should be positive")
+    }
+    if math.Abs(3.5) != 3.5 {
+        Errorf("Abs of positive should be unchanged")
+    }
+}
+
+// TestFloorCeilRound verifies basic integer boundary rounding.
+pub fn TestFloorCeilRound() {
+    if math.Floor(2.7) != 2.0 {
+        Errorf("Floor should round down")
+    }
+    if math.Ceil(2.3) != 3.0 {
+        Errorf("Ceil should round up")
+    }
+    if math.Round(2.5) != 3.0 {
+        Errorf("Round should round half away from zero")
+    }
+}
+
+// TestVectorDot verifies dot product computation.
+pub fn TestVectorDot() {
+    a := [1.0, 2.0, 3.0]
+    b := [4.0, 5.0, 6.0]
+    // 1*4 + 2*5 + 3*6 = 4 + 10 + 18 = 32
+    if math.VectorDot(a, b) != 32.0 {
+        Errorf("VectorDot should return 32")
+    }
+}
+
+// TestVectorNorm verifies L2 norm computation.
+pub fn TestVectorNorm() {
+    v := [3.0, 4.0]
+    // sqrt(9 + 16) = sqrt(25) = 5
+    if math.VectorNorm(v) != 5.0 {
+        Errorf("VectorNorm should return 5")
+    }
+}
+
+// TestVectorAdd verifies element-wise vector addition.
+pub fn TestVectorAdd() {
+    a := [1.0, 2.0, 3.0]
+    b := [4.0, 5.0, 6.0]
+    result := math.VectorAdd(a, b)
+    if result[0] != 5.0 || result[1] != 7.0 || result[2] != 9.0 {
+        Errorf("VectorAdd should return [5, 7, 9]")
+    }
+}
+
+// TestVectorScale verifies scalar multiplication.
+pub fn TestVectorScale() {
+    a := [1.0, 2.0, 3.0]
+    result := math.VectorScale(a, 2.0)
+    if result[0] != 2.0 || result[1] != 4.0 || result[2] != 6.0 {
+        Errorf("VectorScale should return [2, 4, 6]")
+    }
+}
+
+// TestMatrixBasic verifies matrix creation and element access.
+pub fn TestMatrixBasic() {
+    m := math.NewMatrix(2, 3)
+    m.Set(0, 0, 1.0)
+    m.Set(0, 1, 2.0)
+    m.Set(1, 2, 6.0)
+    if m.At(0, 0) != 1.0 {
+        Errorf("Matrix At should return 1.0")
+    }
+    if m.At(1, 2) != 6.0 {
+        Errorf("Matrix At should return 6.0")
+    }
+}
+
+// TestMatrixMul verifies matrix multiplication.
+pub fn TestMatrixMul() {
+    a := math.NewMatrix(2, 3)
+    a.Set(0, 0, 1.0)
+    a.Set(0, 1, 2.0)
+    a.Set(0, 2, 3.0)
+    a.Set(1, 0, 4.0)
+    a.Set(1, 1, 5.0)
+    a.Set(1, 2, 6.0)
+    b := math.NewMatrix(3, 2)
+    b.Set(0, 0, 7.0)
+    b.Set(0, 1, 8.0)
+    b.Set(1, 0, 9.0)
+    b.Set(1, 1, 10.0)
+    b.Set(2, 0, 11.0)
+    b.Set(2, 1, 12.0)
+    c := a.Mul(b)
+    // [1,2,3] * [7,8; 9,10; 11,12] = [58, 64]
+    // [4,5,6] * [7,8; 9,10; 11,12] = [139, 154]
+    if c.At(0, 0) != 58.0 {
+        Errorf("Matrix Mul [0,0] should be 58")
+    }
+    if c.At(0, 1) != 64.0 {
+        Errorf("Matrix Mul [0,1] should be 64")
+    }
+    if c.At(1, 0) != 139.0 {
+        Errorf("Matrix Mul [1,0] should be 139")
+    }
+    if c.At(1, 1) != 154.0 {
+        Errorf("Matrix Mul [1,1] should be 154")
+    }
+}
+
+// TestMatrixTranspose verifies matrix transposition.
+pub fn TestMatrixTranspose() {
+    m := math.NewMatrix(2, 3)
+    m.Set(0, 0, 1.0)
+    m.Set(0, 1, 2.0)
+    m.Set(0, 2, 3.0)
+    m.Set(1, 0, 4.0)
+    m.Set(1, 1, 5.0)
+    m.Set(1, 2, 6.0)
+    t := m.Transpose()
+    if t.Rows != 3 || t.Cols != 2 {
+        Errorf("Transpose should be 3x2")
+    }
+    if t.At(0, 0) != 1.0 || t.At(1, 0) != 2.0 || t.At(2, 0) != 3.0 {
+        Errorf("Transpose row values incorrect")
+    }
+    if t.At(0, 1) != 4.0 || t.At(1, 1) != 5.0 || t.At(2, 1) != 6.0 {
+        Errorf("Transpose row values incorrect")
+    }
+}
+
+// TestMatrixDet verifies determinant computation.
+pub fn TestMatrixDet() {
+    m := math.NewMatrix(2, 2)
+    m.Set(0, 0, 1.0)
+    m.Set(0, 1, 2.0)
+    m.Set(1, 0, 3.0)
+    m.Set(1, 1, 4.0)
+    // det = 1*4 - 2*3 = -2
+    if m.Det() != -2.0 {
+        Errorf("Det should be -2")
+    }
+}
+
+// TestMatrixInverse verifies matrix inversion.
+pub fn TestMatrixInverse() {
+    m := math.NewMatrix(2, 2)
+    m.Set(0, 0, 4.0)
+    m.Set(0, 1, 7.0)
+    m.Set(1, 0, 2.0)
+    m.Set(1, 1, 6.0)
+    inv, err := m.Inverse()
+    if err.message != "" {
+        Errorf("Inverse should succeed: " + err.message)
+    }
+    // A * A^{-1} = I
+    product := m.Mul(inv)
+    if math.Abs(product.At(0, 0) - 1.0) > 0.0001 || math.Abs(product.At(1, 1) - 1.0) > 0.0001 {
+        Errorf("A * A^{-1} should be identity")
+    }
+    if math.Abs(product.At(0, 1)) > 0.0001 || math.Abs(product.At(1, 0)) > 0.0001 {
+        Errorf("A * A^{-1} off-diagonal should be 0")
+    }
+}
+
+// TestStatsMean verifies mean computation.
+pub fn TestStatsMean() {
+    data := [1.0, 2.0, 3.0, 4.0, 5.0]
+    if math.Mean(data) != 3.0 {
+        Errorf("Mean should be 3.0")
+    }
+}
+
+// TestStatsVariance verifies variance computation.
+pub fn TestStatsVariance() {
+    data := [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]
+    // mean = 5, variance = (9+1+1+1+0+0+4+16)/8 = 32/8 = 4
+    if math.Variance(data) != 4.0 {
+        Errorf("Variance should be 4.0")
+    }
+}
+
+// TestStatsStdDev verifies standard deviation.
+pub fn TestStatsStdDev() {
+    data := [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]
+    if math.StdDev(data) != 2.0 {
+        Errorf("StdDev should be 2.0")
+    }
+}
+
+// TestStatsMedian verifies median computation.
+pub fn TestStatsMedian() {
+    data1 := [1.0, 2.0, 3.0, 4.0, 5.0]
+    if math.Median(data1) != 3.0 {
+        Errorf("Median of odd-length should be 3.0")
+    }
+    data2 := [1.0, 2.0, 3.0, 4.0]
+    if math.Median(data2) != 2.5 {
+        Errorf("Median of even-length should be 2.5")
+    }
+}
+
+// TestSoftmax verifies softmax computation.
+pub fn TestSoftmax() {
+    data := [1.0, 1.0, 1.0]
+    result := math.Softmax(data)
+    // All equal inputs should give equal outputs = 1/3
+    if result[0] != result[1] || result[1] != result[2] {
+        Errorf("Softmax of equal values should be equal")
+    }
+    // Sum should be 1
+    sum := result[0] + result[1] + result[2]
+    if sum < 0.99 || sum > 1.01 {
+        Errorf("Softmax sum should be 1.0")
+    }
+}
+
+// TestLogisticSigmoid verifies sigmoid function.
+pub fn TestLogisticSigmoid() {
+    if math.LogisticSigmoid(0.0) != 0.5 {
+        Errorf("Sigmoid(0) should be 0.5")
+    }
+}

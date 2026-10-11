@@ -1,0 +1,708 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/datasets.skink
+// Purpose: Series and DataFrame types for tabular data processing,
+//          supporting CSV I/O, filtering, selection, grouping, sorting,
+//          and basic aggregations for ML workflows.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+module datasets
+
+import "std/str"
+import "std/strconv"
+import "std/csv"
+import "std/errors"
+import "std/math"
+
+// SeriesType identifies the kind of data stored in a Series.
+pub const SERIES_FLOAT = 0
+// SERIES_INT marks a Series containing integer values.
+pub const SERIES_INT = 1
+// SERIES_STRING marks a Series containing string values.
+pub const SERIES_STRING = 2
+// SERIES_BOOL marks a Series containing boolean values.
+pub const SERIES_BOOL = 3
+
+// Series is a single column of typed data.
+pub struct Series {
+    Name:  string
+    kind:  int
+    fdata: []float    // used when kind == SERIES_FLOAT
+    idata: []int       // used when kind == SERIES_INT
+    sdata: []string    // used when kind == SERIES_STRING
+    bdata: []bool      // used when kind == SERIES_BOOL
+
+    // Len returns the number of elements in the series.
+    pub fn Len(self: Series) -> int {
+        if self.kind == SERIES_FLOAT {
+            return len(self.fdata)
+        }
+        if self.kind == SERIES_INT {
+            return len(self.idata)
+        }
+        if self.kind == SERIES_STRING {
+            return len(self.sdata)
+        }
+        return len(self.bdata)
+    }
+
+    // Type returns the series type code.
+    pub fn Type(self: Series) -> int {
+        return self.kind
+    }
+
+    // Float returns the element at idx as a float.
+    pub fn Float(self: Series, idx: int) -> float {
+        if self.kind == SERIES_FLOAT {
+            return self.fdata[idx]
+        }
+        if self.kind == SERIES_INT {
+            return float(self.idata[idx])
+        }
+        if self.kind == SERIES_BOOL {
+            // Convert boolean to 1.0 or 0.0.
+            if self.bdata[idx] {
+                return 1.0
+            }
+            return 0.0
+        }
+        // Fallback: attempt to parse the string value as a float.
+        v, ok := strconv.ParseFloat(self.sdata[idx])
+        if ok {
+            return v
+        }
+        return 0.0
+    }
+
+    // Int returns the element at idx as an int.
+    pub fn Int(self: Series, idx: int) -> int {
+        if self.kind == SERIES_INT {
+            return self.idata[idx]
+        }
+        if self.kind == SERIES_FLOAT {
+            // Truncate the float to an integer.
+            return int(self.fdata[idx])
+        }
+        if self.kind == SERIES_BOOL {
+            // Convert boolean to 1 or 0.
+            if self.bdata[idx] {
+                return 1
+            }
+            return 0
+        }
+        // Fallback: attempt to parse the string value as an int.
+        v, ok := strconv.ParseInt(self.sdata[idx])
+        if ok {
+            return v
+        }
+        return 0
+    }
+
+    // String returns the element at idx as a string.
+    pub fn String(self: Series, idx: int) -> string {
+        if self.kind == SERIES_STRING {
+            return self.sdata[idx]
+        }
+        if self.kind == SERIES_INT {
+            return strconv.Itoa(self.idata[idx])
+        }
+        if self.kind == SERIES_FLOAT {
+            return strconv.FormatFloat(self.fdata[idx], 6)
+        }
+        if self.bdata[idx] {
+            return "true"
+        }
+        return "false"
+    }
+
+    // Mean returns the mean of numeric series.
+    pub fn Mean(self: Series) -> float {
+        n := self.Len()
+        if n == 0 {
+            return 0.0
+        }
+        sum := 0.0
+        for i := 0; i < n; i = i + 1 {
+            sum = sum + self.Float(i)
+        }
+        return sum / float(n)
+    }
+
+    // Min returns the minimum value of numeric series.
+    pub fn Min(self: Series) -> float {
+        n := self.Len()
+        if n == 0 {
+            return 0.0
+        }
+        m := self.Float(0)
+        for i := 1; i < n; i = i + 1 {
+            v := self.Float(i)
+            if v < m {
+                m = v
+            }
+        }
+        return m
+    }
+
+    // Max returns the maximum value of numeric series.
+    pub fn Max(self: Series) -> float {
+        n := self.Len()
+        if n == 0 {
+            return 0.0
+        }
+        m := self.Float(0)
+        for i := 1; i < n; i = i + 1 {
+            v := self.Float(i)
+            if v > m {
+                m = v
+            }
+        }
+        return m
+    }
+
+    // StdDev returns the standard deviation of numeric series.
+    pub fn StdDev(self: Series) -> float {
+        n := self.Len()
+        if n == 0 {
+            return 0.0
+        }
+        // Compute population standard deviation: sqrt(sum((x - mean)^2) / n).
+        mu := self.Mean()
+        sumSq := 0.0
+        for i := 0; i < n; i = i + 1 {
+            d := self.Float(i) - mu
+            sumSq = sumSq + d * d
+        }
+        return math.Sqrt(sumSq / float(n))
+    }
+
+    // Sum returns the sum of numeric series.
+    pub fn Sum(self: Series) -> float {
+        n := self.Len()
+        sum := 0.0
+        for i := 0; i < n; i = i + 1 {
+            sum = sum + self.Float(i)
+        }
+        return sum
+    }
+}
+
+// NewFloatSeries creates a float series from a name and data slice.
+pub fn NewFloatSeries(name: string, data: []float) -> Series {
+    return Series{Name: name, kind: SERIES_FLOAT, fdata: data}
+}
+
+// NewIntSeries creates an int series from a name and data slice.
+pub fn NewIntSeries(name: string, data: []int) -> Series {
+    return Series{Name: name, kind: SERIES_INT, idata: data}
+}
+
+// NewStringSeries creates a string series from a name and data slice.
+pub fn NewStringSeries(name: string, data: []string) -> Series {
+    return Series{Name: name, kind: SERIES_STRING, sdata: data}
+}
+
+// NewBoolSeries creates a bool series from a name and data slice.
+pub fn NewBoolSeries(name: string, data: []bool) -> Series {
+    return Series{Name: name, kind: SERIES_BOOL, bdata: data}
+}
+
+// DataFrame is a collection of Series (columns) with row alignment.
+pub struct DataFrame {
+    columns: []Series
+    nrows:   int
+
+    // NRows returns the number of rows.
+    pub fn NRows(self: DataFrame) -> int {
+        return self.nrows
+    }
+
+    // NCols returns the number of columns.
+    pub fn NCols(self: DataFrame) -> int {
+        return len(self.columns)
+    }
+
+    // Col returns the series for the named column, or an error.
+    pub fn Col(self: DataFrame, name: string) -> (Series, errors.Error) {
+        for i := 0; i < len(self.columns); i = i + 1 {
+            if str.Equal(self.columns[i].Name, name) {
+                return self.columns[i], errors.New("")
+            }
+        }
+        return Series{}, errors.New("column not found: " + name)
+    }
+
+    // ColIdx returns the series at column index idx.
+    pub fn ColIdx(self: DataFrame, idx: int) -> (Series, errors.Error) {
+        if idx < 0 || idx >= len(self.columns) {
+            return Series{}, errors.New("column index out of range")
+        }
+        return self.columns[idx], errors.New("")
+    }
+
+    // Names returns the column names.
+    pub fn Names(self: DataFrame) -> []string {
+        names := make([]string, len(self.columns))
+        for i := 0; i < len(self.columns); i = i + 1 {
+            names[i] = self.columns[i].Name
+        }
+        return names
+    }
+
+    // Select returns a new DataFrame with only the named columns.
+    pub fn Select(self: DataFrame, names: []string) -> (DataFrame, errors.Error) {
+        var selected []Series
+        for i := 0; i < len(names); i = i + 1 {
+            s, err := self.Col(names[i])
+            if err.message != "" {
+                return DataFrame{}, err
+            }
+            selected = append(selected, s)
+        }
+        return DataFrame{columns: selected, nrows: self.nrows}, errors.New("")
+    }
+
+    // Subset returns rows [start, end) as a new DataFrame.
+    pub fn Subset(self: DataFrame, start: int, end: int) -> (DataFrame, errors.Error) {
+        if start < 0 || end > self.nrows || start >= end {
+            return DataFrame{}, errors.New("invalid subset range")
+        }
+        rowCount := end - start
+        var newCols []Series
+        // Copy each column's slice for the requested row range, preserving type.
+        for c := 0; c < len(self.columns); c = c + 1 {
+            col := self.columns[c]
+            if col.kind == SERIES_FLOAT {
+                newData := make([]float, rowCount)
+                for r := 0; r < rowCount; r = r + 1 {
+                    newData[r] = col.fdata[start + r]
+                }
+                newCols = append(newCols, NewFloatSeries(col.Name, newData))
+            } else if col.kind == SERIES_INT {
+                newData := make([]int, rowCount)
+                for r := 0; r < rowCount; r = r + 1 {
+                    newData[r] = col.idata[start + r]
+                }
+                newCols = append(newCols, NewIntSeries(col.Name, newData))
+            } else if col.kind == SERIES_STRING {
+                newData := make([]string, rowCount)
+                for r := 0; r < rowCount; r = r + 1 {
+                    newData[r] = col.sdata[start + r]
+                }
+                newCols = append(newCols, NewStringSeries(col.Name, newData))
+            } else {
+                newData := make([]bool, rowCount)
+                for r := 0; r < rowCount; r = r + 1 {
+                    newData[r] = col.bdata[start + r]
+                }
+                newCols = append(newCols, NewBoolSeries(col.Name, newData))
+            }
+        }
+        return DataFrame{columns: newCols, nrows: rowCount}, errors.New("")
+    }
+
+    // Filter returns rows where the predicate returns true.
+    // The predicate receives the row index and the DataFrame.
+    pub fn Filter(self: DataFrame, pred: fn(int, DataFrame) -> bool) -> DataFrame {
+        // First pass: collect indices of rows that satisfy the predicate.
+        var keepIndices []int
+        for r := 0; r < self.nrows; r = r + 1 {
+            if pred(r, self) {
+                keepIndices = append(keepIndices, r)
+            }
+        }
+        rowCount := len(keepIndices)
+        // Second pass: build new columns containing only the kept rows.
+        var newCols []Series
+        for c := 0; c < len(self.columns); c = c + 1 {
+            col := self.columns[c]
+            if col.kind == SERIES_FLOAT {
+                newData := make([]float, rowCount)
+                for r := 0; r < rowCount; r = r + 1 {
+                    newData[r] = col.fdata[keepIndices[r]]
+                }
+                newCols = append(newCols, NewFloatSeries(col.Name, newData))
+            } else if col.kind == SERIES_INT {
+                newData := make([]int, rowCount)
+                for r := 0; r < rowCount; r = r + 1 {
+                    newData[r] = col.idata[keepIndices[r]]
+                }
+                newCols = append(newCols, NewIntSeries(col.Name, newData))
+            } else if col.kind == SERIES_STRING {
+                newData := make([]string, rowCount)
+                for r := 0; r < rowCount; r = r + 1 {
+                    newData[r] = col.sdata[keepIndices[r]]
+                }
+                newCols = append(newCols, NewStringSeries(col.Name, newData))
+            } else {
+                newData := make([]bool, rowCount)
+                for r := 0; r < rowCount; r = r + 1 {
+                    newData[r] = col.bdata[keepIndices[r]]
+                }
+                newCols = append(newCols, NewBoolSeries(col.Name, newData))
+            }
+        }
+        return DataFrame{columns: newCols, nrows: rowCount}
+    }
+
+    // AddColumn appends a new Series as a column. Returns an error if the
+    // length doesn't match the number of rows.
+    pub fn AddColumn(self: *DataFrame, s: Series) -> errors.Error {
+        if s.Len() != self.nrows {
+            return errors.New("column length mismatch")
+        }
+        self.columns = append(self.columns, s)
+        return errors.New("")
+    }
+
+    // DropColumn removes the named column. Returns an error if not found.
+    pub fn DropColumn(self: *DataFrame, name: string) -> errors.Error {
+        idx := -1
+        for i := 0; i < len(self.columns); i = i + 1 {
+            if str.Equal(self.columns[i].Name, name) {
+                idx = i
+                break
+            }
+        }
+        if idx < 0 {
+            return errors.New("column not found: " + name)
+        }
+        var newCols []Series
+        for i := 0; i < len(self.columns); i = i + 1 {
+            if i != idx {
+                newCols = append(newCols, self.columns[i])
+            }
+        }
+        self.columns = newCols
+        return errors.New("")
+    }
+
+    // Describe returns basic statistics for numeric columns as a string.
+    pub fn Describe(self: DataFrame) -> string {
+        result := ""
+        for c := 0; c < len(self.columns); c = c + 1 {
+            col := self.columns[c]
+            if col.kind == SERIES_STRING || col.kind == SERIES_BOOL {
+                continue
+            }
+            result = str.Concat(result, col.Name)
+            result = str.Concat(result, ": count=")
+            result = str.Concat(result, strconv.Itoa(col.Len()))
+            result = str.Concat(result, " mean=")
+            result = str.Concat(result, strconv.FormatFloat(col.Mean(), 4))
+            result = str.Concat(result, " min=")
+            result = str.Concat(result, strconv.FormatFloat(col.Min(), 4))
+            result = str.Concat(result, " max=")
+            result = str.Concat(result, strconv.FormatFloat(col.Max(), 4))
+            result = str.Concat(result, " std=")
+            result = str.Concat(result, strconv.FormatFloat(col.StdDev(), 4))
+            result = str.Concat(result, "\n")
+        }
+        return result
+    }
+
+    // String returns a simple text representation of the DataFrame.
+    pub fn String(self: DataFrame) -> string {
+        // Header
+        result := ""
+        for c := 0; c < len(self.columns); c = c + 1 {
+            if c > 0 {
+                result = str.Concat(result, "\t")
+            }
+            result = str.Concat(result, self.columns[c].Name)
+        }
+        result = str.Concat(result, "\n")
+        // Rows
+        for r := 0; r < self.nrows; r = r + 1 {
+            for c := 0; c < len(self.columns); c = c + 1 {
+                if c > 0 {
+                    result = str.Concat(result, "\t")
+                }
+                result = str.Concat(result, self.columns[c].String(r))
+            }
+            result = str.Concat(result, "\n")
+        }
+        return result
+    }
+}
+
+// NewDataFrame creates a DataFrame from a slice of Series.
+// All series must have the same length.
+pub fn NewDataFrame(series: []Series) -> (DataFrame, errors.Error) {
+    if len(series) == 0 {
+        return DataFrame{columns: series, nrows: 0}, errors.New("")
+    }
+    n := series[0].Len()
+    for i := 1; i < len(series); i = i + 1 {
+        if series[i].Len() != n {
+            return DataFrame{}, errors.New("series length mismatch")
+        }
+    }
+    return DataFrame{columns: series, nrows: n}, errors.New("")
+}
+
+// ReadCSV parses CSV text into a DataFrame. The first row is treated as
+// the header. Numeric columns are auto-detected.
+// Uses a flat []string buffer (row-major) instead of [][]string to avoid
+// the compiler's 2D-slice append use-after-free bug.
+pub fn ReadCSV(data: string) -> (DataFrame, errors.Error) {
+    reader := csv.NewReader(data)
+    // Read header
+    headerRec, err := reader.Read()
+    if err.message != "" {
+        return DataFrame{}, err
+    }
+    nCols := headerRec.Len()
+    if nCols == 0 {
+        return DataFrame{}, errors.New("empty CSV header")
+    }
+    // Read all data rows into a flat buffer (row-major order).
+    // We collect rows in two passes: first count them, then fill.
+    // To avoid two passes, we use a dynamically-growing flat slice.
+    var flat []string
+    nRows := 0
+    for {
+        rec, rerr := reader.Read()
+        if rerr.message != "" {
+            break
+        }
+        // Check for EOF: record with single empty field
+        if rec.Len() == 1 {
+            val, _ := rec.Get(0)
+            if val == "" {
+                break
+            }
+        }
+        for c := 0; c < nCols; c = c + 1 {
+            if c < rec.Len() {
+                val, gerr := rec.Get(c)
+                if gerr.message != "" {
+                    flat = append(flat, "")
+                } else {
+                    flat = append(flat, val)
+                }
+            } else {
+                flat = append(flat, "")
+            }
+        }
+        nRows = nRows + 1
+    }
+    if nRows == 0 {
+        // Build empty columns
+        var cols []Series
+        for c := 0; c < nCols; c = c + 1 {
+            name, _ := headerRec.Get(c)
+            cols = append(cols, NewStringSeries(name, make([]string, 0)))
+        }
+        return DataFrame{columns: cols, nrows: 0}, errors.New("")
+    }
+    // Detect column types and build series
+    var cols []Series
+    for c := 0; c < nCols; c = c + 1 {
+        name, _ := headerRec.Get(c)
+        // Probe every value in the column to determine if it's int or float.
+        isInt := true
+        isFloat := true
+        for r := 0; r < nRows; r = r + 1 {
+            val := flat[r * nCols + c]
+            // Skip empty cells; they don't affect type detection.
+            if val == "" {
+                continue
+            }
+            _, okI := strconv.ParseInt(val)
+            if !okI {
+                isInt = false
+            }
+            _, okF := strconv.ParseFloat(val)
+            if !okF {
+                isFloat = false
+            }
+        }
+        if isInt {
+            idata := make([]int, nRows)
+            for r := 0; r < nRows; r = r + 1 {
+                v, _ := strconv.ParseInt(flat[r * nCols + c])
+                idata[r] = v
+            }
+            cols = append(cols, NewIntSeries(name, idata))
+        } else if isFloat {
+            fdata := make([]float, nRows)
+            for r := 0; r < nRows; r = r + 1 {
+                v, _ := strconv.ParseFloat(flat[r * nCols + c])
+                fdata[r] = v
+            }
+            cols = append(cols, NewFloatSeries(name, fdata))
+        } else {
+            sdata := make([]string, nRows)
+            for r := 0; r < nRows; r = r + 1 {
+                sdata[r] = flat[r * nCols + c]
+            }
+            cols = append(cols, NewStringSeries(name, sdata))
+        }
+    }
+    return DataFrame{columns: cols, nrows: nRows}, errors.New("")
+}
+
+// WriteCSV serializes a DataFrame to CSV text.
+pub fn WriteCSV(df: DataFrame) -> string {
+    writer := csv.NewWriter()
+    // Header
+    var header []string
+    for c := 0; c < df.NCols(); c = c + 1 {
+        header = append(header, df.columns[c].Name)
+    }
+    writer.Write(csv.Record{fields: header})
+    // Rows
+    for r := 0; r < df.NRows(); r = r + 1 {
+        var row []string
+        for c := 0; c < df.NCols(); c = c + 1 {
+            row = append(row, df.columns[c].String(r))
+        }
+        writer.Write(csv.Record{fields: row})
+    }
+    return writer.String()
+}
+
+// Group represents a single group from a GroupBy operation.
+pub struct Group {
+    Key:      string
+    Indices:  []int
+}
+
+// GroupBy groups rows by the values in the named column.
+// Returns a slice of Group, one per unique value in the column.
+pub fn GroupBy(df: DataFrame, colName: string) -> ([]Group, errors.Error) {
+    col, err := df.Col(colName)
+    if err.message != "" {
+        return [], err
+    }
+    var groups []Group
+    for r := 0; r < df.NRows(); r = r + 1 {
+        key := col.String(r)
+        // Linear search for an existing group with the same key.
+        found := -1
+        for g := 0; g < len(groups); g = g + 1 {
+            if str.Equal(groups[g].Key, key) {
+                found = g
+                break
+            }
+        }
+        if found >= 0 {
+            // Append row index to existing group.
+            groups[found].Indices = append(groups[found].Indices, r)
+        } else {
+            // Create a new group for this unique key.
+            var idx []int
+            idx = append(idx, r)
+            groups = append(groups, Group{Key: key, Indices: idx})
+        }
+    }
+    return groups, errors.New("")
+}
+
+// AggSummary holds aggregation results for a numeric column.
+pub struct AggSummary {
+    Count: int
+    Sum:   float
+    Mean:  float
+    Min:   float
+    Max:   float
+    Std:   float
+}
+
+// Aggregate computes summary statistics for a numeric column over the
+// given row indices (e.g., from GroupBy).
+pub fn Aggregate(df: DataFrame, colName: string, indices: []int) -> (AggSummary, errors.Error) {
+    col, err := df.Col(colName)
+    if err.message != "" {
+        return AggSummary{}, err
+    }
+    n := len(indices)
+    if n == 0 {
+        return AggSummary{}, errors.New("")
+    }
+    sum := 0.0
+    mn := col.Float(indices[0])
+    mx := col.Float(indices[0])
+    for i := 0; i < n; i = i + 1 {
+        v := col.Float(indices[i])
+        sum = sum + v
+        if v < mn {
+            mn = v
+        }
+        if v > mx {
+            mx = v
+        }
+    }
+    mean := sum / float(n)
+    sumSq := 0.0
+    for i := 0; i < n; i = i + 1 {
+        d := col.Float(indices[i]) - mean
+        sumSq = sumSq + d * d
+    }
+    return AggSummary{
+        Count: n,
+        Sum:   sum,
+        Mean:  mean,
+        Min:   mn,
+        Max:   mx,
+        Std:   math.Sqrt(sumSq / float(n)),
+    }, errors.New("")
+}
+
+// SortBy returns row indices sorted by the named column (ascending).
+pub fn SortBy(df: DataFrame, colName: string) -> ([]int, errors.Error) {
+    col, err := df.Col(colName)
+    if err.message != "" {
+        return [], err
+    }
+    n := df.NRows()
+    // Initialize index array to the identity permutation.
+    indices := make([]int, n)
+    for i := 0; i < n; i = i + 1 {
+        indices[i] = i
+    }
+    // Insertion sort: stable and simple for small-to-medium datasets.
+    for i := 1; i < n; i = i + 1 {
+        key := indices[i]
+        keyVal := col.Float(key)
+        // Shift larger elements to the right to make room for the key.
+        j := i - 1
+        for j >= 0 && col.Float(indices[j]) > keyVal {
+            indices[j + 1] = indices[j]
+            j = j - 1
+        }
+        indices[j + 1] = key
+    }
+    return indices, errors.New("")
+}
+
+// ApplyMap returns a new float series computed by applying f to each row.
+pub fn ApplyMap(df: DataFrame, colName: string, f: fn(float) -> float) -> (Series, errors.Error) {
+    col, err := df.Col(colName)
+    if err.message != "" {
+        return Series{}, err
+    }
+    n := col.Len()
+    result := make([]float, n)
+    for i := 0; i < n; i = i + 1 {
+        result[i] = f(col.Float(i))
+    }
+    return NewFloatSeries(colName, result), errors.New("")
+}

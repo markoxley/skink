@@ -1,0 +1,103 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/logic.skink
+// Purpose: Skink module for logic.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/logic"
+import "std/io"
+
+pub fn main() {
+    db := logic.NewDatabase()
+
+    // Facts: parent(X, Y) means X is the parent of Y
+    db.AddFact(logic.Compound("parent", []logic.Term{logic.Atom("alice"), logic.Atom("bob")}))
+    db.AddFact(logic.Compound("parent", []logic.Term{logic.Atom("bob"), logic.Atom("carol")}))
+    db.AddFact(logic.Compound("parent", []logic.Term{logic.Atom("bob"), logic.Atom("dave")}))
+    db.AddFact(logic.Compound("parent", []logic.Term{logic.Atom("carol"), logic.Atom("eve")}))
+
+    // Rule: grandparent(X, Z) :- parent(X, Y), parent(Y, Z)
+    db.AddRule(
+        logic.Compound("grandparent", []logic.Term{logic.Var("X"), logic.Var("Z")}),
+        []logic.Term{
+            logic.Compound("parent", []logic.Term{logic.Var("X"), logic.Var("Y")}),
+            logic.Compound("parent", []logic.Term{logic.Var("Y"), logic.Var("Z")}),
+        },
+    )
+
+    // Rule: sibling(X, Y) :- parent(Z, X), parent(Z, Y)
+    db.AddRule(
+        logic.Compound("sibling", []logic.Term{logic.Var("X"), logic.Var("Y")}),
+        []logic.Term{
+            logic.Compound("parent", []logic.Term{logic.Var("Z"), logic.Var("X")}),
+            logic.Compound("parent", []logic.Term{logic.Var("Z"), logic.Var("Y")}),
+        },
+    )
+
+    // Query 1: Who are bob's children?
+    io.PrintLine("=== Query: parent(bob, X) — Bob's children ===")
+    goal := logic.Compound("parent", []logic.Term{logic.Atom("bob"), logic.Var("X")})
+    results := db.QueryAll(goal)
+    i := 0
+    for i < len(results) {
+        child := logic.Lookup(results[i], "X")
+        io.PrintLine("  " + child.Name())
+        i = i + 1
+    }
+
+    // Query 2: Who is eve's grandparent?
+    io.PrintLine("")
+    io.PrintLine("=== Query: grandparent(X, eve) — Eve's grandparents ===")
+    goal2 := logic.Compound("grandparent", []logic.Term{logic.Var("X"), logic.Atom("eve")})
+    results2 := db.QueryAll(goal2)
+    i = 0
+    for i < len(results2) {
+        gp := logic.Lookup(results2[i], "X")
+        io.PrintLine("  " + gp.Name())
+        i = i + 1
+    }
+
+    // Query 3: Who are carol's siblings?
+    io.PrintLine("")
+    io.PrintLine("=== Query: sibling(carol, X) — Carol's siblings ===")
+    goal3 := logic.Compound("sibling", []logic.Term{logic.Atom("carol"), logic.Var("X")})
+    results3 := db.QueryAll(goal3)
+    i = 0
+    for i < len(results3) {
+        sib := logic.Lookup(results3[i], "X")
+        if !str.Equal(sib.Name(), "carol") {
+            io.PrintLine("  " + sib.Name())
+        }
+        i = i + 1
+    }
+
+    // Query 4: Is alice a grandparent of eve?
+    io.PrintLine("")
+    io.PrintLine("=== Query: grandparent(alice, eve) ===")
+    goal4 := logic.Compound("grandparent", []logic.Term{logic.Atom("alice"), logic.Atom("eve")})
+    results4 := db.QueryAll(goal4)
+    if len(results4) > 0 {
+        io.PrintLine("  Yes, alice is a grandparent of eve")
+    } else {
+        io.PrintLine("  No")
+    }
+}

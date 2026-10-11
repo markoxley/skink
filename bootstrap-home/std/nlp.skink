@@ -1,0 +1,373 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/nlp.skink
+// Purpose: Skink module for nlp.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module nlp
+
+import "std/str"
+import "std/strconv"
+
+// Token represents a single word or punctuation mark in a text.
+pub struct Token {
+    text: string
+    tag:  string  // POS tag (empty if not tagged)
+
+    pub fn Text(self: Token) -> string {
+        return self.text
+    }
+
+    pub fn Tag(self: Token) -> string {
+        return self.tag
+    }
+
+    pub fn IsPunct(self: Token) -> bool {
+        if str.Len(self.text) == 0 {
+            return false
+        }
+        c := self.text[0]
+        // Common punctuation characters
+        if c == 33 { return true }  // !
+        if c == 34 { return true }  // "
+        if c == 39 { return true }  // '
+        if c == 40 { return true }  // (
+        if c == 41 { return true }  // )
+        if c == 44 { return true }  // ,
+        if c == 45 { return true }  // -
+        if c == 46 { return true }  // .
+        if c == 58 { return true }  // :
+        if c == 59 { return true }  // ;
+        if c == 63 { return true }  // ?
+        if c == 91 { return true }  // [
+        if c == 93 { return true }  // ]
+        return false
+    }
+
+    pub fn IsWord(self: Token) -> bool {
+        return !self.IsPunct() && str.Len(self.text) > 0
+    }
+}
+
+// isSpace returns true if the byte is whitespace.
+fn isSpace(c: int) -> bool {
+    if c == 32 { return true }  // space
+    if c == 9 { return true }   // tab
+    if c == 10 { return true }  // newline
+    if c == 13 { return true }  // carriage return
+    return false
+}
+
+// isLetter returns true if the byte is an ASCII letter.
+fn isLetter(c: int) -> bool {
+    if c >= 65 && c <= 90 { return true }   // A-Z
+    if c >= 97 && c <= 122 { return true }  // a-z
+    return false
+}
+
+// isDigit returns true if the byte is an ASCII digit.
+fn isDigit(c: int) -> bool {
+    return c >= 48 && c <= 57
+}
+
+// isPunctChar returns true if the byte is punctuation.
+fn isPunctChar(c: int) -> bool {
+    if c == 33 { return true }  // !
+    if c == 34 { return true }  // "
+    if c == 39 { return true }  // '
+    if c == 40 { return true }  // (
+    if c == 41 { return true }  // )
+    if c == 44 { return true }  // ,
+    if c == 45 { return true }  // -
+    if c == 46 { return true }  // .
+    if c == 58 { return true }  // :
+    if c == 59 { return true }  // ;
+    if c == 63 { return true }  // ?
+    if c == 91 { return true }  // [
+    if c == 93 { return true }  // ]
+    return false
+}
+
+// Tokenize splits text into tokens (words and punctuation).
+pub fn Tokenize(text: string) -> []Token {
+    tokens := []Token{}
+    i := 0
+    n := str.Len(text)
+    for i < n {
+        c := text[i]
+        if isSpace(c) {
+            i = i + 1
+            continue
+        }
+        if isPunctChar(c) {
+            // Single-char punctuation token
+            tokens = append(tokens, Token{text: str.Substr(text, i, 1), tag: ""})
+            i = i + 1
+            continue
+        }
+        // Read a word token (letters, digits, apostrophes in contractions)
+        start := i
+        for i < n {
+            ch := text[i]
+            if isLetter(ch) || isDigit(ch) {
+                i = i + 1
+                continue
+            }
+            // Allow apostrophe in contractions (don't, it's)
+            if ch == 39 && i + 1 < n && isLetter(text[i+1]) {
+                i = i + 1
+                continue
+            }
+            break
+        }
+        if i > start {
+            word := str.Substr(text, start, i - start)
+            tokens = append(tokens, Token{text: word, tag: ""})
+        }
+    }
+    return tokens
+}
+
+// SentenceSegment splits text into sentences based on punctuation.
+pub fn SentenceSegment(text: string) -> []string {
+    sentences := []string{}
+    i := 0
+    n := str.Len(text)
+    start := 0
+    for i < n {
+        c := text[i]
+        // Sentence-ending punctuation: . ! ?
+        if c == 46 || c == 33 || c == 63 {
+            // Look ahead: next char should be space or end
+            end := i + 1
+            if end >= n || isSpace(text[end]) {
+                // Exclude the punctuation from the sentence
+                sentence := str.Trim(str.Substr(text, start, i - start))
+                if str.Len(sentence) > 0 {
+                    sentences = append(sentences, sentence)
+                }
+                start = end
+                i = end
+                continue
+            }
+        }
+        i = i + 1
+    }
+    // Remaining text
+    if start < n {
+        remaining := str.Trim(str.Substr(text, start, n - start))
+        if str.Len(remaining) > 0 {
+            sentences = append(sentences, remaining)
+        }
+    }
+    return sentences
+}
+
+// TagPOS assigns simple part-of-speech tags to tokens using rule-based heuristics.
+// Tags: NN (noun), VB (verb), JJ (adjective), RB (adverb), DT (determiner),
+// IN (preposition), PRP (pronoun), CC (conjunction), NUM (number), PUNCT (punctuation).
+pub fn TagPOS(tokens: []Token) -> []Token {
+    result := make([]Token, len(tokens))
+    i := 0
+    for i < len(tokens) {
+        t := tokens[i]
+        if t.IsPunct() {
+            t.tag = "PUNCT"
+        } else {
+            t.tag = classifyWord(t.text)
+        }
+        result[i] = t
+        i = i + 1
+    }
+    return result
+}
+
+// classifyWord assigns a POS tag to a single word using heuristics.
+fn classifyWord(word: string) -> string {
+    lower := str.ToLower(word)
+    // Check for number
+    if isNumeric(lower) {
+        return "NUM"
+    }
+    // Determiners
+    if lower == "the" || lower == "a" || lower == "an" || lower == "this" || lower == "that" || lower == "these" || lower == "those" {
+        return "DT"
+    }
+    // Pronouns
+    if isPronoun(lower) {
+        return "PRP"
+    }
+    // Conjunctions
+    if lower == "and" || lower == "or" || lower == "but" || lower == "nor" || lower == "yet" || lower == "so" || lower == "for" {
+        return "CC"
+    }
+    // Prepositions
+    if isPreposition(lower) {
+        return "IN"
+    }
+    // Common verbs
+    if isVerb(lower) {
+        return "VB"
+    }
+    // Adjectives (words ending in -ful, -less, -ous, -ive, -able)
+    if str.EndsWith(lower, "ful") || str.EndsWith(lower, "less") || str.EndsWith(lower, "ous") || str.EndsWith(lower, "ive") || str.EndsWith(lower, "able") {
+        return "JJ"
+    }
+    // Adverbs (words ending in -ly)
+    if str.EndsWith(lower, "ly") {
+        return "RB"
+    }
+    // Past tense verbs (ending in -ed)
+    if str.EndsWith(lower, "ed") && str.Len(lower) > 3 {
+        return "VB"
+    }
+    // Gerunds (ending in -ing)
+    if str.EndsWith(lower, "ing") && str.Len(lower) > 4 {
+        return "VB"
+    }
+    // Plural nouns (ending in -s, not -ss)
+    if str.EndsWith(lower, "s") && !str.EndsWith(lower, "ss") && str.Len(lower) > 3 {
+        return "NN"
+    }
+    // Default: noun
+    return "NN"
+}
+
+// isNumeric checks if a string is a number.
+fn isNumeric(s: string) -> bool {
+    if str.Len(s) == 0 {
+        return false
+    }
+    i := 0
+    for i < str.Len(s) {
+        c := s[i]
+        if !isDigit(c) && c != 46 {  // allow decimal point
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// isPronoun checks if a word is a common pronoun.
+fn isPronoun(s: string) -> bool {
+    if s == "i" || s == "you" || s == "he" || s == "she" || s == "it" || s == "we" || s == "they" {
+        return true
+    }
+    if s == "me" || s == "him" || s == "her" || s == "us" || s == "them" {
+        return true
+    }
+    if s == "my" || s == "your" || s == "his" || s == "its" || s == "our" || s == "their" {
+        return true
+    }
+    if s == "mine" || s == "yours" || s == "hers" || s == "ours" || s == "theirs" {
+        return true
+    }
+    return false
+}
+
+// isPreposition checks if a word is a common preposition.
+fn isPreposition(s: string) -> bool {
+    if s == "in" || s == "on" || s == "at" || s == "to" || s == "from" || s == "by" || s == "with" {
+        return true
+    }
+    if s == "about" || s == "into" || s == "through" || s == "during" || s == "before" || s == "after" {
+        return true
+    }
+    if s == "above" || s == "below" || s == "between" || s == "under" || s == "over" || s == "of" {
+        return true
+    }
+    return false
+}
+
+// isVerb checks if a word is a common verb.
+fn isVerb(s: string) -> bool {
+    if s == "is" || s == "are" || s == "was" || s == "were" || s == "be" || s == "been" || s == "being" {
+        return true
+    }
+    if s == "have" || s == "has" || s == "had" || s == "do" || s == "does" || s == "did" {
+        return true
+    }
+    if s == "will" || s == "would" || s == "can" || s == "could" || s == "should" || s == "shall" || s == "may" || s == "might" || s == "must" {
+        return true
+    }
+    if s == "go" || s == "goes" || s == "going" || s == "went" || s == "gone" {
+        return true
+    }
+    if s == "run" || s == "runs" || s == "running" || s == "ran" {
+        return true
+    }
+    if s == "make" || s == "makes" || s == "making" || s == "made" {
+        return true
+    }
+    if s == "see" || s == "sees" || s == "seeing" || s == "saw" || s == "seen" {
+        return true
+    }
+    if s == "say" || s == "says" || s == "saying" || s == "said" {
+        return true
+    }
+    if s == "get" || s == "gets" || s == "getting" || s == "got" || s == "gotten" {
+        return true
+    }
+    if s == "take" || s == "takes" || s == "taking" || s == "took" || s == "taken" {
+        return true
+    }
+    if s == "know" || s == "knows" || s == "knowing" || s == "knew" || s == "known" {
+        return true
+    }
+    if s == "think" || s == "thinks" || s == "thinking" || s == "thought" {
+        return true
+    }
+    if s == "feel" || s == "feels" || s == "feeling" || s == "felt" {
+        return true
+    }
+    if s == "become" || s == "becomes" || s == "becoming" || s == "became" {
+        return true
+    }
+    return false
+}
+
+// WordCount returns the number of word tokens in the text.
+pub fn WordCount(text: string) -> int {
+    tokens := Tokenize(text)
+    count := 0
+    i := 0
+    for i < len(tokens) {
+        if tokens[i].IsWord() {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+// ExtractWords returns only the word tokens (no punctuation).
+pub fn ExtractWords(text: string) -> []string {
+    tokens := Tokenize(text)
+    words := []string{}
+    i := 0
+    for i < len(tokens) {
+        if tokens[i].IsWord() {
+            words = append(words, tokens[i].text)
+        }
+        i = i + 1
+    }
+    return words
+}

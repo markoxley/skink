@@ -1,0 +1,459 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/fmt.skink
+// Purpose: Basic value-to-string formatting (Itoa, Ftoa, Btoa) and
+//          multi-argument printf-style format helpers built on std/buf.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+module fmt
+
+import "std/buf"
+import "std/libc"
+
+// Itoa converts an integer to its decimal string representation.
+// The caller owns the returned string and must free it when done.
+pub fn Itoa(n: int) -> string {
+    b := buf.NewBuffer()
+    b.WriteInt(n)
+    result := b.String()
+    b.Free()
+    return result
+}
+
+// Ftoa converts a float to its decimal string representation.
+// This is a basic implementation; precision is fixed at 6 digits.
+// The caller owns the returned string and must free it when done.
+pub fn Ftoa(f: float) -> string {
+    b := buf.NewBuffer()
+    // Handle the sign first, then work with the absolute value.
+    if f < 0.0 {
+        b.WriteByte(45) // '-'
+        f = -f
+    }
+    intPart := int(f)
+    b.WriteInt(intPart)
+    b.WriteByte(46) // '.'
+    // Extract each fractional digit by multiplying and truncating.
+    frac := f - float(intPart)
+    for i := 0; i < 6; i = i + 1 {
+        frac = frac * 10.0
+        digit := int(frac)
+        b.WriteByte(48 + digit)
+        frac = frac - float(digit)
+    }
+    result := b.String()
+    b.Free()
+    return result
+}
+
+// Btoa converts a bool to the string "true" or "false".
+// The caller owns the returned string and must free it when done.
+pub fn Btoa(v: bool) -> string {
+    if v {
+        return "true"
+    }
+    return "false"
+}
+
+// Sprintf1s formats a string with one string argument, replacing "{}".
+// The caller owns the returned string and must free it when done.
+pub fn Sprintf1s(fmtStr: string, a1: string) -> string {
+    b := buf.NewBuffer()
+    n := int(libc.strlen(fmtStr))
+    i := 0
+    argIdx := 0
+    for i < n {
+        // Detect the "{}" placeholder (123 = '{', 125 = '}').
+        if fmtStr[i] == 123 && i + 1 < n && fmtStr[i + 1] == 125 { // "{}"
+            if argIdx == 0 {
+                b.WriteString(a1)
+            }
+            argIdx = argIdx + 1
+            i = i + 2
+            continue
+        }
+        b.WriteByte(int(fmtStr[i]))
+        i = i + 1
+    }
+    result := b.String()
+    b.Free()
+    return result
+}
+
+// Sprintf1f formats a string with one float argument, replacing "{}".
+// The caller owns the returned string and must free it when done.
+pub fn Sprintf1f(fmtStr: string, a1: float) -> string {
+    b := buf.NewBuffer()
+    n := int(libc.strlen(fmtStr))
+    i := 0
+    argIdx := 0
+    for i < n {
+        // Detect the "{}" placeholder (123 = '{', 125 = '}').
+        if fmtStr[i] == 123 && i + 1 < n && fmtStr[i + 1] == 125 { // "{}"
+            if argIdx == 0 {
+                fStr := Ftoa(a1)
+                b.WriteString(fStr)
+                libc.free(fStr)
+            }
+            argIdx = argIdx + 1
+            i = i + 2
+            continue
+        }
+        b.WriteByte(int(fmtStr[i]))
+        i = i + 1
+    }
+    result := b.String()
+    b.Free()
+    return result
+}
+
+// Sprintf1b formats a string with one bool argument, replacing "{}".
+// The caller owns the returned string and must free it when done.
+pub fn Sprintf1b(fmtStr: string, a1: bool) -> string {
+    b := buf.NewBuffer()
+    n := int(libc.strlen(fmtStr))
+    i := 0
+    argIdx := 0
+    for i < n {
+        // Detect the "{}" placeholder (123 = '{', 125 = '}').
+        if fmtStr[i] == 123 && i + 1 < n && fmtStr[i + 1] == 125 { // "{}"
+            if argIdx == 0 {
+                bStr := Btoa(a1)
+                b.WriteString(bStr)
+            }
+            argIdx = argIdx + 1
+            i = i + 2
+            continue
+        }
+        b.WriteByte(int(fmtStr[i]))
+        i = i + 1
+    }
+    result := b.String()
+    b.Free()
+    return result
+}
+
+// Sprintf2 formats a string with two int arguments, replacing each "{}"
+// placeholder sequentially.
+// The caller owns the returned string and must free it when done.
+pub fn Sprintf2(fmtStr: string, a1: int, a2: int) -> string {
+    b := buf.NewBuffer()
+    n := int(libc.strlen(fmtStr))
+    i := 0
+    argIdx := 0
+    for i < n {
+        // Detect the "{}" placeholder (123 = '{', 125 = '}').
+        if fmtStr[i] == 123 && i + 1 < n && fmtStr[i + 1] == 125 { // "{}"
+            // Substitute the appropriate argument based on position.
+            if argIdx == 0 {
+                b.WriteInt(a1)
+            } else if argIdx == 1 {
+                b.WriteInt(a2)
+            }
+            argIdx = argIdx + 1
+            i = i + 2
+            continue
+        }
+        b.WriteByte(int(fmtStr[i]))
+        i = i + 1
+    }
+    result := b.String()
+    b.Free()
+    return result
+}
+
+// FormatVerbs controls how format specifiers are rendered by Sprintf.
+// This is an internal helper that processes printf-style format verbs.
+// Supported verbs: %s (string), %d (int), %f (float), %t (bool), %x (hex int),
+// %q (quoted string), %c (char from int), %% (literal percent).
+// Width and precision (e.g., %5d, %.2f) are supported for %d and %f.
+
+// ArgKind identifies the type of a format argument.
+enum ArgKind {
+    ArgString
+    ArgInt
+    ArgFloat
+    ArgBool
+}
+
+// Arg holds a single format argument of any supported type.
+pub struct Arg {
+    kind: int    // ArgKind value
+    sval: string
+    ival: int
+    fval: float
+    bval: bool
+}
+
+// SArg creates a string format argument.
+pub fn SArg(s: string) -> Arg {
+    return Arg{kind: 0, sval: s}
+}
+
+// IArg creates an int format argument.
+pub fn IArg(n: int) -> Arg {
+    return Arg{kind: 1, ival: n}
+}
+
+// FArg creates a float format argument.
+pub fn FArg(f: float) -> Arg {
+    return Arg{kind: 2, fval: f}
+}
+
+// BArg creates a bool format argument.
+pub fn BArg(b: bool) -> Arg {
+    return Arg{kind: 3, bval: b}
+}
+
+// Sprintf formats a string with printf-style format specifiers.
+// Arguments are passed as Arg values created by SArg/IArg/FArg/BArg.
+// Supported verbs: %s %d %f %t %x %q %c %% with optional width/precision.
+// The caller owns the returned string.
+pub fn Sprintf(fmtStr: string, args: []Arg) -> string {
+    b := buf.NewBuffer()
+    n := int(libc.strlen(fmtStr))
+    i := 0
+    argIdx := 0
+    for i < n {
+        // Pass through non-format characters directly.
+        if fmtStr[i] != 37 { // '%'
+            b.WriteByte(int(fmtStr[i]))
+            i = i + 1
+            continue
+        }
+        i = i + 1
+        // Trailing '%' with no verb: output literal '%'.
+        if i >= n {
+            b.WriteByte(37)
+            break
+        }
+        // "%%" produces a literal '%'.
+        if fmtStr[i] == 37 { // '%%'
+            b.WriteByte(37)
+            i = i + 1
+            continue
+        }
+        // Parse width
+        width := 0
+        hasWidth := false
+        for i < n && fmtStr[i] >= 48 && fmtStr[i] <= 57 {
+            width = width * 10 + (int(fmtStr[i]) - 48)
+            hasWidth = true
+            i = i + 1
+        }
+        // Parse precision
+        precision := -1
+        if i < n && fmtStr[i] == 46 { // '.'
+            i = i + 1
+            precision = 0
+            for i < n && fmtStr[i] >= 48 && fmtStr[i] <= 57 {
+                precision = precision * 10 + (int(fmtStr[i]) - 48)
+                i = i + 1
+            }
+        }
+        if i >= n {
+            break
+        }
+        verb := int(fmtStr[i])
+        i = i + 1
+        // Skip if there are more verbs than arguments.
+        if argIdx >= len(args) {
+            continue
+        }
+        arg := args[argIdx]
+        argIdx = argIdx + 1
+        formatted := formatArg(verb, width, precision, arg)
+        b.WriteString(formatted)
+        // Note: formatArg may return string literals which must not be freed.
+        // Only free if the pointer looks like a heap allocation.
+        // For safety, we don't free here; the caller of Sprintf owns the result.
+    }
+    result := b.String()
+    b.Free()
+    return result
+}
+
+// formatArg formats a single argument according to the verb, width, and precision.
+fn formatArg(verb: int, width: int, precision: int, arg: Arg) -> string {
+    raw := ""
+    if verb == 115 { // 's' - string
+        if arg.kind == 0 {
+            raw = arg.sval
+        } else if arg.kind == 1 {
+            raw = Itoa(arg.ival)
+        } else if arg.kind == 2 {
+            raw = Ftoa(arg.fval)
+        } else if arg.kind == 3 {
+            raw = Btoa(arg.bval)
+        }
+    } else if verb == 100 { // 'd' - int
+        if arg.kind == 1 {
+            raw = Itoa(arg.ival)
+        } else if arg.kind == 2 {
+            // Coerce float to int for %d.
+            raw = Itoa(int(arg.fval))
+        } else {
+            raw = Itoa(0)
+        }
+    } else if verb == 102 { // 'f' - float
+        if arg.kind == 2 {
+            // Use precision if specified, otherwise default Ftoa.
+            if precision >= 0 {
+                raw = formatFloatPrec(arg.fval, precision)
+            } else {
+                raw = Ftoa(arg.fval)
+            }
+        } else if arg.kind == 1 {
+            raw = Itoa(arg.ival)
+        } else {
+            raw = Ftoa(0.0)
+        }
+    } else if verb == 116 { // 't' - bool
+        raw = Btoa(arg.bval)
+    } else if verb == 120 { // 'x' - hex int
+        raw = formatHex(arg.ival)
+    } else if verb == 113 { // 'q' - quoted string
+        raw = quoteString(arg.sval)
+    } else if verb == 99 { // 'c' - char from int
+        // Build a single-character string from the int value.
+        s := libc.malloc(2)
+        s[0] = arg.ival
+        s[1] = 0
+        return s
+    } else {
+        // Unknown verb: output as-is with % prefix
+        s := libc.malloc(3)
+        s[0] = 37
+        s[1] = verb
+        s[2] = 0
+        return s
+    }
+    // Apply width padding
+    if width > 0 {
+        rawLen := int(libc.strlen(raw))
+        if rawLen < width {
+            // Left-pad with spaces to reach the desired width.
+            padded := libc.malloc(width + 1)
+            for j := 0; j < width - rawLen; j = j + 1 {
+                padded[j] = 32 // space
+            }
+            libc.memcpy(string(int64(padded) + int64(width - rawLen)), raw, rawLen)
+            padded[width] = 0
+            return padded
+        }
+    }
+    return raw
+}
+
+// formatFloatPrec formats a float with the given number of decimal places.
+fn formatFloatPrec(f: float, precision: int) -> string {
+    buf := libc.malloc(64)
+    pos := 0
+    // Handle the sign first, then work with the absolute value.
+    if f < 0.0 {
+        buf[pos] = 45 // '-'
+        pos = pos + 1
+        f = -f
+    }
+    intPart := int(f)
+    intStr := Itoa(intPart)
+    intLen := int(libc.strlen(intStr))
+    libc.memcpy(string(int64(buf) + int64(pos)), intStr, intLen)
+    pos = pos + intLen
+    libc.free(intStr)
+    if precision > 0 {
+        buf[pos] = 46 // '.'
+        pos = pos + 1
+        // Extract each fractional digit by multiplying and truncating.
+        frac := f - float(intPart)
+        for i := 0; i < precision; i = i + 1 {
+            frac = frac * 10.0
+            digit := int(frac)
+            buf[pos] = 48 + digit
+            pos = pos + 1
+            frac = frac - float(digit)
+        }
+    }
+    buf[pos] = 0
+    return buf
+}
+
+// formatHex converts an integer to a lowercase hexadecimal string.
+fn formatHex(n: int) -> string {
+    if n == 0 {
+        s := libc.malloc(2)
+        s[0] = 48
+        s[1] = 0
+        return s
+    }
+    val := n
+    // Count hex digits to determine the buffer size.
+    tmp := val
+    len := 0
+    for tmp > 0 {
+        len = len + 1
+        tmp = tmp / 16
+    }
+    s := libc.malloc(len + 1)
+    pos := len - 1
+    // Write digits from least significant to most, filling backwards.
+    for val > 0 {
+        digit := val % 16
+        if digit < 10 {
+            s[pos] = 48 + digit
+        } else {
+            // Hex letters a-f for digits 10-15.
+            s[pos] = 97 + (digit - 10) // 'a' + digit - 10
+        }
+        val = val / 16
+        pos = pos - 1
+    }
+    s[len] = 0
+    return s
+}
+
+// quoteString wraps a string in double quotes, escaping special characters.
+fn quoteString(s: string) -> string {
+    n := int(libc.strlen(s))
+    b := buf.NewBuffer()
+    b.WriteByte(34) // '"'
+    for i := 0; i < n; i = i + 1 {
+        c := int(s[i])
+        // Escape double quotes, backslashes, newlines, and tabs.
+        if c == 34 { // '"'
+            b.WriteByte(92) // '\'
+            b.WriteByte(34)
+        } else if c == 92 { // '\'
+            b.WriteByte(92)
+            b.WriteByte(92)
+        } else if c == 10 { // '\n'
+            b.WriteByte(92)
+            b.WriteByte(110) // 'n'
+        } else if c == 9 { // '\t'
+            b.WriteByte(92)
+            b.WriteByte(116) // 't'
+        } else {
+            b.WriteByte(c)
+        }
+    }
+    b.WriteByte(34)
+    result := b.String()
+    b.Free()
+    return result
+}

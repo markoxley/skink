@@ -1,0 +1,83 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/regress_helper.skink
+// Purpose: Helper module for compiler_fixes_test — provides pub/private
+//          consts and a private function used by cross-module regression
+//          tests (const visibility, private-name collisions).
+//
+// Licensed under the Apache License, Version 2.0.
+
+module regress_helper
+
+// Private const block — accessible only inside this module.
+const {
+    secret_a = "sa"
+    secret_b = "sb"
+}
+
+// Public const block — every item is exported.
+pub const {
+    PubBlockX = "px"
+    PubBlockY = "py"
+}
+
+// Public single const.
+pub const PubSingle = "ps"
+
+// Public parenthesized const block.
+pub const (
+    PubParenOne = 11
+    PubParenTwo = 22
+)
+
+// Private single const — read back via a pub function.
+const private_factor = 7
+
+// helper is a private function whose name intentionally collides with a
+// private function of the same name in compiler_fixes_test.
+fn helper() -> int {
+    return 1
+}
+
+// Secrets returns the private consts, proving they work inside their own
+// module even though they are not exported.
+pub fn Secrets() -> string {
+    return secret_a + secret_b
+}
+
+// PrivateFactor returns the private const value from inside the module.
+pub fn PrivateFactor() -> int {
+    return private_factor * helper()
+}
+
+// ---------------------------------------------------------------------------
+// Exported consts whose initializers reference same-module symbols.
+//
+// Const initializers are stored as ASTs and re-emitted inline at each
+// reference site — potentially inside a different module's function.
+// These exercise emitConstExpr's module-context restoration: without it,
+// `secret_a`, `helper()`, and `Point` would not resolve when the const is
+// referenced from compiler_fixes_test.
+// ---------------------------------------------------------------------------
+
+// PubSliceConsts is a slice literal built from a private same-module const.
+pub const PubSliceConsts = []string{secret_a, "zz"}
+
+// PubComputed calls a private same-module function in its initializer.
+pub const PubComputed = helper() * 10
+
+// Point is a small struct used by the PubOrigin const below.
+struct Point {
+    x: int
+    y: int
+}
+
+// PubOrigin is a struct literal referencing private const field values.
+const origin_x = 3
+const origin_y = 4
+
+pub const PubOrigin = Point{x: origin_x, y: origin_y}

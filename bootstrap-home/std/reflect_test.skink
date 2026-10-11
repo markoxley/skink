@@ -1,0 +1,219 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/reflect_test.skink
+// Purpose: Skink module for reflect test.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module reflect_test
+
+import "std/reflect"
+import "std/str"
+import "testing"
+
+// TestTypeOfSize verifies TypeOf returns correct size via sizeof(T).
+pub fn TestTypeOfSize() {
+    t := reflect.TypeOf<int>(42)
+    if t.size != sizeof(int) {
+        Errorf("TypeOf<int> size should match sizeof(int)")
+    }
+
+    t2 := reflect.TypeOf<int64>(int64(42))
+    if t2.size != sizeof(int64) {
+        Errorf("TypeOf<int64> size should match sizeof(int64)")
+    }
+}
+
+struct TestStruct {
+    b: bool
+    i: int
+    i64: int64
+    s: string
+    f: float
+}
+
+// TestFieldEnumeration verifies the compile-time field metadata produced
+// by reflect.TypeOf for a struct type, accessed via the TypeName,
+// FieldCount, FieldName, FieldType, FieldByIndex and FieldByName helpers.
+pub fn TestFieldEnumeration() {
+    val := TestStruct{b: true, i: 42, i64: int64(100), s: "hello", f: 3.14}
+    t := reflect.TypeOf<TestStruct>(val)
+
+    // Type name should be the unqualified struct name.
+    if str.Equal(reflect.TypeName(t), "TestStruct") == false {
+        Errorf("TypeName should be TestStruct, got " + reflect.TypeName(t))
+    }
+
+    // TestStruct has 5 named fields.
+    if reflect.FieldCount(t) != 5 {
+        Errorf("FieldCount should be 5")
+    }
+
+    // Field names in declaration order.
+    if str.Equal(reflect.FieldName(t, 0), "b") == false {
+        Errorf("FieldName(0) should be b")
+    }
+    if str.Equal(reflect.FieldName(t, 1), "i") == false {
+        Errorf("FieldName(1) should be i")
+    }
+    if str.Equal(reflect.FieldName(t, 2), "i64") == false {
+        Errorf("FieldName(2) should be i64")
+    }
+    if str.Equal(reflect.FieldName(t, 3), "s") == false {
+        Errorf("FieldName(3) should be s")
+    }
+    if str.Equal(reflect.FieldName(t, 4), "f") == false {
+        Errorf("FieldName(4) should be f")
+    }
+
+    // Out-of-range indices return an empty string.
+    if str.Equal(reflect.FieldName(t, -1), "") == false {
+        Errorf("FieldName(-1) should be empty")
+    }
+    if str.Equal(reflect.FieldName(t, 5), "") == false {
+        Errorf("FieldName(5) should be empty")
+    }
+
+    // Field type names looked up by field name.
+    if str.Equal(reflect.FieldType(t, "b"), "bool") == false {
+        Errorf("FieldType(b) should be bool")
+    }
+    if str.Equal(reflect.FieldType(t, "i"), "int") == false {
+        Errorf("FieldType(i) should be int")
+    }
+    if str.Equal(reflect.FieldType(t, "i64"), "int64") == false {
+        Errorf("FieldType(i64) should be int64")
+    }
+    if str.Equal(reflect.FieldType(t, "s"), "string") == false {
+        Errorf("FieldType(s) should be string")
+    }
+    if str.Equal(reflect.FieldType(t, "f"), "float") == false {
+        Errorf("FieldType(f) should be float")
+    }
+    // Unknown field name returns an empty string.
+    if str.Equal(reflect.FieldType(t, "missing"), "") == false {
+        Errorf("FieldType(missing) should be empty")
+    }
+
+    // FieldByIndex returns the full descriptor with a valid offset.
+    fb := reflect.FieldByIndex(t, 1)
+    if str.Equal(fb.name, "i") == false {
+        Errorf("FieldByIndex(1).name should be i")
+    }
+    if str.Equal(fb.type_name, "int") == false {
+        Errorf("FieldByIndex(1).type_name should be int")
+    }
+    if fb.offset < 0 {
+        Errorf("FieldByIndex(1).offset should be non-negative")
+    }
+    // Out-of-range index yields offset -1.
+    oob := reflect.FieldByIndex(t, 99)
+    if oob.offset != -1 {
+        Errorf("FieldByIndex(99).offset should be -1")
+    }
+
+    // FieldByName returns the full descriptor.
+    fnb := reflect.FieldByName(t, "s")
+    if str.Equal(fnb.name, "s") == false {
+        Errorf("FieldByName(s).name should be s")
+    }
+    if str.Equal(fnb.type_name, "string") == false {
+        Errorf("FieldByName(s).type_name should be string")
+    }
+    if fnb.offset < 0 {
+        Errorf("FieldByName(s).offset should be non-negative")
+    }
+    // Unknown name yields offset -1.
+    miss := reflect.FieldByName(t, "nope")
+    if miss.offset != -1 {
+        Errorf("FieldByName(nope).offset should be -1")
+    }
+}
+
+// TestFieldAccess verifies Get/Set functions via manually created Field descriptors.
+pub fn TestFieldAccess() {
+    val := TestStruct{b: true, i: 42, i64: int64(100), s: "hello", f: 3.14}
+    ptr := int64(&val)
+
+    // bool at offset 0
+    fBool := reflect.Field{name: "b", type_name: "bool", offset: 0}
+    if reflect.GetBool(ptr, fBool) != true {
+        Errorf("Field b should be true")
+    }
+    reflect.SetBool(ptr, fBool, false)
+    if val.b != false {
+        Errorf("Field b should have been set to false")
+    }
+
+    // int at offset 4 (after bool + 3 padding bytes)
+    fInt := reflect.Field{name: "i", type_name: "int", offset: 4}
+    if reflect.GetInt(ptr, fInt) != 42 {
+        Errorf("Field i should be 42")
+    }
+    reflect.SetInt(ptr, fInt, 43)
+    if val.i != 43 {
+        Errorf("Field i should have been set to 43")
+    }
+
+    // int64 at offset 8
+    fInt64 := reflect.Field{name: "i64", type_name: "int64", offset: 8}
+    if reflect.GetInt64(ptr, fInt64) != int64(100) {
+        Errorf("Field i64 should be 100")
+    }
+    reflect.SetInt64(ptr, fInt64, int64(200))
+    if val.i64 != int64(200) {
+        Errorf("Field i64 should have been set to 200")
+    }
+
+    // string at offset 16
+    fStr := reflect.Field{name: "s", type_name: "string", offset: 16}
+    if str.Equal(reflect.GetString(ptr, fStr), "hello") == false {
+        Errorf("Field s should be hello")
+    }
+    reflect.SetString(ptr, fStr, "world")
+    if str.Equal(val.s, "world") == false {
+        Errorf("Field s should have been set to world")
+    }
+
+    // float at offset 24
+    fFloat := reflect.Field{name: "f", type_name: "float", offset: 24}
+    if reflect.GetFloat(ptr, fFloat) != 3.14 {
+        Errorf("Field f should be 3.14")
+    }
+    reflect.SetFloat(ptr, fFloat, 2.71)
+    if val.f != 2.71 {
+        Errorf("Field f should have been set to 2.71")
+    }
+}
+
+// TestHash verifies reflect.Hash.
+pub fn TestHash() {
+    s := "hello"
+    h1 := reflect.Hash(s, "string")
+    h2 := reflect.Hash(s, "string")
+    if h1 != h2 {
+        Errorf("Hashes of same string should be equal")
+    }
+
+    i := 42
+    hi := reflect.Hash(string(i), "int")
+    if hi < 0 {
+        Errorf("Hash should be non-negative")
+    }
+}

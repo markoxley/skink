@@ -1,0 +1,408 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/compiler_types_test.skink
+// Purpose: Skink module for compiler types test.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module compiler_types_test
+
+import "testing"
+import "std/strconv"
+
+// === Struct Basics ===
+
+// TestStructLiteral verifies struct literal construction and field access.
+pub fn TestStructLiteral() {
+    p := Point{x: 3, y: 4}
+    testing.AssertEqualInt(3, p.x, "Point.x")
+    testing.AssertEqualInt(4, p.y, "Point.y")
+}
+
+// TestStructFieldAccess verifies struct field read access.
+pub fn TestStructFieldAccess() {
+    p := Point{x: 10, y: 20}
+    testing.AssertEqualInt(10, p.x, "field access x")
+    testing.AssertEqualInt(20, p.y, "field access y")
+}
+
+// TestStructFieldMutation verifies struct field mutation via assignment.
+pub fn TestStructFieldMutation() {
+    p := Point{x: 1, y: 2}
+    p.x = 100
+    p.y = 200
+    testing.AssertEqualInt(100, p.x, "mutated x")
+    testing.AssertEqualInt(200, p.y, "mutated y")
+}
+
+// TestStructWithStrings verifies struct with string and int fields.
+pub fn TestStructWithStrings() {
+    p := Person{name: "Alice", age: 30}
+    testing.AssertEqualString("Alice", p.name, "Person.name")
+    testing.AssertEqualInt(30, p.age, "Person.age")
+}
+
+// TestStructWithSlice verifies struct with slice field.
+pub fn TestStructWithSlice() {
+    list := IntList{items: []int{1, 2, 3, 4, 5}}
+    testing.AssertEqualInt(5, len(list.items), "slice field len")
+    testing.AssertEqualInt(3, list.items[2], "slice field element")
+}
+
+// TestStructNested verifies nested struct field access.
+pub fn TestStructNested() {
+    outer := Outer{inner: Point{x: 5, y: 10}, label: "test"}
+    testing.AssertEqualInt(5, outer.inner.x, "nested struct field x")
+    testing.AssertEqualInt(10, outer.inner.y, "nested struct field y")
+    testing.AssertEqualString("test", outer.label, "nested struct label")
+}
+
+// TestStructPointer verifies struct pointer field access and mutation.
+pub fn TestStructPointer() {
+    p := Point{x: 7, y: 8}
+    ptr := &p
+    testing.AssertEqualInt(7, ptr.x, "pointer field access x")
+    ptr.x = 99
+    testing.AssertEqualInt(99, p.x, "pointer mutation reflects on struct")
+}
+
+// === Struct Methods ===
+
+// TestStructMethod verifies struct method call by value.
+pub fn TestStructMethod() {
+    p := Point{x: 3, y: 4}
+    testing.AssertEqualInt(25, p.DistanceSq(), "Point.DistanceSq()")
+}
+
+// TestStructMethodMutation verifies struct method mutates fields via pointer.
+pub fn TestStructMethodMutation() {
+    p := Point{x: 1, y: 2}
+    p.Move(10, 20)
+    testing.AssertEqualInt(11, p.x, "Move x")
+    testing.AssertEqualInt(22, p.y, "Move y")
+}
+
+// TestStructMethodOnPointer verifies method call via struct pointer.
+pub fn TestStructMethodOnPointer() {
+    p := Point{x: 5, y: 10}
+    ptr := &p
+    testing.AssertEqualInt(125, ptr.DistanceSq(), "method via pointer")
+}
+
+// TestStructMethodWithReturn verifies struct method returning string.
+pub fn TestStructMethodWithReturn() {
+    p := Person{name: "Bob", age: 25}
+    testing.AssertEqualString("Bob (25)", p.Describe(), "Person.Describe()")
+}
+
+// === Struct with pub fields ===
+
+// TestStructPubFields verifies public struct field access and mutation.
+pub fn TestStructPubFields() {
+    acc := Account{balance: 1000}
+    testing.AssertEqualInt(1000, acc.balance, "pub field access")
+    acc.balance -= 200
+    testing.AssertEqualInt(800, acc.balance, "pub field mutation")
+}
+
+// === Enums ===
+
+// TestEnumConstants verifies enum variants are int constants from 0.
+pub fn TestEnumConstants() {
+    // Simple enums declare variants as int constants starting from 0
+    testing.AssertEqualInt(0, int(ColorRed), "ColorRed == 0")
+    testing.AssertEqualInt(1, int(ColorGreen), "ColorGreen == 1")
+    testing.AssertEqualInt(2, int(ColorBlue), "ColorBlue == 2")
+}
+
+// TestEnumInSwitch verifies enum used in switch statement.
+pub fn TestEnumInSwitch() {
+    c := ColorGreen
+    result := ""
+    switch c {
+    case ColorRed:
+        result = "red"
+    case ColorGreen:
+        result = "green"
+    case ColorBlue:
+        result = "blue"
+    default:
+        result = "unknown"
+    }
+    testing.AssertEqualString("green", result, "enum in switch")
+}
+
+// === Const Declarations ===
+
+// TestConstInt verifies integer const declarations.
+pub fn TestConstInt() {
+    testing.AssertEqualInt(42, TheAnswer, "const int")
+    testing.AssertEqualInt(0, Zero, "const zero")
+}
+
+// TestConstString verifies string const declarations.
+pub fn TestConstString() {
+    testing.AssertEqualString("hello", Greeting, "const string")
+    testing.AssertEqualString("", EmptyConst, "const empty string")
+}
+
+// TestConstBlock verifies const block declarations.
+pub fn TestConstBlock() {
+    testing.AssertEqualInt(0, FirstConst, "const block first")
+    testing.AssertEqualInt(1, SecondConst, "const block second")
+    testing.AssertEqualInt(2, ThirdConst, "const block third")
+}
+
+// TestConstInExpression verifies consts used in expressions.
+pub fn TestConstInExpression() {
+    testing.AssertEqualInt(42 + 1, TheAnswer + 1, "const in expression")
+    testing.AssertEqualInt(84, TheAnswer * 2, "const in multiplication")
+}
+
+// === Type Aliases ===
+// Note: Type aliases work for declarations but casting aliased types
+// back to their underlying type is not supported in module context.
+
+// TestTypeAlias verifies type alias declaration and usage.
+pub fn TestTypeAlias() {
+    var score Score = 95
+    testing.AssertEqualInt(95, score, "type alias Score value")
+}
+
+// === Generic Struct ===
+// Note: Generic structs with type parameters (e.g. Box<T>) have limitations
+// in the self-hosted compiler due to type erasure. The HashMap module works
+// because it uses reflect.TypeOf and runtime heuristics. Here we test
+// non-generic struct patterns instead.
+
+// TestGenericStructInt verifies generic struct with int field.
+pub fn TestGenericStructInt() {
+    box := IntBox{value: 42}
+    testing.AssertEqualInt(42, box.value, "IntBox.value")
+    testing.AssertEqualInt(42, box.Get(), "IntBox.Get()")
+}
+
+// TestGenericStructString verifies generic struct with string field.
+pub fn TestGenericStructString() {
+    box := StringBox{value: "hello"}
+    testing.AssertEqualString("hello", box.value, "StringBox.value")
+    testing.AssertEqualString("hello", box.Get(), "StringBox.Get()")
+}
+
+// TestGenericStructSet verifies generic struct Set method via pointer.
+pub fn TestGenericStructSet() {
+    box := IntBox{value: 10}
+    box.Set(99)
+    testing.AssertEqualInt(99, box.value, "IntBox.Set() updates value")
+}
+
+// === Generic Function ===
+
+// TestGenericFunction verifies generic max function with ints.
+pub fn TestGenericFunction() {
+    testing.AssertEqualInt(5, MaxInt(3, 5), "Max(3, 5)")
+    testing.AssertEqualInt(10, MaxInt(10, 2), "Max(10, 2)")
+    testing.AssertEqualInt(-1, MaxInt(-1, -5), "Max(-1, -5)")
+}
+
+// === Functions: Multiple Returns ===
+
+// TestMultipleReturn verifies function with multiple return values.
+pub fn TestMultipleReturn() {
+    a, b := swap(10, 20)
+    testing.AssertEqualInt(20, a, "swap a")
+    testing.AssertEqualInt(10, b, "swap b")
+}
+
+// TestMultipleReturnThree verifies function with three return values.
+pub fn TestMultipleReturnThree() {
+    a, b, c := three(1, 2, 3)
+    testing.AssertEqualInt(3, a, "three a")
+    testing.AssertEqualInt(2, b, "three b")
+    testing.AssertEqualInt(1, c, "three c")
+}
+
+// TestMultipleReturnIgnored verifies ignoring second return with _.
+pub fn TestMultipleReturnIgnored() {
+    a, _ := swap(100, 200)
+    testing.AssertEqualInt(200, a, "swap with ignored second")
+}
+
+// === Functions: Recursion ===
+
+// TestRecursionFactorial verifies recursive factorial function.
+pub fn TestRecursionFactorial() {
+    testing.AssertEqualInt(1, factorial(0), "0!")
+    testing.AssertEqualInt(1, factorial(1), "1!")
+    testing.AssertEqualInt(2, factorial(2), "2!")
+    testing.AssertEqualInt(6, factorial(3), "3!")
+    testing.AssertEqualInt(24, factorial(4), "4!")
+    testing.AssertEqualInt(120, factorial(5), "5!")
+}
+
+// TestRecursionFibonacci verifies recursive fibonacci function.
+pub fn TestRecursionFibonacci() {
+    testing.AssertEqualInt(0, fib(0), "fib(0)")
+    testing.AssertEqualInt(1, fib(1), "fib(1)")
+    testing.AssertEqualInt(1, fib(2), "fib(2)")
+    testing.AssertEqualInt(5, fib(5), "fib(5)")
+    testing.AssertEqualInt(55, fib(10), "fib(10)")
+}
+
+// === Functions: Default/empty ===
+
+// TestFunctionNoReturn verifies void function modifies via slice.
+pub fn TestFunctionNoReturn() {
+    // Use a single-element slice as mutable storage since *ptr = val
+    // dereference assignment is not supported by the emitter.
+    arr := make([]int, 1)
+    setArrVal(arr, 42)
+    testing.AssertEqualInt(42, arr[0], "function modifies via slice")
+}
+
+// TestFunctionNoParams verifies function with no parameters.
+pub fn TestFunctionNoParams() {
+    testing.AssertEqualInt(42, return42(), "function with no params")
+}
+
+// === Extern functions ===
+
+// TestExternFunction verifies extern C function call (strlen).
+pub fn TestExternFunction() {
+    // strlen is an extern C function
+    s := "hello"
+    n := strlen(s)
+    testing.AssertEqualInt(5, n, "extern strlen")
+}
+
+// === Struct definitions for tests ===
+
+struct Point {
+    x: int
+    y: int
+
+    fn DistanceSq(self: Point) -> int {
+        return self.x * self.x + self.y * self.y
+    }
+
+    fn Move(self: *Point, dx: int, dy: int) {
+        self.x += dx
+        self.y += dy
+    }
+}
+
+struct Person {
+    name: string
+    age: int
+
+    fn Describe(self: Person) -> string {
+        return str.Concat(str.Concat(self.name, " ("), str.Concat(strconv.Itoa(self.age), ")"))
+    }
+}
+
+struct IntList {
+    items: []int
+}
+
+struct Outer {
+    inner: Point
+    label: string
+}
+
+struct Account {
+    pub balance: int
+}
+
+struct IntBox {
+    value: int
+
+    fn Get(self: IntBox) -> int {
+        return self.value
+    }
+
+    fn Set(self: *IntBox, v: int) {
+        self.value = v
+    }
+}
+
+struct StringBox {
+    value: string
+
+    fn Get(self: StringBox) -> string {
+        return self.value
+    }
+}
+
+enum Color {
+    ColorRed
+    ColorGreen
+    ColorBlue
+}
+
+const TheAnswer = 42
+const Zero = 0
+const Greeting = "hello"
+const EmptyConst = ""
+
+const {
+    FirstConst = 0
+    SecondConst = 1
+    ThirdConst = 2
+}
+
+type Score = int
+
+fn MaxInt(a: int, b: int) -> int {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+fn swap(a: int, b: int) -> (int, int) {
+    return b, a
+}
+
+fn three(a: int, b: int, c: int) -> (int, int, int) {
+    return c, b, a
+}
+
+fn factorial(n: int) -> int {
+    if n <= 1 {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+fn fib(n: int) -> int {
+    if n <= 1 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn setArrVal(arr: []int, val: int) {
+    arr[0] = val
+}
+
+fn return42() -> int {
+    return 42
+}
+
+extern fn strlen(s: string) -> int

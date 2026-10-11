@@ -1,0 +1,306 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/testing_test.skink
+// Purpose: Skink module for testing test.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module testing_test
+
+import "testing"
+
+// TestAssertTruePass verifies AssertTrue passes for true.
+pub fn TestAssertTruePass() {
+    Reset()
+    AssertTrue(true, "true should pass")
+    if Failed() {
+        Errorf("AssertTrue(true) should not fail")
+    }
+}
+
+// TestAssertTrueFail verifies AssertTrue fails for false.
+pub fn TestAssertTrueFail() {
+    Reset()
+    AssertTrue(false, "false should fail")
+    if Failed() == false {
+        Errorf("AssertTrue(false) should fail")
+    }
+    Reset()
+}
+
+// TestAssertFalsePass verifies AssertFalse passes for false.
+pub fn TestAssertFalsePass() {
+    Reset()
+    AssertFalse(false, "false should pass")
+    if Failed() {
+        Errorf("AssertFalse(false) should not fail")
+    }
+}
+
+// TestAssertFalseFail verifies AssertFalse fails for true.
+pub fn TestAssertFalseFail() {
+    Reset()
+    AssertFalse(true, "true should fail")
+    if Failed() == false {
+        Errorf("AssertFalse(true) should fail")
+    }
+    Reset()
+}
+
+// TestAssertEqualStringPass verifies AssertEqualString passes for equal strings.
+pub fn TestAssertEqualStringPass() {
+    Reset()
+    AssertEqualString("hello", "hello", "equal strings")
+    if Failed() {
+        Errorf("AssertEqualString with equal strings should not fail")
+    }
+}
+
+// TestAssertEqualStringFail verifies AssertEqualString fails for unequal strings.
+pub fn TestAssertEqualStringFail() {
+    Reset()
+    AssertEqualString("hello", "world", "unequal strings")
+    if Failed() == false {
+        Errorf("AssertEqualString with unequal strings should fail")
+    }
+    Reset()
+}
+
+// TestAssertEqualIntPass verifies AssertEqualInt passes for equal ints.
+pub fn TestAssertEqualIntPass() {
+    Reset()
+    AssertEqualInt(42, 42, "equal ints")
+    if Failed() {
+        Errorf("AssertEqualInt with equal ints should not fail")
+    }
+}
+
+// TestAssertEqualIntFail verifies AssertEqualInt fails for unequal ints.
+pub fn TestAssertEqualIntFail() {
+    Reset()
+    AssertEqualInt(42, 99, "unequal ints")
+    if Failed() == false {
+        Errorf("AssertEqualInt with unequal ints should fail")
+    }
+    Reset()
+}
+
+// TestAssertEqualBoolPass verifies AssertEqualBool passes for equal bools.
+pub fn TestAssertEqualBoolPass() {
+    Reset()
+    AssertEqualBool(true, true, "equal bools")
+    if Failed() {
+        Errorf("AssertEqualBool with equal bools should not fail")
+    }
+}
+
+// TestAssertEqualBoolFail verifies AssertEqualBool fails for unequal bools.
+pub fn TestAssertEqualBoolFail() {
+    Reset()
+    AssertEqualBool(true, false, "unequal bools")
+    if Failed() == false {
+        Errorf("AssertEqualBool with unequal bools should fail")
+    }
+    Reset()
+}
+
+// TestAssertNotEqualStringPass verifies AssertNotEqualString passes for unequal.
+pub fn TestAssertNotEqualStringPass() {
+    Reset()
+    AssertNotEqualString("hello", "world", "unequal strings")
+    if Failed() {
+        Errorf("AssertNotEqualString with unequal strings should not fail")
+    }
+}
+
+// TestAssertNotEqualStringFail verifies AssertNotEqualString fails for equal.
+pub fn TestAssertNotEqualStringFail() {
+    Reset()
+    AssertNotEqualString("hello", "hello", "equal strings")
+    if Failed() == false {
+        Errorf("AssertNotEqualString with equal strings should fail")
+    }
+    Reset()
+}
+
+// TestAssertNotEqualIntPass verifies AssertNotEqualInt passes for unequal.
+pub fn TestAssertNotEqualIntPass() {
+    Reset()
+    AssertNotEqualInt(42, 99, "unequal ints")
+    if Failed() {
+        Errorf("AssertNotEqualInt with unequal ints should not fail")
+    }
+}
+
+// TestAssertNotEqualIntFail verifies AssertNotEqualInt fails for equal.
+pub fn TestAssertNotEqualIntFail() {
+    Reset()
+    AssertNotEqualInt(42, 42, "equal ints")
+    if Failed() == false {
+        Errorf("AssertNotEqualInt with equal ints should fail")
+    }
+    Reset()
+}
+
+// TestAssertContainsPass verifies AssertContains passes when substring exists.
+pub fn TestAssertContainsPass() {
+    Reset()
+    AssertContains("hello world", "world", "contains")
+    if Failed() {
+        Errorf("AssertContains with present substring should not fail")
+    }
+}
+
+// TestAssertContainsFail verifies AssertContains fails when substring absent.
+pub fn TestAssertContainsFail() {
+    Reset()
+    AssertContains("hello world", "xyz", "not contains")
+    if Failed() == false {
+        Errorf("AssertContains with absent substring should fail")
+    }
+    Reset()
+}
+
+// TestAssertLenPass verifies AssertLen passes for correct length.
+pub fn TestAssertLenPass() {
+    Reset()
+    AssertLen("hello", 5, "correct length")
+    if Failed() {
+        Errorf("AssertLen with correct length should not fail")
+    }
+}
+
+// TestAssertLenFail verifies AssertLen fails for incorrect length.
+pub fn TestAssertLenFail() {
+    Reset()
+    AssertLen("hello", 10, "incorrect length")
+    if Failed() == false {
+        Errorf("AssertLen with incorrect length should fail")
+    }
+    Reset()
+}
+
+// TestAssertNoErrorPass verifies AssertNoError passes for empty error.
+pub fn TestAssertNoErrorPass() {
+    Reset()
+    AssertNoError("", "empty error")
+    if Failed() {
+        Errorf("AssertNoError with empty error should not fail")
+    }
+}
+
+// TestAssertNoErrorFail verifies AssertNoError fails for non-empty error.
+pub fn TestAssertNoErrorFail() {
+    Reset()
+    AssertNoError("something went wrong", "non-empty error")
+    if Failed() == false {
+        Errorf("AssertNoError with non-empty error should fail")
+    }
+    Reset()
+}
+
+// TestAssertErrorPass verifies AssertError passes for non-empty error.
+pub fn TestAssertErrorPass() {
+    Reset()
+    AssertError("something went wrong", "non-empty error")
+    if Failed() {
+        Errorf("AssertError with non-empty error should not fail")
+    }
+}
+
+// TestAssertErrorFail verifies AssertError fails for empty error.
+pub fn TestAssertErrorFail() {
+    Reset()
+    AssertError("", "empty error")
+    if Failed() == false {
+        Errorf("AssertError with empty error should fail")
+    }
+    Reset()
+}
+
+// TestFail verifies Fail sets the failed flag.
+pub fn TestFail() {
+    Reset()
+    Fail()
+    if Failed() == false {
+        Errorf("Fail should set failed flag")
+    }
+    Reset()
+}
+
+// TestReset verifies Reset clears the failed flag.
+pub fn TestReset() {
+    Fail()
+    Reset()
+    if Failed() {
+        Errorf("Reset should clear failed flag")
+    }
+}
+
+// TestPassCountIncremented verifies that passCount is incremented by
+// successful assertions.
+pub fn TestPassCountIncremented() {
+    Reset()
+    before := PassCount()
+    AssertTrue(true, "should pass")
+    after := PassCount()
+    if after <= before {
+        Errorf("PassCount should increment after a passing assertion")
+    }
+}
+
+// TestFailCountIncremented verifies that failCount is incremented by
+// failed assertions.
+pub fn TestFailCountIncremented() {
+    Reset()
+    before := FailCount()
+    AssertTrue(false, "should fail")
+    after := FailCount()
+    if after <= before {
+        Errorf("FailCount should increment after a failing assertion")
+    }
+    Reset()
+}
+
+// TestTestCountIncremented verifies that testCount is incremented by
+// every assertion (pass or fail).
+pub fn TestTestCountIncremented() {
+    Reset()
+    before := TestCount()
+    AssertTrue(true, "should pass")
+    AssertTrue(false, "should fail")
+    after := TestCount()
+    if after < before + 2 {
+        Errorf("TestCount should increment for each assertion")
+    }
+    Reset()
+}
+
+// TestFailNowExists verifies that FailNow is a callable function.
+// We cannot actually call FailNow() here because it aborts the process
+// (which is the intended behavior for early-exit). This test merely
+// confirms the function is linked by referencing it in a way that
+// forces the linker to include it.
+pub fn TestFailNowExists() {
+    // FailNow aborts the process, so we only verify it's linked.
+    // We use a conditional that's always false to avoid calling it.
+    if false {
+        FailNow()
+    }
+}

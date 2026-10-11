@@ -1,0 +1,83 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/base64_encoding.skink
+// Purpose: Demonstrates Base64 encoding and decoding of strings.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/base64"
+import "std/io"
+import "std/str"
+import "std/fmt"
+
+pub fn main() {
+    io.PrintLine("=== Base64 Encoding Demo ===")
+    io.PrintLine("")
+
+    // --- Encode a simple string ---
+    io.PrintLine("--- Encoding ---")
+    message := "Hello, Skink!"
+    encoded := base64.Encode(message, str.Len(message))
+    io.PrintLine("Original: " + message)
+    io.PrintLine("Encoded:  " + encoded)
+    io.PrintLine("")
+
+    // --- Decode it back ---
+    io.PrintLine("--- Decoding ---")
+    decoded, err := base64.Decode(encoded)
+    if err.message != "" {
+        io.PrintErrorLine("Decode error: " + err.message)
+        return
+    }
+    io.PrintLine("Decoded:  " + decoded)
+    io.PrintLine("Round-trip match: " + fmt.Btoa(str.Equal(message, decoded)))
+    io.PrintLine("")
+
+    // --- Encode various data ---
+    io.PrintLine("--- Various Encodings ---")
+    testStrings := []string{
+        "Skink",
+        "The quick brown fox",
+        "Base64 encoding is useful for binary data",
+        "",
+    }
+
+    for i := 0; i < len(testStrings); i = i + 1 {
+        s := testStrings[i]
+        enc := base64.Encode(s, str.Len(s))
+        dec, dErr := base64.Decode(enc)
+        status := "FAIL"
+        if dErr.message == "" && str.Equal(s, dec) {
+            status = "OK"
+        }
+        io.PrintLine("  \"" + s + "\" -> \"" + enc + "\" [" + status + "]")
+    }
+    io.PrintLine("")
+
+    // --- Practical use: encoding credentials ---
+    io.PrintLine("--- Practical: Basic Auth Header ---")
+    username := "admin"
+    password := "secretpass"
+    credentials := username + ":" + password
+    b64Creds := base64.Encode(credentials, str.Len(credentials))
+    io.PrintLine("Credentials: " + credentials)
+    io.PrintLine("Authorization: Basic " + b64Creds)
+}

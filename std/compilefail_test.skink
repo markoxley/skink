@@ -1,0 +1,132 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/compilefail_test.skink
+// Purpose: Negative-compilation harness. Every snippet in
+//          std/compilefail/*.skink MUST fail to compile, and the
+//          compiler's output must contain the substring named by the
+//          snippet's first-line `// expect: <text>` marker. This is the
+//          only suite that verifies malformed and semantically invalid
+//          programs are rejected — positive tests cannot cover that.
+//          Snippets guard: comp_error.md #35 (fixed arrays), #76
+//          (for-in over int), #77 (&m[k]), #79 (method values),
+//          #81 (struct ==), plus general diagnostic quality.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module compilefail_test
+
+import "testing"
+import "os"
+import "fs"
+import "io"
+import "str"
+
+// cfExpectPrefix marks the required compiler-output substring on a
+// snippet's first line: `// expect: divide by zero`.
+const cfExpectPrefix = "// expect:"
+
+// cfSkinkBin returns the compiler binary to invoke, honouring SKINK_BIN
+// (exported by run_tests.sh) and falling back to ./skink.
+fn cfSkinkBin() -> string {
+    b := os.Getenv("SKINK_BIN")
+    if str.Len(b) > 0 {
+        return b
+    }
+    return "./skink"
+}
+
+// cfExpectOf extracts the expected-output substring from the first line
+// of a snippet, or "" if the marker is absent.
+fn cfExpectOf(firstLine: string) -> string {
+    idx := str.IndexOf(firstLine, cfExpectPrefix)
+    if idx < 0 {
+        return ""
+    }
+    return str.Trim(str.Substr(firstLine, idx + str.Len(cfExpectPrefix), str.Len(firstLine) - idx - str.Len(cfExpectPrefix)))
+}
+
+// cfCheckSnippet compiles one snippet and asserts it fails with the
+// expected diagnostic. Returns false (after reporting) on unexpected
+// success, missing marker, or a diagnostic that lacks the substring.
+fn cfCheckSnippet(path: string, name: string) -> bool {
+    src, rerr := io.ReadFile(path)
+    if str.Len(rerr.Error()) > 0 {
+        testing.Errorf(str.Concat("cannot read snippet ", path))
+        return false
+    }
+    nl := str.IndexOf(src, "\n")
+    firstLine := src
+    if nl >= 0 {
+        firstLine = str.Substr(src, 0, nl)
+    }
+    expect := cfExpectOf(firstLine)
+    if str.Len(expect) == 0 {
+        testing.Errorf(str.Concat(name, ": missing // expect: marker"))
+        return false
+    }
+    // timeout wrapper: a hanging compile (e.g. a parser no-progress
+    // loop like comp_error.md #98) must fail, not wedge the suite.
+    out, rc := os.ExecWithOutput([]string{"timeout", "10", cfSkinkBin(), "-check", path})
+    if rc == 124 || rc == -1 {
+        testing.Errorf(str.Concat(name, ": compiler crashed or hung"))
+        return false
+    }
+    if rc == 0 {
+        testing.Errorf(str.Concat(str.Concat(name, ": compiled successfully but must fail (expected \""), str.Concat(expect, "\")")))
+        return false
+    }
+    if !str.Contains(out, expect) {
+        testing.Errorf(str.Concat(str.Concat(name, ": output missing \""), str.Concat(expect, str.Concat("\"; got: ", out))))
+        return false
+    }
+    return true
+}
+
+// TestCompileFailSnippets runs every snippet in std/compilefail/ through
+// the compiler and asserts each fails with its expected diagnostic.
+// Guards comp_error.md #35, #76, #77, #79, #81 and diagnostic coverage
+// for common programmer errors.
+pub fn TestCompileFailSnippets() {
+    entries, derr := fs.ReadDir("std/compilefail")
+    if str.Len(derr.Error()) > 0 {
+        testing.Errorf("cannot read std/compilefail directory")
+        return
+    }
+    count := 0
+    ok := true
+    for e in entries {
+        if e.IsDir {
+            continue
+        }
+        if !str.EndsWith(e.Name, ".skink") {
+            continue
+        }
+        path := str.Concat("std/compilefail/", e.Name)
+        if !cfCheckSnippet(path, e.Name) {
+            ok = false
+        }
+        count = count + 1
+    }
+    if count == 0 {
+        testing.Errorf("no compilefail snippets found in std/compilefail")
+    }
+    if !ok {
+        testing.Fail()
+    }
+}

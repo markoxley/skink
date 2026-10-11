@@ -1,0 +1,118 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/xml_parsing.skink
+// Purpose: Demonstrates XML parsing, traversal, and serialization.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/xml"
+import "std/io"
+import "std/str"
+
+// Sample XML representing a book catalog.
+const xmlData = `<catalog>
+  <book id="1" category="fiction">
+    <title>The Hobbit</title>
+    <author>J.R.R. Tolkien</author>
+    <year>1937</year>
+  </book>
+  <book id="2" category="science">
+    <title>A Brief History of Time</title>
+    <author>Stephen Hawking</author>
+    <year>1988</year>
+  </book>
+  <book id="3" category="fiction">
+    <title>Dune</title>
+    <author>Frank Herbert</author>
+    <year>1965</year>
+  </book>
+</catalog>`
+
+pub fn main() {
+    io.PrintLine("=== XML Parsing Demo ===")
+    io.PrintLine("")
+
+    // --- Parsing XML ---
+    io.PrintLine("--- Parsing XML ---")
+    root, err := xml.Unmarshal(xmlData)
+    if err.message != "" {
+        io.PrintErrorLine("Parse error: " + err.message)
+        return
+    }
+
+    io.PrintLine("Root element: " + root.tag)
+    io.PrintLine("Number of books: " + strconv.Itoa(len(root.children)))
+    io.PrintLine("")
+
+    // --- Traversing the tree ---
+    io.PrintLine("--- Book Catalog ---")
+    for i := 0; i < len(root.children); i = i + 1 {
+        book := root.children[i]
+        id := ""
+        category := ""
+        for j := 0; j < len(book.attrKeys); j = j + 1 {
+            if str.Equal(book.attrKeys[j], "id") {
+                id = book.attrVals[j]
+            }
+            if str.Equal(book.attrKeys[j], "category") {
+                category = book.attrVals[j]
+            }
+        }
+
+        title := ""
+        author := ""
+        year := ""
+        for j := 0; j < len(book.children); j = j + 1 {
+            child := book.children[j]
+            if str.Equal(child.tag, "title") {
+                title = child.text
+            }
+            if str.Equal(child.tag, "author") {
+                author = child.text
+            }
+            if str.Equal(child.tag, "year") {
+                year = child.text
+            }
+        }
+
+        io.PrintLine("  [" + id + "] " + title + " by " + author + " (" + year + ") [" + category + "]")
+    }
+    io.PrintLine("")
+
+    // --- Building XML ---
+    io.PrintLine("--- Building XML ---")
+    root2 := xml.NewNode("config")
+    root2.SetAttr("version", "1.0")
+
+    server := xml.NewNode("server")
+    server.SetAttr("port", "8080")
+    server.SetText("localhost")
+    root2.AddChild(server)
+
+    db := xml.NewNode("database")
+    db.SetAttr("type", "sqlite")
+    db.SetText("/var/data/app.db")
+    root2.AddChild(db)
+
+    output := xml.MarshalNode(root2)
+    io.PrintLine("Generated XML:")
+    io.PrintLine(output)
+}

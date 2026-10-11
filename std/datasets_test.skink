@@ -1,0 +1,241 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/datasets_test.skink
+// Purpose: Skink module for datasets test.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module datasets_test
+
+import "std/datasets"
+import "testing"
+
+// makeDF2 creates a 2-column DataFrame for testing.
+fn makeDF2(s1: datasets.Series, s2: datasets.Series) -> datasets.DataFrame {
+    var cols []datasets.Series
+    cols = append(cols, s1)
+    cols = append(cols, s2)
+    df, _ := datasets.NewDataFrame(cols)
+    return df
+}
+
+// makeDF3 creates a 3-column DataFrame for testing.
+fn makeDF3(s1: datasets.Series, s2: datasets.Series, s3: datasets.Series) -> datasets.DataFrame {
+    var cols []datasets.Series
+    cols = append(cols, s1)
+    cols = append(cols, s2)
+    cols = append(cols, s3)
+    df, _ := datasets.NewDataFrame(cols)
+    return df
+}
+
+// TestSeriesFloat verifies float series operations.
+pub fn TestSeriesFloat() {
+    s := datasets.NewFloatSeries("temp", [20.0, 22.0, 24.0, 26.0])
+    if s.Len() != 4 {
+        Errorf("Series Len should be 4")
+    }
+    if s.Mean() != 23.0 {
+        Errorf("Series Mean should be 23.0")
+    }
+    if s.Min() != 20.0 {
+        Errorf("Series Min should be 20.0")
+    }
+    if s.Max() != 26.0 {
+        Errorf("Series Max should be 26.0")
+    }
+    if s.Sum() != 92.0 {
+        Errorf("Series Sum should be 92.0")
+    }
+}
+
+// TestSeriesInt verifies int series operations.
+pub fn TestSeriesInt() {
+    s := datasets.NewIntSeries("count", [10, 20, 30])
+    if s.Len() != 3 {
+        Errorf("Series Len should be 3")
+    }
+    if s.Int(0) != 10 || s.Int(1) != 20 || s.Int(2) != 30 {
+        Errorf("Series Int values incorrect")
+    }
+    if s.Mean() != 20.0 {
+        Errorf("Series Mean should be 20.0")
+    }
+}
+
+// TestSeriesString verifies string series operations.
+pub fn TestSeriesString() {
+    s := datasets.NewStringSeries("name", ["alice", "bob", "carol"])
+    if s.Len() != 3 {
+        Errorf("Series Len should be 3")
+    }
+    if s.String(0) != "alice" {
+        Errorf("Series String(0) should be alice")
+    }
+}
+
+// TestDataFrameBasic verifies DataFrame creation and column access.
+pub fn TestDataFrameBasic() {
+    names := datasets.NewStringSeries("name", ["alice", "bob", "carol"])
+    ages := datasets.NewIntSeries("age", [30, 25, 35])
+    df := makeDF2(names, ages)
+    if df.NRows() != 3 {
+        Errorf("DataFrame NRows should be 3")
+    }
+    if df.NCols() != 2 {
+        Errorf("DataFrame NCols should be 2")
+    }
+    col, err := df.Col("age")
+    if err.message != "" {
+        Errorf("Col(age) should succeed")
+    }
+    if col.Int(1) != 25 {
+        Errorf("age[1] should be 25")
+    }
+}
+
+// TestDataFrameSelect verifies column selection.
+pub fn TestDataFrameSelect() {
+    names := datasets.NewStringSeries("name", ["a", "b"])
+    ages := datasets.NewIntSeries("age", [1, 2])
+    scores := datasets.NewFloatSeries("score", [0.5, 0.9])
+    df := makeDF3(names, ages, scores)
+    selected, err := df.Select(["name", "score"])
+    if err.message != "" {
+        Errorf("Select should succeed: " + err.message)
+    }
+    if selected.NCols() != 2 {
+        Errorf("Selected DataFrame should have 2 columns")
+    }
+}
+
+// TestDataFrameSubset verifies row subsetting.
+pub fn TestDataFrameSubset() {
+    s := datasets.NewIntSeries("x", [10, 20, 30, 40, 50])
+    df := makeDF2(s, s)
+    sub, err := df.Subset(1, 4)
+    if err.message != "" {
+        Errorf("Subset should succeed: " + err.message)
+    }
+    if sub.NRows() != 3 {
+        Errorf("Subset should have 3 rows")
+    }
+    col, _ := sub.Col("x")
+    if col.Int(0) != 20 || col.Int(2) != 40 {
+        Errorf("Subset values incorrect")
+    }
+}
+
+// TestReadCSV verifies CSV parsing into a DataFrame.
+pub fn TestReadCSV() {
+    csvData := "name,age,score\nalice,30,0.9\nbob,25,0.7\ncarol,35,0.95\n"
+    df, err := datasets.ReadCSV(csvData)
+    if err.message != "" {
+        Errorf("ReadCSV should succeed: " + err.message)
+    }
+    if df.NRows() != 3 {
+        Errorf("CSV DataFrame should have 3 rows")
+    }
+    if df.NCols() != 3 {
+        Errorf("CSV DataFrame should have 3 columns")
+    }
+    ageCol, _ := df.Col("age")
+    if ageCol.Int(0) != 30 {
+        Errorf("age[0] should be 30")
+    }
+    scoreCol, _ := df.Col("score")
+    if scoreCol.Float(1) != 0.7 {
+        Errorf("score[1] should be 0.7")
+    }
+    nameCol, _ := df.Col("name")
+    if nameCol.String(2) != "carol" {
+        Errorf("name[2] should be carol")
+    }
+}
+
+// TestWriteCSV verifies DataFrame serialization to CSV.
+pub fn TestWriteCSV() {
+    names := datasets.NewStringSeries("name", ["a", "b"])
+    ages := datasets.NewIntSeries("age", [1, 2])
+    df := makeDF2(names, ages)
+    csvOut := datasets.WriteCSV(df)
+    if csvOut == "" {
+        Errorf("WriteCSV should produce output")
+    }
+}
+
+// TestGroupBy verifies grouping by column values.
+pub fn TestGroupBy() {
+    cats := datasets.NewStringSeries("cat", ["x", "y", "x", "y", "x"])
+    vals := datasets.NewIntSeries("val", [10, 20, 30, 40, 50])
+    df := makeDF2(cats, vals)
+    groups, err := datasets.GroupBy(df, "cat")
+    if err.message != "" {
+        Errorf("GroupBy should succeed: " + err.message)
+    }
+    if len(groups) != 2 {
+        Errorf("GroupBy should produce 2 groups")
+    }
+}
+
+// TestAggregate verifies aggregation over indices.
+pub fn TestAggregate() {
+    vals := datasets.NewIntSeries("val", [10, 20, 30, 40, 50])
+    df := makeDF2(vals, vals)
+    summary, err := datasets.Aggregate(df, "val", [0, 2, 4])
+    if err.message != "" {
+        Errorf("Aggregate should succeed")
+    }
+    if summary.Count != 3 {
+        Errorf("Aggregate count should be 3")
+    }
+    if summary.Sum != 90.0 {
+        Errorf("Aggregate sum should be 90.0")
+    }
+    if summary.Mean != 30.0 {
+        Errorf("Aggregate mean should be 30.0")
+    }
+}
+
+// TestSortBy verifies sorting by column.
+pub fn TestSortBy() {
+    vals := datasets.NewIntSeries("val", [30, 10, 50, 20, 40])
+    df := makeDF2(vals, vals)
+    indices, err := datasets.SortBy(df, "val")
+    if err.message != "" {
+        Errorf("SortBy should succeed")
+    }
+    col, _ := df.Col("val")
+    if col.Int(indices[0]) != 10 {
+        Errorf("First sorted element should be 10")
+    }
+    if col.Int(indices[4]) != 50 {
+        Errorf("Last sorted element should be 50")
+    }
+}
+
+// TestDescribe verifies summary statistics output.
+pub fn TestDescribe() {
+    vals := datasets.NewFloatSeries("temp", [20.0, 22.0, 24.0])
+    df := makeDF2(vals, vals)
+    desc := df.Describe()
+    if desc == "" {
+        Errorf("Describe should produce output")
+    }
+}

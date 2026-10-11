@@ -1,0 +1,307 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/net.skink
+// Purpose: Basic network primitives including TCP/UDP socket creation,
+//          DNS resolution, and simple HTTP client helpers.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module net
+
+import "std/errors"
+import "std/fmt"
+import "std/libc"
+import "std/str"
+
+extern fn socket(domain: int, ty: int, protocol: int) -> int
+extern fn connect(fd: int, addr: string, len: int) -> int
+extern fn Skink_close_fd(fd: int) -> int
+extern fn send(fd: int, buf: string, len: int, flags: int) -> int
+extern fn recv(fd: int, buf: string, len: int, flags: int) -> int
+extern fn listen(fd: int, backlog: int) -> int
+extern fn bind(fd: int, addr: string, len: int) -> int
+extern fn accept(fd: int, addr: string, len: *int) -> int
+extern fn htons(port: int) -> int
+extern fn inet_addr(ip: string) -> int
+extern fn Skink_net_resolve_and_connect(host: string, port: int, timeoutMs: int) -> int
+extern fn Skink_set_socket_timeout(fd: int, timeoutMs: int) -> int
+extern fn Skink_set_socket_timeouts(fd: int, recvMs: int, sendMs: int) -> int
+extern fn Skink_set_reuseaddr(fd: int) -> int
+extern fn Skink_send_all(fd: int, buf: string, len: int) -> int
+
+// Connection wraps a raw socket file descriptor.
+pub struct Connection {
+    fd: int
+
+    // Close releases the underlying socket. Returns an error if the close
+    // syscall fails or the connection is already closed.
+    pub fn Close(self: *Connection) -> errors.Error {
+        if self.fd != 0 {
+            rc := Skink_close_fd(self.fd)
+            // Mark the connection as closed regardless of syscall result.
+            self.fd = 0
+            if rc == 0 {
+                return errors.New("")
+            }
+            return errors.New("close failed")
+        }
+        return errors.New("not connected")
+    }
+
+    // Send writes data to the socket using MSG_NOSIGNAL to avoid SIGPIPE.
+    // send() may write fewer bytes than requested — use SendAll when the
+    // whole buffer must be transmitted.
+    pub fn Send(self: *Connection, data: string) -> int {
+        n := str.Len(data)
+        return send(self.fd, data, n, 16384) // MSG_NOSIGNAL = 0x4000
+    }
+
+    // SendAll writes every byte of data[0..len) to the socket, looping
+    // over short writes. Returns total bytes sent, or -1 on error.
+    pub fn SendAll(self: *Connection, data: string, len: int) -> int {
+        return Skink_send_all(self.fd, data, len)
+    }
+
+    // SetTimeout applies a receive/send timeout in milliseconds to the
+    // socket; 0 leaves it blocking forever.
+    pub fn SetTimeout(self: *Connection, timeoutMs: int) {
+        Skink_set_socket_timeout(self.fd, timeoutMs)
+    }
+
+    // SetTimeouts applies independent receive and send timeouts in
+    // milliseconds; <= 0 leaves that direction blocking forever.
+    pub fn SetTimeouts(self: *Connection, recvMs: int, sendMs: int) {
+        Skink_set_socket_timeouts(self.fd, recvMs, sendMs)
+    }
+
+    // Recv reads up to maxLen bytes from the socket into a freshly allocated buffer.
+    pub fn Recv(self: *Connection, maxLen: int) -> (string, errors.Error) {
+        buf := libc.malloc(maxLen + 1)
+        bytesRead := recv(self.fd, buf, maxLen, 0)
+        if bytesRead <= 0 {
+            return "", errors.New("recv failed")
+        }
+        return buf, errors.New("")
+    }
+
+    // Read implements the Reader template interface.
+    pub fn Read(self: *Connection, buf: string, len: int) -> int {
+        return recv(self.fd, buf, len, 0)
+    }
+
+    // Write implements the Writer template interface.
+    pub fn Write(self: *Connection, buf: string, len: int) -> int {
+        return send(self.fd, buf, len, 16384) // MSG_NOSIGNAL = 0x4000
+    }
+}
+
+// Connect opens a TCP connection to the given host and port with no timeout.
+pub fn Connect(address: string, port: int) -> (Connection, errors.Error) {
+    return ConnectWithTimeout(address, port, 0)
+}
+
+// Dial is an alias for Connect, matching the book's API.
+pub fn Dial(address: string, port: int) -> (Connection, errors.Error) {
+    return ConnectWithTimeout(address, port, 0)
+}
+
+// ConnectWithTimeout resolves the hostname and connects with an optional
+// timeout. timeoutMs of 0 means no timeout (blocking connect).
+pub fn ConnectWithTimeout(address: string, port: int, timeoutMs: int) -> (Connection, errors.Error) {
+    // The runtime helper handles DNS resolution and the TCP connect in one call.
+    fd := Skink_net_resolve_and_connect(address, port, timeoutMs)
+    if fd < 0 {
+        return Connection{fd: 0}, errors.New("connect failed (DNS resolution or connection error)")
+    }
+    return Connection{fd: fd}, errors.New("")
+}
+
+// HTTPResponse holds the result of a simple HTTP request.
+pub struct HTTPResponse {
+    status: int
+    body: string
+
+    // Status returns the HTTP status code.
+    pub fn Status(self: HTTPResponse) -> int {
+        return self.status
+    }
+
+    // Body returns the response body.
+    pub fn Body(self: HTTPResponse) -> string {
+        return self.body
+    }
+}
+
+// Listen creates a TCP listener on the given address and port.
+pub fn Listen(address: string, port: int) -> (Connection, errors.Error) {
+    // AF_INET = 2, SOCK_STREAM = 1
+    fd := socket(2, 1, 0)
+    if fd < 0 {
+        return Connection{fd: 0}, errors.New("socket creation failed")
+    }
+    // SO_REUSEADDR lets a server rebind immediately after restart while
+    // old connections linger in TIME_WAIT (comp_error.md #50).
+    Skink_set_reuseaddr(fd)
+    // Build a sockaddr_in structure (16 bytes) in a raw buffer.
+    addr := libc.calloc(16, 1)
+    addr[0] = 2 // sin_family = AF_INET
+    // Store the port in network byte order (big-endian).
+    portBE := htons(port)
+    addr[2] = portBE & 255
+    addr[3] = (portBE >> 8) & 255
+    // Store the IPv4 address in network byte order.
+    ipAddr := inet_addr(address)
+    addr[4] = ipAddr & 255
+    addr[5] = (ipAddr >> 8) & 255
+    addr[6] = (ipAddr >> 16) & 255
+    addr[7] = (ipAddr >> 24) & 255
+    rc := bind(fd, addr, 16)
+    libc.free(addr)
+    if rc < 0 {
+        Skink_close_fd(fd)
+        return Connection{fd: 0}, errors.New("bind failed")
+    }
+    // Listen with a backlog of 128 pending connections so connection
+    // bursts are not dropped while the accept loop catches up (#68).
+    rc = listen(fd, 128)
+    if rc < 0 {
+        Skink_close_fd(fd)
+        return Connection{fd: 0}, errors.New("listen failed")
+    }
+    return Connection{fd: fd}, errors.New("")
+}
+
+// Accept accepts an incoming connection on a listener.
+pub fn Accept(listener: Connection) -> (Connection, errors.Error) {
+    var addrLen int = 16
+    addr := libc.calloc(16, 1)
+    fd := accept(listener.fd, addr, &addrLen)
+    libc.free(addr)
+    if fd < 0 {
+        return Connection{fd: 0}, errors.New("accept failed")
+    }
+    return Connection{fd: fd}, errors.New("")
+}
+
+// UDPSocket creates a UDP socket. AF_INET = 2, SOCK_DGRAM = 2.
+pub fn UDPSocket() -> (Connection, errors.Error) {
+    fd := socket(2, 2, 0)
+    if fd < 0 {
+        return Connection{fd: 0}, errors.New("socket creation failed")
+    }
+    return Connection{fd: fd}, errors.New("")
+}
+
+// HTTPGet performs a simple HTTP GET request and returns the response body.
+pub fn HTTPGet(host: string, path: string, port: int) -> (HTTPResponse, errors.Error) {
+    conn, err := Connect(host, port)
+    if err.message != "" {
+        return HTTPResponse{status: 0, body: ""}, err
+    }
+    // Build the HTTP/1.1 request line and required headers.
+    request := str.Concat(str.Concat("GET ", path), " HTTP/1.1\r\nHost: ")
+    request = str.Concat(request, host)
+    request = str.Concat(request, "\r\nConnection: close\r\n\r\n")
+    conn.Send(request)
+
+    // Read the full response, growing the buffer up to a 10 MB cap.
+    buf := libc.malloc(8192)
+    bufCap := 8192
+    total := 0
+    maxResponseSize := 10485760 // 10 MB cap
+    for {
+        if total + 4096 > bufCap {
+            // Stop reading once we hit the maximum response size.
+            if bufCap >= maxResponseSize {
+                break
+            }
+            bufCap = bufCap * 2
+            if bufCap > maxResponseSize {
+                bufCap = maxResponseSize
+            }
+            buf = libc.realloc(buf, bufCap)
+        }
+        n := conn.Read(string(int64(buf) + int64(total)), 4096)
+        if n <= 0 {
+            break
+        }
+        total = total + n
+    }
+    conn.Close()
+
+    buf[total] = 0
+    // Very simple parse: look for double CRLF to find body start
+    bodyStart := 0
+    for i := 0; i < total - 3; i = i + 1 {
+        if buf[i] == 13 && buf[i+1] == 10 && buf[i+2] == 13 && buf[i+3] == 10 {
+            bodyStart = i + 4
+            break
+        }
+    }
+    body := str.Substr(buf, bodyStart, total - bodyStart)
+    libc.free(buf)
+    return HTTPResponse{status: 200, body: body}, errors.New("")
+}
+
+// HTTPPost performs a simple HTTP POST request and returns the response body.
+pub fn HTTPPost(host: string, path: string, bodyData: string, port: int) -> (HTTPResponse, errors.Error) {
+    conn, err := Connect(host, port)
+    if err.message != "" {
+        return HTTPResponse{status: 0, body: ""}, err
+    }
+    // Build the HTTP/1.1 request line, Content-Length header, and body.
+    request := str.Concat(str.Concat("POST ", path), " HTTP/1.1\r\nHost: ")
+    request = str.Concat(request, host)
+    request = str.Concat(request, "\r\nContent-Length: ")
+    bodyLenStr := fmt.Itoa(str.Len(bodyData))
+    request = str.Concat(request, bodyLenStr)
+    libc.free(bodyLenStr)
+    request = str.Concat(request, "\r\nConnection: close\r\n\r\n")
+    request = str.Concat(request, bodyData)
+    conn.Send(request)
+
+    // Read the full response, growing the buffer up to a 10 MB cap.
+    buf := libc.malloc(8192)
+    bufCap := 8192
+    total := 0
+    maxResponseSize := 10485760 // 10 MB cap
+    for {
+        if total + 4096 > bufCap {
+            if bufCap >= maxResponseSize {
+                break
+            }
+            bufCap = bufCap * 2
+            if bufCap > maxResponseSize {
+                bufCap = maxResponseSize
+            }
+            buf = libc.realloc(buf, bufCap)
+        }
+        n := conn.Read(string(int64(buf) + int64(total)), 4096)
+        if n <= 0 {
+            break
+        }
+        total = total + n
+    }
+    conn.Close()
+    buf[total] = 0
+    // For POST responses we return the entire buffer (headers + body).
+    postBody := str.Substr(buf, 0, total)
+    libc.free(buf)
+    return HTTPResponse{status: 200, body: postBody}, errors.New("")
+}

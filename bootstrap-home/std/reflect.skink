@@ -1,0 +1,217 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/reflect.skink
+// Purpose: Provides runtime type introspection and value inspection
+//          utilities, including field enumeration and typed get/set
+//          operations on struct fields by byte offset.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module reflect
+
+import "std/str"
+
+// Field describes a single field in a struct type, including its name,
+// type name, and byte offset within the struct layout.
+pub struct Field {
+    name: string
+    type_name: string
+    offset: int
+}
+
+// Type describes a runtime type, including its name, size in bytes,
+// and (for struct types) the list of named fields.
+pub struct Type {
+    name: string
+    size: int
+    numFields: int
+    fields: []Field
+}
+
+// TypeOf returns a reflect.Type describing the type of val. The Skink
+// compiler replaces the body of this generic function at each call site
+// with compile-time type metadata (name, size, and a fully populated
+// fields slice for struct types), so the returned Type provides real
+// field enumeration without a runtime type registry.
+pub fn TypeOf<T>(val: T) -> Type {
+    var fields []Field
+    return Type{
+        name: "unknown",
+        size: sizeof(T),
+        numFields: 0,
+        fields: fields
+    }
+}
+
+// TypeName returns the name of the type described by t. This is the
+// string form of the type produced by TypeOf, e.g. "TestStruct".
+pub fn TypeName(t: Type) -> string {
+    return t.name
+}
+
+// FieldCount returns the number of named fields in the struct type
+// described by t. Returns 0 for non-struct (primitive) types.
+pub fn FieldCount(t: Type) -> int {
+    return t.numFields
+}
+
+// FieldName returns the name of the field at index in the struct type
+// described by t. Indexing is zero-based. Returns an empty string when
+// index is out of range.
+pub fn FieldName(t: Type, index: int) -> string {
+    if index < 0 || index >= t.numFields {
+        return ""
+    }
+    f := t.fields[index]
+    return f.name
+}
+
+// FieldType returns the type name of the field named fieldName in the
+// struct type described by t. Returns an empty string when no field
+// with the given name exists.
+pub fn FieldType(t: Type, fieldName: string) -> string {
+    for i := 0; i < t.numFields; i = i + 1 {
+        f := t.fields[i]
+        if str.Equal(f.name, fieldName) {
+            return f.type_name
+        }
+    }
+    return ""
+}
+
+// FieldByIndex returns the full Field descriptor (name, type_name, and
+// byte offset) for the field at index in the struct type described by t.
+// The returned Field has offset -1 when index is out of range.
+pub fn FieldByIndex(t: Type, index: int) -> Field {
+    if index < 0 || index >= t.numFields {
+        return Field{name: "", type_name: "", offset: -1}
+    }
+    return t.fields[index]
+}
+
+// FieldByName returns the full Field descriptor for the field named
+// fieldName in the struct type described by t. The returned Field has
+// offset -1 when no such field exists.
+pub fn FieldByName(t: Type, fieldName: string) -> Field {
+    for i := 0; i < t.numFields; i = i + 1 {
+        f := t.fields[i]
+        if str.Equal(f.name, fieldName) {
+            return f
+        }
+    }
+    return Field{name: "", type_name: "", offset: -1}
+}
+
+// GetBool reads a bool field from the struct at structPtr using the
+// byte offset stored in f.
+pub fn GetBool(structPtr: int64, f: Field) -> bool {
+    return reflect_get_bool(structPtr, f.offset)
+}
+
+// SetBool writes a bool value to the field at the byte offset stored in f
+// on the struct at structPtr.
+pub fn SetBool(structPtr: int64, f: Field, val: bool) {
+    reflect_set_bool(structPtr, f.offset, val)
+}
+
+// GetInt reads an int field from the struct at structPtr using the
+// byte offset stored in f.
+pub fn GetInt(structPtr: int64, f: Field) -> int {
+    return reflect_get_int(structPtr, f.offset)
+}
+
+// SetInt writes an int value to the field at the byte offset stored in f
+// on the struct at structPtr.
+pub fn SetInt(structPtr: int64, f: Field, val: int) {
+    reflect_set_int(structPtr, f.offset, val)
+}
+
+// GetInt64 reads an int64 field from the struct at structPtr using the
+// byte offset stored in f.
+pub fn GetInt64(structPtr: int64, f: Field) -> int64 {
+    return reflect_get_int64(structPtr, f.offset)
+}
+
+// SetInt64 writes an int64 value to the field at the byte offset stored
+// in f on the struct at structPtr.
+pub fn SetInt64(structPtr: int64, f: Field, val: int64) {
+    reflect_set_int64(structPtr, f.offset, val)
+}
+
+// GetString reads a string field from the struct at structPtr using the
+// byte offset stored in f.
+pub fn GetString(structPtr: int64, f: Field) -> string {
+    return reflect_get_string(structPtr, f.offset)
+}
+
+// SetString writes a string value to the field at the byte offset stored
+// in f on the struct at structPtr.
+pub fn SetString(structPtr: int64, f: Field, val: string) {
+    reflect_set_string(structPtr, f.offset, val)
+}
+
+// GetFloat reads a float field from the struct at structPtr using the
+// byte offset stored in f.
+pub fn GetFloat(structPtr: int64, f: Field) -> float {
+    return reflect_get_float(structPtr, f.offset)
+}
+
+// SetFloat writes a float value to the field at the byte offset stored
+// in f on the struct at structPtr.
+pub fn SetFloat(structPtr: int64, f: Field, val: float) {
+    reflect_set_float(structPtr, f.offset, val)
+}
+
+// GetPtr reads a pointer field (stored as int64) from the struct at
+// structPtr using the byte offset stored in f.
+pub fn GetPtr(structPtr: int64, f: Field) -> int64 {
+    return reflect_get_int64(structPtr, f.offset)
+}
+
+// SetPtr writes a pointer value (as int64) to the field at the byte
+// offset stored in f on the struct at structPtr.
+pub fn SetPtr(structPtr: int64, f: Field, val: int64) {
+    reflect_set_int64(structPtr, f.offset, val)
+}
+
+// Hash computes a hash of the given value string and its type name,
+// used for hash map keying of erased (i8*) values.
+pub fn Hash(val: string, typeName: string) -> int {
+    return reflect_hash(val, typeName)
+}
+
+// Equals compares two erased values based on their type name.
+// For strings, it uses strcmp; for integers, it uses pointer equality
+// (since inttoptr values are compared as pointers).
+pub fn Equals(a: string, b: string, typeName: string) -> bool {
+    return reflect_equals(a, b, typeName)
+}
+
+extern fn reflect_get_bool(addr: int64, offset: int) -> bool
+extern fn reflect_set_bool(addr: int64, offset: int, val: bool)
+extern fn reflect_get_int(addr: int64, offset: int) -> int
+extern fn reflect_set_int(addr: int64, offset: int, val: int)
+extern fn reflect_get_int64(addr: int64, offset: int) -> int64
+extern fn reflect_set_int64(addr: int64, offset: int, val: int64)
+extern fn reflect_get_string(addr: int64, offset: int) -> string
+extern fn reflect_set_string(addr: int64, offset: int, val: string)
+extern fn reflect_get_float(addr: int64, offset: int) -> float
+extern fn reflect_set_float(addr: int64, offset: int, val: float)
+extern fn reflect_hash(val: string, typeName: string) -> int
+extern fn reflect_equals(a: string, b: string, typeName: string) -> bool

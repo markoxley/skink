@@ -1,0 +1,6 @@
+// expect: fixed-size arrays
+module main
+fn main() -> int {
+    var a [3]int
+    return 0
+}

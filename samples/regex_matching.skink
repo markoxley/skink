@@ -1,0 +1,103 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/regex_matching.skink
+// Purpose: Demonstrates regular expression compilation, matching, finding,
+//          and replacement.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/regex"
+import "std/io"
+import "std/strconv"
+import "std/fmt"
+
+pub fn main() {
+    io.PrintLine("=== Regex Matching Demo ===")
+    io.PrintLine("")
+
+    // --- Basic matching ---
+    io.PrintLine("--- Basic Matching ---")
+    pattern := `\d+`
+    text := "There are 42 cats and 7 dogs"
+
+    matched := regex.MatchString(pattern, text)
+    io.PrintLine("Pattern: " + pattern)
+    io.PrintLine("Text: " + text)
+    io.PrintLine("Contains match: " + fmt.Btoa(matched))
+    io.PrintLine("")
+
+    // --- Finding all matches ---
+    io.PrintLine("--- Finding All Matches ---")
+    matches := regex.FindAll(pattern, text)
+    io.PrintLine("Found " + strconv.Itoa(len(matches)) + " matches:")
+    for i := 0; i < len(matches); i = i + 1 {
+        m := matches[i]
+        io.PrintLine("  Match: '" + m.Text + "' at [" + strconv.Itoa(m.Start) + ", " + strconv.Itoa(m.End) + ")")
+    }
+    io.PrintLine("")
+
+    // --- Replace all matches ---
+    io.PrintLine("--- Replace All ---")
+    replaced := regex.ReplaceAll(pattern, text, "N")
+    io.PrintLine("Original: " + text)
+    io.PrintLine("Replaced: " + replaced)
+    io.PrintLine("")
+
+    // --- Email pattern ---
+    io.PrintLine("--- Email Extraction ---")
+    emailText := "Contact alice@example.com or bob@work.org for details"
+    emailPattern := `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`
+    emails := regex.FindAll(emailPattern, emailText)
+    io.PrintLine("Text: " + emailText)
+    io.PrintLine("Emails found: " + strconv.Itoa(len(emails)))
+    for i := 0; i < len(emails); i = i + 1 {
+        io.PrintLine("  " + emails[i].Text)
+    }
+    io.PrintLine("")
+
+    // --- Word matching ---
+    io.PrintLine("--- Word Matching ---")
+    wordPattern := `\b\w{4}\b`
+    sentence := "The quick brown fox jumps over lazy dogs"
+    words := regex.FindAll(wordPattern, sentence)
+    io.PrintLine("Sentence: " + sentence)
+    io.PrintLine("4-letter words:")
+    for i := 0; i < len(words); i = i + 1 {
+        io.PrintLine("  " + words[i].Text)
+    }
+    io.PrintLine("")
+
+    // --- Using compiled regex ---
+    io.PrintLine("--- Compiled Regex ---")
+    re, compileErr := regex.Compile(`[A-Z][a-z]+`)
+    if compileErr.message != "" {
+        io.PrintErrorLine("Compile error: " + compileErr.message)
+        return
+    }
+    sample := "Alice and Bob went to See Carol"
+    io.PrintLine("Text: " + sample)
+    io.PrintLine("Pattern: capitalized words")
+    caps := re.FindAll(sample)
+    for i := 0; i < len(caps); i = i + 1 {
+        io.PrintLine("  " + caps[i].Text)
+    }
+    re.Free()
+}

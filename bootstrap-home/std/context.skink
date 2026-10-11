@@ -1,0 +1,141 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/context.skink
+// Purpose: Provides request-scoped cancellation signals and value
+//          propagation through a hierarchical context tree.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module context
+
+import "std/time"
+
+// Context carries a cancellation signal and optional key-value pairs
+// through a chain of parent contexts.
+pub struct Context {
+    done:   bool
+    parent: *Context
+    key:    string
+    val:    string
+
+    // Done reports whether the context has been cancelled.
+    pub fn Done(self: Context) -> bool {
+        if self.done {
+            return true
+        }
+        // Walk up the parent chain to check for cancellation
+        if self.parent != nil {
+            return self.parent.Done()
+        }
+        return false
+    }
+
+    // Cancel marks the context as cancelled.
+    pub fn Cancel(self: *Context) {
+        self.done = true
+    }
+
+    // Value returns the value associated with this context for key, or "" if none.
+    pub fn Value(self: Context, key: string) -> string {
+        if self.key == key {
+            return self.val
+        }
+        // Recursively search the parent chain for the key
+        if self.parent != nil {
+            return self.parent.Value(key)
+        }
+        return ""
+    }
+}
+
+// Background returns a non-nil, never-cancelled root context.
+pub fn Background() -> Context {
+    return Context{
+        done:   false,
+        parent: nil,
+        key:    "",
+        val:    ""
+    }
+}
+
+// WithCancel returns a new child context linked to the parent.
+pub fn WithCancel(parent: *Context) -> Context {
+    return Context{
+        done:   false,
+        parent: parent,
+        key:    "",
+        val:    ""
+    }
+}
+
+// WithValue returns a copy of parent in which the value associated with key is val.
+pub fn WithValue(parent: *Context, key: string, val: string) -> Context {
+    return Context{
+        done:   false,
+        parent: parent,
+        key:    key,
+        val:    val
+    }
+}
+
+// DeadlineContext extends Context with a deadline that auto-cancels
+// when the current time exceeds the specified Unix-nanosecond timestamp.
+pub struct DeadlineContext {
+    ctx:      Context
+    deadline: int64
+
+    // Done reports whether the context has been cancelled, either
+    // explicitly or because the deadline has been exceeded.
+    pub fn Done(self: DeadlineContext) -> bool {
+        if self.ctx.Done() {
+            return true
+        }
+        // Check whether the deadline has been exceeded
+        if self.deadline > int64(0) && time.NowUnixNano() >= self.deadline {
+            return true
+        }
+        return false
+    }
+
+    // Cancel marks the underlying context as cancelled.
+    pub fn Cancel(self: *DeadlineContext) {
+        self.ctx.Cancel()
+    }
+
+    // Deadline returns the Unix-nanosecond deadline of this context.
+    pub fn Deadline(self: DeadlineContext) -> int64 {
+        return self.deadline
+    }
+}
+
+// WithDeadline returns a context that expires at the given Unix-nanosecond deadline.
+pub fn WithDeadline(parent: *Context, deadline: int64) -> DeadlineContext {
+    ctx := Context{
+        done:   false,
+        parent: parent,
+        key:    "",
+        val:    ""
+    }
+    return DeadlineContext{ctx: ctx, deadline: deadline}
+}
+
+// WithTimeout returns WithDeadline(parent, NowUnixNano() + timeout).
+pub fn WithTimeout(parent: *Context, timeout: time.Duration) -> DeadlineContext {
+    return WithDeadline(parent, time.NowUnixNano() + timeout.Nanoseconds())
+}

@@ -1,0 +1,124 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/waitgroup.skink
+// Purpose: WaitGroup synchronization primitive for coordinating concurrent
+//          goroutines, built on POSIX mutex and condition variable C runtime.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+module waitgroup
+
+// C runtime extern declarations for mutex and condition variable operations.
+extern fn Skink_mutex_alloc() -> int64
+extern fn Skink_mutex_lock(mu: int64)
+extern fn Skink_mutex_unlock(mu: int64)
+extern fn Skink_mutex_free(mu: int64)
+extern fn Skink_cond_alloc() -> int64
+extern fn Skink_cond_wait(cond: int64, mu: int64)
+extern fn Skink_cond_signal(cond: int64)
+extern fn Skink_cond_broadcast(cond: int64)
+extern fn Skink_cond_free(cond: int64)
+extern fn Skink_mutex_ensure(handle: *int64) -> int64
+extern fn Skink_cond_ensure(handle: *int64) -> int64
+
+// WaitGroup blocks a caller until a collection of concurrent operations
+// have all completed. It uses a counter that is incremented by Add and
+// decremented by Done; Wait blocks until the counter reaches zero.
+pub struct WaitGroup {
+    count: int
+    muHandle: int64
+    condHandle: int64
+}
+
+// New creates and returns a pointer to a new WaitGroup with a zero counter.
+// The underlying mutex and condition variable are allocated on the heap.
+pub fn New() -> *WaitGroup {
+    return &WaitGroup{
+        count: 0,
+        muHandle: Skink_mutex_alloc(),
+        condHandle: Skink_cond_alloc()
+    }
+}
+
+// ensureMu / ensureCond lazily allocate the underlying pthread handles on
+// first use so a zero-valued `var wg WaitGroup` is usable directly, like
+// Go's sync.WaitGroup and Skink's sync.Mutex (comp_error.md #82).
+fn ensureMu(self: *WaitGroup) -> int64 {
+    self.muHandle = Skink_mutex_ensure(&self.muHandle)
+    return self.muHandle
+}
+
+fn ensureCond(self: *WaitGroup) -> int64 {
+    self.condHandle = Skink_cond_ensure(&self.condHandle)
+    return self.condHandle
+}
+
+// Add atomically increments (or decrements, if v is negative) the WaitGroup
+// counter by v. A positive v is typically called before spawning goroutines.
+pub fn Add(self: *WaitGroup, v: int) {
+    mu := self.ensureMu()
+    Skink_mutex_lock(mu)
+    self.count = self.count + v
+    Skink_mutex_unlock(mu)
+}
+
+// Done atomically decrements the WaitGroup counter by one. When the counter
+// reaches zero, all blocked Wait callers are woken via a broadcast.
+pub fn Done(self: *WaitGroup) {
+    mu := self.ensureMu()
+    Skink_mutex_lock(mu)
+    // Guard against underflow: ignore Done when count is already zero.
+    if self.count <= 0 {
+        Skink_mutex_unlock(mu)
+        return
+    }
+    self.count = self.count - 1
+    // Wake all waiters when the counter hits zero.
+    if self.count == 0 {
+        Skink_cond_broadcast(self.ensureCond())
+    }
+    Skink_mutex_unlock(mu)
+}
+
+// Wait blocks the calling goroutine until the WaitGroup counter is zero.
+// It releases the mutex while waiting on the condition variable, then
+// re-acquires it before checking the counter again.
+pub fn Wait(self: *WaitGroup) {
+    mu := self.ensureMu()
+    cv := self.ensureCond()
+    Skink_mutex_lock(mu)
+    // Loop-wait: cond_wait may return spuriously, so re-check the counter.
+    for self.count > 0 {
+        Skink_cond_wait(cv, mu)
+    }
+    Skink_mutex_unlock(mu)
+}
+
+// Free releases the underlying mutex and condition variable. The WaitGroup
+// must not be used after Free is called.
+pub fn Free(self: *WaitGroup) {
+    // Guard against double-free: only destroy if handles are non-null.
+    if self.condHandle != int64(0) {
+        Skink_cond_free(self.condHandle)
+        self.condHandle = int64(0)
+    }
+    if self.muHandle != int64(0) {
+        Skink_mutex_free(self.muHandle)
+        self.muHandle = int64(0)
+    }
+}

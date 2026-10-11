@@ -1,0 +1,173 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/gpio.skink
+// Purpose: Skink module for gpio.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module gpio
+
+import "std/errors"
+
+// Pin represents a single GPIO pin identified by its BCM number.
+//
+// The struct fields mirror the state a kernel driver would track:
+//   - number: the BCM GPIO number passed to PinFactory.
+//   - mode:   the current pin direction (INPUT or OUTPUT).
+//   - value:  the last level written to (or read from) the pin.
+pub struct Pin {
+    number: int
+    mode: int
+    value: int
+
+    // SetOutput configures the pin as a digital output.
+    //
+    // Backend behavior:
+    //   - sysfs:    write "out" to /sys/class/gpio/gpioN/direction.
+    //   - wiringPi: pinMode(self.number, OUTPUT).
+    pub fn SetOutput(self: *Pin) {
+        self.mode = OUTPUT
+        // Real implementation: wiringPi pinMode(self.number, OUTPUT)
+        // or sysfs: write "out" to /sys/class/gpio/gpioN/direction
+    }
+
+    // SetInput configures the pin as a digital input.
+    //
+    // Backend behavior:
+    //   - sysfs:    write "in" to /sys/class/gpio/gpioN/direction.
+    //   - wiringPi: pinMode(self.number, INPUT).
+    pub fn SetInput(self: *Pin) {
+        self.mode = INPUT
+        // Real implementation: wiringPi pinMode(self.number, INPUT)
+        // or sysfs: write "in" to /sys/class/gpio/gpioN/direction
+    }
+
+    // Write drives the pin to the given level (LOW or HIGH).
+    //
+    // Backend behavior:
+    //   - sysfs:    write "0"/"1" to /sys/class/gpio/gpioN/value.
+    //   - wiringPi: digitalWrite(self.number, val).
+    //
+    // In the stub build the value is recorded so a subsequent Read returns it.
+    pub fn Write(self: *Pin, val: int) {
+        self.value = val
+        // Real implementation: wiringPi digitalWrite(self.number, val)
+        // or sysfs: write "0"/"1" to /sys/class/gpio/gpioN/value
+    }
+
+    // Read returns the current level of the pin (LOW or HIGH).
+    //
+    // Backend behavior:
+    //   - sysfs:    read /sys/class/gpio/gpioN/value.
+    //   - wiringPi: digitalRead(self.number).
+    //
+    // In the stub build it returns the last value written (or 0 for a fresh
+    // input pin), which lets tests verify write/read round-trips without
+    // hardware.
+    pub fn Read(self: Pin) -> int {
+        // Real implementation: return wiringPi digitalRead(self.number)
+        // or sysfs: read /sys/class/gpio/gpioN/value
+        return self.value
+    }
+
+    // PWM sets the duty cycle for hardware pulse-width modulation on the pin.
+    //
+    // Backend behavior:
+    //   - wiringPi: pwmWrite(self.number, duty) (range defaults to 0..1023).
+    //   - pigpio:   hardware_PWM(self.number, freq, duty*10000).
+    //
+    // sysfs does not support PWM; a real backend must be selected. The stub
+    // records nothing and is a no-op so callers can compile on any host.
+    pub fn PWM(self: *Pin, duty: int) {
+        // Real implementation: wiringPi pwmWrite(self.number, duty)
+        // or pigpio: hardware_PWM(self.number, freq, duty*10000)
+    }
+
+    // Number returns the BCM GPIO number of this pin.
+    pub fn Number(self: Pin) -> int {
+        return self.number
+    }
+
+    // Mode returns the current pin direction (INPUT or OUTPUT).
+    pub fn Mode(self: Pin) -> int {
+        return self.mode
+    }
+
+    // SetMode sets the pin direction: INPUT, OUTPUT, or PWM_MODE.
+    // Convenience method matching the book's pin.SetMode(gpio.OUTPUT).
+    pub fn SetMode(self: *Pin, mode: int) {
+        if mode == INPUT {
+            self.SetInput()
+        } else {
+            self.SetOutput()
+        }
+    }
+
+    // SetPull configures the internal pull resistor: 0=off, 1=up, 2=down.
+    // The stub backend records nothing; a real backend calls the
+    // corresponding pull-up/pull-down API.
+    pub fn SetPull(self: *Pin, pull: int) {
+        // no-op on the stub backend
+    }
+}
+
+// Setup initializes the GPIO subsystem.
+//
+// Backend behavior:
+//   - wiringPi: wiringPiSetup() (or wiringPiSetupGpio() for BCM numbering).
+//   - sysfs:    no global setup is required; per-pin export happens on demand.
+//   - pigpio:   gpioInitialise().
+//
+// The stub build returns a nil error (empty message) so callers can run on any
+// host. A real backend should return a non-empty error message on failure.
+pub fn Setup() -> errors.Error {
+    // Real implementation: wiringPiSetup() / wiringPiSetupGpio()
+    // or pigpio: gpioInitialise()
+    return errors.New("")
+}
+
+// PinFactory creates a Pin by its BCM number.
+//
+// The returned pin starts in INPUT mode with level LOW. On a sysfs backend the
+// pin would be exported via /sys/class/gpio/export at this point; on wiringPi
+// no allocation is needed until SetInput/SetOutput is called.
+pub fn PinFactory(bcmNumber: int) -> Pin {
+    return Pin{number: bcmNumber, mode: INPUT, value: LOW}
+}
+
+// Pin direction constants used by SetInput/SetOutput and Mode.
+pub const INPUT = 0
+pub const OUTPUT = 1
+pub const PWM_MODE = 2
+
+// Cleanup releases GPIO resources. The stub backend is a no-op; on
+// wiringPi/pigpio it unexports pins and releases the backend.
+pub fn Cleanup() {
+    // no-op on the stub backend
+}
+
+// Pin level constants used by Write/Read.
+pub const LOW = 0
+pub const HIGH = 1
+
+// Pull resistor constants for future SetPull support.
+// On wiringPi these map to PUD_OFF/PUD_DOWN/PUD_UP via pullUpDnControl.
+pub const PULL_OFF = 0
+pub const PULL_DOWN = 1
+pub const PULL_UP = 2

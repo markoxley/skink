@@ -1,0 +1,209 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/compress.skink
+// Purpose: Data compression and decompression utilities for common formats,
+//          including gzip wrapping and raw DEFLATE via external C bindings.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+module compress
+
+import "std/errors"
+import "std/libc"
+import "std/str"
+
+// External C functions for DEFLATE compression and CRC32 checksum.
+extern fn Skink_compress_bound(srcLen: int) -> int
+extern fn Skink_compress(src: string, srcLen: int, dest: string, destCap: int) -> int
+extern fn Skink_uncompress(src: string, srcLen: int, dest: string, destCap: int) -> int
+extern fn Skink_crc32(data: string, len: int) -> int
+
+// writeLE32 writes a 32-bit little-endian integer into buf at offset.
+fn writeLE32(buf: string, offset: int, val: int) {
+    buf[offset] = val & 255
+    buf[offset + 1] = (val >> 8) & 255
+    buf[offset + 2] = (val >> 16) & 255
+    buf[offset + 3] = (val >> 24) & 255
+}
+
+// GzipWriter wraps a writer and applies gzip compression.
+pub struct GzipWriter {
+    level: int
+    buf: string
+    bufLen: int
+    bufCap: int
+    closed: bool
+
+    // Write appends data to the internal buffer, growing it as needed.
+    // Returns an error if the writer has already been closed.
+    pub fn Write(self: *GzipWriter, data: string, len: int) -> (int, errors.Error) {
+        if self.closed {
+            return 0, errors.New("write to closed GzipWriter")
+        }
+        // Grow buffer until it can hold the new data
+        for self.bufLen + len > self.bufCap {
+            self.grow()
+        }
+        // Copy incoming bytes into the buffer
+        for i := 0; i < len; i = i + 1 {
+            self.buf[self.bufLen + i] = data[i]
+        }
+        self.bufLen = self.bufLen + len
+        return len, errors.New("")
+    }
+
+    // Close finalizes the gzip stream by compressing the buffered data
+    // and prepending a gzip header (with CRC32 and original size trailer).
+    // Returns the compressed gzip data or an error.
+    pub fn Close(self: *GzipWriter) -> (string, errors.Error) {
+        if self.closed {
+            return "", errors.New("GzipWriter already closed")
+        }
+        self.closed = true
+        // Allocate output buffer with worst-case bound
+        bound := Skink_compress_bound(self.bufLen)
+        compressed := libc.calloc(bound, 1)
+        compressedLen := Skink_compress(self.buf, self.bufLen, compressed, bound)
+        if compressedLen < 0 {
+            libc.free(compressed)
+            libc.free(self.buf)
+            return "", errors.New("compression failed")
+        }
+        // Compute CRC32 of the original uncompressed data
+        crc := Skink_crc32(self.buf, self.bufLen)
+        // gzip format: 10-byte header + compressed data + 8-byte trailer
+        outLen := 10 + compressedLen + 8
+        out := libc.calloc(outLen + 1, 1)
+        // gzip header: magic, deflate method, no flags, no timestamps
+        out[0] = 31   // 0x1f
+        out[1] = 139  // 0x8b
+        out[2] = 8    // deflate
+        out[3] = 0    // flags
+        for i := 4; i < 10; i = i + 1 {
+            out[i] = 0
+        }
+        // Copy compressed payload after the header
+        libc.memcpy(string(int64(out) + int64(10)), compressed, compressedLen)
+        // Trailer: CRC32 (4 bytes LE) + original size (4 bytes LE)
+        writeLE32(out, 10 + compressedLen, crc)
+        writeLE32(out, 10 + compressedLen + 4, self.bufLen)
+        libc.free(compressed)
+        libc.free(self.buf)
+        return out, errors.New("")
+    }
+
+    fn grow(self: *GzipWriter) {
+        // Double capacity, with a minimum of 256 bytes
+        newCap := self.bufCap * 2
+        if newCap < 256 {
+            newCap = 256
+        }
+        self.buf = libc.realloc(self.buf, newCap)
+        self.bufCap = newCap
+    }
+}
+
+// Deflater performs raw DEFLATE compression.
+pub struct Deflater {
+    windowBits: int
+    memLevel: int
+
+    // Compress returns the compressed data and its byte length.
+    pub fn Compress(self: *Deflater, data: string, len: int) -> (string, int) {
+        bound := Skink_compress_bound(len)
+        out := libc.calloc(bound + 1, 1)
+        compressedLen := Skink_compress(data, len, out, bound)
+        if compressedLen < 0 {
+            // Compression failed; clean up and return empty
+            libc.free(out)
+            return "", 0
+        }
+        return out, compressedLen
+    }
+}
+
+// Inflater performs raw DEFLATE decompression.
+pub struct Inflater {
+    // Decompress inflates data of length dataLen into a buffer of capacity outCap.
+    pub fn Decompress(self: Inflater, data: string, dataLen: int, outCap: int) -> string {
+        out := libc.calloc(outCap + 1, 1)
+        rc := Skink_uncompress(data, dataLen, out, outCap)
+        if rc < 0 {
+            // Decompression failed; clean up and return empty
+            libc.free(out)
+            return ""
+        }
+        return out
+    }
+}
+
+// NewGzipWriter creates a GzipWriter with the given compression level
+// and an initial 256-byte buffer.
+pub fn NewGzipWriter(level: int) -> GzipWriter {
+    return GzipWriter{
+        level: level,
+        buf: libc.malloc(256),
+        bufLen: 0,
+        bufCap: 256,
+        closed: false
+    }
+}
+
+// Compress is a one-shot convenience wrapper: deflate `data` and return
+// the compressed bytes as a string prefixed with an 8-byte header holding
+// the original and compressed sizes (both little-endian u32), so
+// Decompress can recover lengths that strlen() cannot report on binary
+// data. Matches the book's compress.Compress().
+pub fn Compress(data: string) -> (string, errors.Error) {
+    n := str.Len(data)
+    bound := Skink_compress_bound(n)
+    out := libc.calloc(bound + 9, 1)
+    dest := string(int64(out) + int64(8))
+    clen := Skink_compress(data, n, dest, bound)
+    if clen < 0 {
+        libc.free(out)
+        return "", errors.New("compression failed")
+    }
+    writeLE32(out, 0, n)
+    writeLE32(out, 4, clen)
+    return out, errors.New("")
+}
+
+// Decompress reverses Compress: reads the 8-byte size header and inflates
+// the zlib payload back to the original bytes.
+pub fn Decompress(data: string) -> (string, errors.Error) {
+    origSize := int(data[0]) | (int(data[1]) << 8) | (int(data[2]) << 16) | (int(data[3]) << 24)
+    clen := int(data[4]) | (int(data[5]) << 8) | (int(data[6]) << 16) | (int(data[7]) << 24)
+    if origSize < 0 || clen <= 0 || clen > 268435456 {
+        return "", errors.New("not a compress.Compress buffer")
+    }
+    // Extract the payload bytes (indexing is byte-accurate even when the
+    // buffer contains NULs, unlike str.Len/Substr).
+    payload := libc.malloc(clen + 1)
+    for i := 0; i < clen; i = i + 1 {
+        payload[i] = data[i + 8]
+    }
+    out := libc.calloc(origSize + 1, 1)
+    rc := Skink_uncompress(payload, clen, out, origSize)
+    libc.free(payload)
+    if rc < 0 {
+        libc.free(out)
+        return "", errors.New("decompression failed")
+    }
+    return out, errors.New("")
+}

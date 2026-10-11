@@ -1,0 +1,55 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/len_chan_test.skink
+// Purpose: Regression tests for len(chan) (B13).
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module len_chan_test
+
+import "testing"
+
+// TestLenChan verifies len() on buffered channel reports queue depth.
+pub fn TestLenChan() {
+    ch := make(chan<int>, 4)
+    testing.AssertEqualInt(0, len(ch), "empty channel len 0")
+    ch <- 1
+    ch <- 2
+    testing.AssertEqualInt(2, len(ch), "two buffered elements")
+    _ = <-ch
+    testing.AssertEqualInt(1, len(ch), "one after recv")
+}
+
+// chanHolder exercises len() on a channel stored in a struct field.
+pub struct chanHolder {
+    ch: chan<int>
+}
+
+// TestLenChanField verifies len() routes through Skink_chan_len when the
+// channel is reached via a field expression (regression: field receivers
+// previously read a slice header and returned garbage — issue #94).
+pub fn TestLenChanField() {
+    h := chanHolder{ch: make(chan<int>, 4)}
+    testing.AssertEqualInt(0, len(h.ch), "empty field channel")
+    h.ch <- 7
+    h.ch <- 8
+    testing.AssertEqualInt(2, len(h.ch), "two buffered via field")
+    _ = <-h.ch
+    testing.AssertEqualInt(1, len(h.ch), "one after recv via field")
+}

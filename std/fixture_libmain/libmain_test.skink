@@ -1,0 +1,12 @@
+// libmain_test.skink — regression for comp_error.md #116: compiling a test
+// binary that imports a module containing `fn main` must not produce a
+// duplicate @_skink_main symbol.
+module libmain_test
+
+import "libmain"
+import "std/testing"
+
+pub fn TestLibMainNoCollision() {
+    testing.Reset()
+    testing.AssertEqualInt(42, libmain.Value(), "library fn call still works")
+}

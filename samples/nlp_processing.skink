@@ -1,0 +1,84 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/nlp_processing.skink
+// Purpose: Skink module for nlp processing.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/nlp"
+import "std/io"
+import "std/strconv"
+
+pub fn main() {
+    text := "The quick brown fox quickly jumps over the lazy dog. It is running fast!"
+
+    // Tokenization
+    io.PrintLine("=== Tokenization ===")
+    io.PrintLine("Input: " + text)
+    tokens := nlp.Tokenize(text)
+    io.PrintString("Tokens: ")
+    i := 0
+    for i < len(tokens) {
+        io.PrintString(tokens[i].Text())
+        if i < len(tokens) - 1 {
+            io.PrintString(" | ")
+        }
+        i = i + 1
+    }
+    io.PrintLine("")
+    io.PrintLine("Token count: " + strconv.Itoa(len(tokens)))
+    io.PrintLine("Word count:  " + strconv.Itoa(nlp.WordCount(text)))
+
+    // Sentence segmentation
+    io.PrintLine("")
+    io.PrintLine("=== Sentence Segmentation ===")
+    sentences := nlp.SentenceSegment(text)
+    i = 0
+    for i < len(sentences) {
+        io.PrintLine(strconv.Itoa(i + 1) + ". " + sentences[i])
+        i = i + 1
+    }
+
+    // Part-of-speech tagging
+    io.PrintLine("")
+    io.PrintLine("=== POS Tagging ===")
+    tagged := nlp.TagPOS(tokens)
+    i = 0
+    for i < len(tagged) {
+        io.PrintLine(tagged[i].Text() + " -> " + tagged[i].Tag())
+        i = i + 1
+    }
+
+    // Extract just the words
+    io.PrintLine("")
+    io.PrintLine("=== Extracted Words ===")
+    words := nlp.ExtractWords(text)
+    io.PrintString("Words: ")
+    i = 0
+    for i < len(words) {
+        io.PrintString(words[i])
+        if i < len(words) - 1 {
+            io.PrintString(", ")
+        }
+        i = i + 1
+    }
+    io.PrintLine("")
+}

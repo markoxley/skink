@@ -1,0 +1,1069 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/lexer.skink
+// Purpose: A Skink lexer written in Skink.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// A Skink lexer written in Skink.
+//
+// This is a proof-of-concept for self-hosting: it tokenizes Skink source
+// code using the same language features that a self-hosted compiler would
+// need (tagged unions, pattern matching, string manipulation, structs
+// with methods, error handling).
+//
+// The lexer is a straightforward port of the Go lexer in compiler/lexer/.
+// It supports identifiers, keywords, numeric literals (decimal, hex, binary,
+// octal), string literals, comments (line, block, doc), and all Skink
+// operators and punctuation.
+
+module lexer
+
+import "std/str"
+import "std/libc"
+
+// === Token Kinds ===
+//
+// Token kinds are integer constants. The Go version uses string-typed
+// constants, but int is more efficient and equally clear.
+
+    // Literals and special
+pub const T_ILLEGAL = 0
+pub const T_EOF = 1
+pub const T_NEWLINE = 2
+pub const T_IDENT = 3
+pub const T_INT = 4
+pub const T_FLOAT = 5
+pub const T_STRING = 6
+pub const T_BYTES = 7
+pub const T_COMMENT = 8
+pub const T_DOC = 9
+
+    // Operators and punctuation
+pub const T_ASSIGN = 10
+pub const T_COLON = 11
+pub const T_COLONASS = 12
+pub const T_COMMA = 13
+pub const T_SEMICOLON = 14
+pub const T_DOT = 15
+pub const T_DOTDOT = 16
+pub const T_ELLIPSIS = 17
+pub const T_ARROW = 18
+pub const T_LPAREN = 19
+pub const T_RPAREN = 20
+pub const T_LBRACE = 21
+pub const T_RBRACE = 22
+pub const T_LBRACKET = 23
+pub const T_RBRACKET = 24
+pub const T_LT = 25
+pub const T_GT = 26
+pub const T_LE = 27
+pub const T_SEND = 28
+pub const T_GE = 29
+pub const T_EQ = 30
+pub const T_NE = 31
+pub const T_PLUS = 32
+pub const T_MINUS = 33
+pub const T_SLASH = 34
+pub const T_STAR = 35
+pub const T_PERCENT = 36
+pub const T_AMPERSAND = 37
+pub const T_PIPE = 38
+pub const T_CARET = 39
+pub const T_TILDE = 40
+pub const T_BANG = 41
+pub const T_AND = 42
+pub const T_OR = 43
+pub const T_AT = 44
+pub const T_QUESTION = 45
+pub const T_DBLSTAR = 46
+pub const T_LSHIFT = 47
+pub const T_RSHIFT = 48
+pub const T_PLUSEQ = 49
+pub const T_MINUSEQ = 50
+pub const T_STAREQ = 51
+pub const T_SLASHEQ = 52
+pub const T_PERCEQ = 53
+pub const T_AMPEQ = 54
+pub const T_PIPEEQ = 55
+pub const T_CARETEQ = 56
+pub const T_LSHIFTEQ = 57
+pub const T_RSHIFTEQ = 58
+pub const T_FATARROW = 59
+
+    // Keywords
+pub const T_FN = 100
+pub const T_PUB = 101
+pub const T_CONST = 102
+pub const T_VAR = 103
+pub const T_TYPE = 104
+pub const T_STRUCT = 105
+pub const T_ENUM = 106
+pub const T_SERVICE = 107
+pub const T_RULESET = 108
+pub const T_IMPL = 109
+pub const T_RULE = 110
+pub const T_WHEN = 111
+pub const T_ACTION = 112
+pub const T_PRIORITY = 113
+pub const T_IF = 114
+pub const T_ELSE = 115
+pub const T_MATCH = 116
+pub const T_FOR = 117
+pub const T_IN = 118
+pub const T_RANGE = 119
+pub const T_WHILE = 120
+pub const T_UNTIL = 121
+pub const T_BREAK = 122
+pub const T_CONTINUE = 123
+pub const T_RETURN = 124
+pub const T_DEFER = 125
+pub const T_UNSAFE = 126
+pub const T_WITH = 127
+pub const T_ASYNC = 128
+pub const T_AWAIT = 129
+pub const T_SPAWN = 130
+pub const T_SELECT = 131
+pub const T_SWITCH = 132
+pub const T_TEMPLATE = 133
+pub const T_CASE = 134
+pub const T_DEFAULT = 135
+pub const T_COMPTIME = 136
+pub const T_EXTERN = 137
+pub const T_MODULE = 138
+pub const T_IMPORT = 139
+pub const T_AS = 140
+pub const T_TRUE = 141
+pub const T_FALSE = 142
+pub const T_NIL = 143
+pub const T_ERROR = 144
+pub const T_IOTA = 145
+pub const T_SIZEOF = 146
+pub const T_ALIGNOF = 147
+pub const T_MAP = 148
+pub const T_CHAN = 149
+pub const T_SET = 150
+pub const T_TENSOR = 151
+pub const T_VOID = 152
+pub const T_FROM = 153
+pub const T_WHERE = 154
+pub const T_ORDERBY = 155
+pub const T_ASCENDING = 156
+pub const T_DESCENDING = 157
+pub const T_GROUP = 158
+pub const T_BY = 159
+pub const T_JOIN = 160
+pub const T_INTO = 161
+
+    // Type keywords
+pub const T_INT8 = 170
+pub const T_INT16 = 171
+pub const T_INT32 = 172
+pub const T_INT64 = 173
+pub const T_UINT = 174
+pub const T_UINT8 = 175
+pub const T_UINT16 = 176
+pub const T_UINT32 = 177
+pub const T_UINT64 = 178
+pub const T_BOOL = 179
+pub const T_STRING_TYPE = 180
+pub const T_BYTES_TYPE = 181
+
+// Token represents a single lexical unit.
+struct Token {
+    kind: int       // token kind (T_* constant)
+    literal: string // raw text from source
+    line: int       // 1-based line number
+    col: int        // 1-based column number
+}
+
+// KindName returns a human-readable name for a token kind.
+// Useful for debugging and error messages.
+pub fn KindName(kind: int) -> string {
+    if kind == T_ILLEGAL { return "ILLEGAL" }
+    if kind == T_EOF { return "EOF" }
+    if kind == T_NEWLINE { return "NEWLINE" }
+    if kind == T_IDENT { return "IDENT" }
+    if kind == T_INT { return "INT" }
+    if kind == T_FLOAT { return "FLOAT" }
+    if kind == T_STRING { return "STRING" }
+    if kind == T_COMMENT { return "COMMENT" }
+    if kind == T_DOC { return "DOC" }
+    if kind == T_ASSIGN { return "=" }
+    if kind == T_EQ { return "==" }
+    if kind == T_FATARROW { return "=>" }
+    if kind == T_COLON { return ":" }
+    if kind == T_COLONASS { return ":=" }
+    if kind == T_COMMA { return "," }
+    if kind == T_SEMICOLON { return ";" }
+    if kind == T_DOT { return "." }
+    if kind == T_DOTDOT { return ".." }
+    if kind == T_ELLIPSIS { return "..." }
+    if kind == T_ARROW { return "->" }
+    if kind == T_LPAREN { return "(" }
+    if kind == T_RPAREN { return ")" }
+    if kind == T_LBRACE { return "{" }
+    if kind == T_RBRACE { return "}" }
+    if kind == T_LBRACKET { return "[" }
+    if kind == T_RBRACKET { return "]" }
+    if kind == T_LT { return "<" }
+    if kind == T_GT { return ">" }
+    if kind == T_LE { return "<=" }
+    if kind == T_SEND { return "<-" }
+    if kind == T_GE { return ">=" }
+    if kind == T_NE { return "!=" }
+    if kind == T_PLUS { return "+" }
+    if kind == T_MINUS { return "-" }
+    if kind == T_SLASH { return "/" }
+    if kind == T_STAR { return "*" }
+    if kind == T_PERCENT { return "%" }
+    if kind == T_AMPERSAND { return "&" }
+    if kind == T_PIPE { return "|" }
+    if kind == T_CARET { return "^" }
+    if kind == T_TILDE { return "~" }
+    if kind == T_BANG { return "!" }
+    if kind == T_AND { return "&&" }
+    if kind == T_OR { return "||" }
+    if kind == T_AT { return "@" }
+    if kind == T_QUESTION { return "?" }
+    if kind == T_DBLSTAR { return "**" }
+    if kind == T_LSHIFT { return "<<" }
+    if kind == T_RSHIFT { return ">>" }
+    if kind == T_PLUSEQ { return "+=" }
+    if kind == T_MINUSEQ { return "-=" }
+    if kind == T_STAREQ { return "*=" }
+    if kind == T_SLASHEQ { return "/=" }
+    if kind == T_PERCEQ { return "%=" }
+    if kind == T_AMPEQ { return "&=" }
+    if kind == T_PIPEEQ { return "|=" }
+    if kind == T_CARETEQ { return "^=" }
+    if kind == T_LSHIFTEQ { return "<<=" }
+    if kind == T_RSHIFTEQ { return ">>=" }
+    if kind == T_FN { return "fn" }
+    if kind == T_PUB { return "pub" }
+    if kind == T_CONST { return "const" }
+    if kind == T_VAR { return "var" }
+    if kind == T_STRUCT { return "struct" }
+    if kind == T_ENUM { return "enum" }
+    if kind == T_IF { return "if" }
+    if kind == T_ELSE { return "else" }
+    if kind == T_MATCH { return "match" }
+    if kind == T_FOR { return "for" }
+    if kind == T_WHILE { return "while" }
+    if kind == T_RETURN { return "return" }
+    if kind == T_BREAK { return "break" }
+    if kind == T_CONTINUE { return "continue" }
+    if kind == T_IMPORT { return "import" }
+    if kind == T_MODULE { return "module" }
+    if kind == T_TRUE { return "true" }
+    if kind == T_FALSE { return "false" }
+    if kind == T_NIL { return "nil" }
+    if kind == T_SPAWN { return "spawn" }
+    if kind == T_DEFER { return "defer" }
+    if kind == T_EXTERN { return "extern" }
+    if kind == T_TEMPLATE { return "template" }
+    if kind == T_TYPE { return "type" }
+    if kind == T_MAP { return "map" }
+    if kind == T_CHAN { return "chan" }
+    if kind == T_SET { return "set" }
+    if kind == T_VOID { return "void" }
+    if kind == T_ERROR { return "error" }
+    return "TOK"
+}
+
+// keywordKind returns the token kind for a keyword string, or T_IDENT if not a keyword.
+// Uses a series of string comparisons instead of a hash map because global
+// map initialization with make() is not yet supported by the codegen.
+// lookupKeyword classifies identifier strings as keyword token kinds.
+// Uses byte-level comparisons to avoid relying on string ==.
+// lookupKeyword classifies identifier strings as keyword token kinds.
+// Uses byte-level comparisons to avoid relying on string ==.
+fn lookupKeyword(ident: string) -> int {
+    n := str.Len(ident)
+    if n == 0 {
+        return T_IDENT
+    }
+    c0 := ident[0]
+    if n == 2 {
+        if c0 == 97 {
+            if str.Len(ident) == 2 && ident[0] == 97 && ident[1] == 115 { return T_AS }   // "as"
+        }
+        if c0 == 98 {
+            if str.Len(ident) == 2 && ident[0] == 98 && ident[1] == 121 { return T_BY }   // "by"
+        }
+        if c0 == 102 {
+            if str.Len(ident) == 2 && ident[0] == 102 && ident[1] == 110 { return T_FN }   // "fn"
+        }
+        if c0 == 105 {
+            if str.Len(ident) == 2 && ident[0] == 105 && ident[1] == 102 { return T_IF }   // "if"
+            if str.Len(ident) == 2 && ident[0] == 105 && ident[1] == 110 { return T_IN }   // "in"
+        }
+    }
+    if n == 3 {
+        if c0 == 102 {
+            if str.Len(ident) == 3 && ident[0] == 102 && ident[1] == 111 && ident[2] == 114 { return T_FOR }   // "for"
+        }
+        if c0 == 109 {
+            if str.Len(ident) == 3 && ident[0] == 109 && ident[1] == 97 && ident[2] == 112 { return T_MAP }   // "map"
+        }
+        if c0 == 110 {
+            if str.Len(ident) == 3 && ident[0] == 110 && ident[1] == 105 && ident[2] == 108 { return T_NIL }   // "nil"
+        }
+        if c0 == 112 {
+            if str.Len(ident) == 3 && ident[0] == 112 && ident[1] == 117 && ident[2] == 98 { return T_PUB }   // "pub"
+        }
+        if c0 == 115 {
+            if str.Len(ident) == 3 && ident[0] == 115 && ident[1] == 101 && ident[2] == 116 { return T_SET }   // "set"
+        }
+        if c0 == 118 {
+            if str.Len(ident) == 3 && ident[0] == 118 && ident[1] == 97 && ident[2] == 114 { return T_VAR }   // "var"
+        }
+    }
+    if n == 4 {
+        if c0 == 98 {
+            if str.Len(ident) == 4 && ident[0] == 98 && ident[1] == 111 && ident[2] == 111 && ident[3] == 108 { return T_BOOL }   // "bool"
+            if str.Len(ident) == 4 && ident[0] == 98 && ident[1] == 121 && ident[2] == 116 && ident[3] == 101 { return T_UINT8 }   // "byte"
+        }
+        if c0 == 99 {
+            if str.Len(ident) == 4 && ident[0] == 99 && ident[1] == 97 && ident[2] == 115 && ident[3] == 101 { return T_CASE }   // "case"
+            if str.Len(ident) == 4 && ident[0] == 99 && ident[1] == 104 && ident[2] == 97 && ident[3] == 110 { return T_CHAN }   // "chan"
+        }
+        if c0 == 101 {
+            if str.Len(ident) == 4 && ident[0] == 101 && ident[1] == 108 && ident[2] == 115 && ident[3] == 101 { return T_ELSE }   // "else"
+            if str.Len(ident) == 4 && ident[0] == 101 && ident[1] == 110 && ident[2] == 117 && ident[3] == 109 { return T_ENUM }   // "enum"
+        }
+        if c0 == 102 {
+            if str.Len(ident) == 4 && ident[0] == 102 && ident[1] == 114 && ident[2] == 111 && ident[3] == 109 { return T_FROM }   // "from"
+        }
+        if c0 == 105 {
+            if str.Len(ident) == 4 && ident[0] == 105 && ident[1] == 109 && ident[2] == 112 && ident[3] == 108 { return T_IMPL }   // "impl"
+            if str.Len(ident) == 4 && ident[0] == 105 && ident[1] == 110 && ident[2] == 116 && ident[3] == 56 { return T_INT8 }   // "int8"
+            if str.Len(ident) == 4 && ident[0] == 105 && ident[1] == 110 && ident[2] == 116 && ident[3] == 111 { return T_INTO }   // "into"
+            if str.Len(ident) == 4 && ident[0] == 105 && ident[1] == 111 && ident[2] == 116 && ident[3] == 97 { return T_IOTA }   // "iota"
+        }
+        if c0 == 106 {
+            if str.Len(ident) == 4 && ident[0] == 106 && ident[1] == 111 && ident[2] == 105 && ident[3] == 110 { return T_JOIN }   // "join"
+        }
+        if c0 == 114 {
+            if str.Len(ident) == 4 && ident[0] == 114 && ident[1] == 117 && ident[2] == 108 && ident[3] == 101 { return T_RULE }   // "rule"
+        }
+        if c0 == 116 {
+            if str.Len(ident) == 4 && ident[0] == 116 && ident[1] == 114 && ident[2] == 117 && ident[3] == 101 { return T_TRUE }   // "true"
+            if str.Len(ident) == 4 && ident[0] == 116 && ident[1] == 121 && ident[2] == 112 && ident[3] == 101 { return T_TYPE }   // "type"
+        }
+        if c0 == 117 {
+            if str.Len(ident) == 4 && ident[0] == 117 && ident[1] == 105 && ident[2] == 110 && ident[3] == 116 { return T_UINT }   // "uint"
+        }
+        if c0 == 118 {
+            if str.Len(ident) == 4 && ident[0] == 118 && ident[1] == 111 && ident[2] == 105 && ident[3] == 100 { return T_VOID }   // "void"
+        }
+        if c0 == 119 {
+            if str.Len(ident) == 4 && ident[0] == 119 && ident[1] == 104 && ident[2] == 101 && ident[3] == 110 { return T_WHEN }   // "when"
+            if str.Len(ident) == 4 && ident[0] == 119 && ident[1] == 105 && ident[2] == 116 && ident[3] == 104 { return T_WITH }   // "with"
+        }
+    }
+    if n == 5 {
+        if c0 == 97 {
+            if str.Len(ident) == 5 && ident[0] == 97 && ident[1] == 115 && ident[2] == 121 && ident[3] == 110 && ident[4] == 99 { return T_ASYNC }   // "async"
+            if str.Len(ident) == 5 && ident[0] == 97 && ident[1] == 119 && ident[2] == 97 && ident[3] == 105 && ident[4] == 116 { return T_AWAIT }   // "await"
+        }
+        if c0 == 98 {
+            if str.Len(ident) == 5 && ident[0] == 98 && ident[1] == 114 && ident[2] == 101 && ident[3] == 97 && ident[4] == 107 { return T_BREAK }   // "break"
+            if str.Len(ident) == 5 && ident[0] == 98 && ident[1] == 121 && ident[2] == 116 && ident[3] == 101 && ident[4] == 115 { return T_BYTES_TYPE }   // "bytes"
+        }
+        if c0 == 99 {
+            if str.Len(ident) == 5 && ident[0] == 99 && ident[1] == 111 && ident[2] == 110 && ident[3] == 115 && ident[4] == 116 { return T_CONST }   // "const"
+        }
+        if c0 == 100 {
+            if str.Len(ident) == 5 && ident[0] == 100 && ident[1] == 101 && ident[2] == 102 && ident[3] == 101 && ident[4] == 114 { return T_DEFER }   // "defer"
+        }
+        if c0 == 101 {
+            if str.Len(ident) == 5 && ident[0] == 101 && ident[1] == 114 && ident[2] == 114 && ident[3] == 111 && ident[4] == 114 { return T_ERROR }   // "error"
+        }
+        if c0 == 102 {
+            if str.Len(ident) == 5 && ident[0] == 102 && ident[1] == 97 && ident[2] == 108 && ident[3] == 115 && ident[4] == 101 { return T_FALSE }   // "false"
+            if str.Len(ident) == 5 && ident[0] == 102 && ident[1] == 108 && ident[2] == 111 && ident[3] == 97 && ident[4] == 116 { return T_FLOAT }   // "float"
+        }
+        if c0 == 103 {
+            if str.Len(ident) == 5 && ident[0] == 103 && ident[1] == 114 && ident[2] == 111 && ident[3] == 117 && ident[4] == 112 { return T_GROUP }   // "group"
+        }
+        if c0 == 105 {
+            if str.Len(ident) == 5 && ident[0] == 105 && ident[1] == 110 && ident[2] == 116 && ident[3] == 49 && ident[4] == 54 { return T_INT16 }   // "int16"
+            if str.Len(ident) == 5 && ident[0] == 105 && ident[1] == 110 && ident[2] == 116 && ident[3] == 51 && ident[4] == 50 { return T_INT32 }   // "int32"
+            if str.Len(ident) == 5 && ident[0] == 105 && ident[1] == 110 && ident[2] == 116 && ident[3] == 54 && ident[4] == 52 { return T_INT64 }   // "int64"
+        }
+        if c0 == 109 {
+            if str.Len(ident) == 5 && ident[0] == 109 && ident[1] == 97 && ident[2] == 116 && ident[3] == 99 && ident[4] == 104 { return T_MATCH }   // "match"
+        }
+        if c0 == 114 {
+            if str.Len(ident) == 5 && ident[0] == 114 && ident[1] == 97 && ident[2] == 110 && ident[3] == 103 && ident[4] == 101 { return T_RANGE }   // "range"
+        }
+        if c0 == 115 {
+            if str.Len(ident) == 5 && ident[0] == 115 && ident[1] == 112 && ident[2] == 97 && ident[3] == 119 && ident[4] == 110 { return T_SPAWN }   // "spawn"
+        }
+        if c0 == 117 {
+            if str.Len(ident) == 5 && ident[0] == 117 && ident[1] == 105 && ident[2] == 110 && ident[3] == 116 && ident[4] == 56 { return T_UINT8 }   // "uint8"
+            if str.Len(ident) == 5 && ident[0] == 117 && ident[1] == 110 && ident[2] == 116 && ident[3] == 105 && ident[4] == 108 { return T_UNTIL }   // "until"
+        }
+        if c0 == 119 {
+            if str.Len(ident) == 5 && ident[0] == 119 && ident[1] == 104 && ident[2] == 101 && ident[3] == 114 && ident[4] == 101 { return T_WHERE }   // "where"
+            if str.Len(ident) == 5 && ident[0] == 119 && ident[1] == 104 && ident[2] == 105 && ident[3] == 108 && ident[4] == 101 { return T_WHILE }   // "while"
+        }
+    }
+    if n == 6 {
+        if c0 == 97 {
+            if str.Len(ident) == 6 && ident[0] == 97 && ident[1] == 99 && ident[2] == 116 && ident[3] == 105 && ident[4] == 111 && ident[5] == 110 { return T_ACTION }   // "action"
+        }
+        if c0 == 101 {
+            if str.Len(ident) == 6 && ident[0] == 101 && ident[1] == 120 && ident[2] == 116 && ident[3] == 101 && ident[4] == 114 && ident[5] == 110 { return T_EXTERN }   // "extern"
+        }
+        if c0 == 105 {
+            if str.Len(ident) == 6 && ident[0] == 105 && ident[1] == 109 && ident[2] == 112 && ident[3] == 111 && ident[4] == 114 && ident[5] == 116 { return T_IMPORT }   // "import"
+        }
+        if c0 == 109 {
+            if str.Len(ident) == 6 && ident[0] == 109 && ident[1] == 111 && ident[2] == 100 && ident[3] == 117 && ident[4] == 108 && ident[5] == 101 { return T_MODULE }   // "module"
+        }
+        if c0 == 114 {
+            if str.Len(ident) == 6 && ident[0] == 114 && ident[1] == 101 && ident[2] == 116 && ident[3] == 117 && ident[4] == 114 && ident[5] == 110 { return T_RETURN }   // "return"
+        }
+        if c0 == 115 {
+            if str.Len(ident) == 6 && ident[0] == 115 && ident[1] == 101 && ident[2] == 108 && ident[3] == 101 && ident[4] == 99 && ident[5] == 116 { return T_SELECT }   // "select"
+            if str.Len(ident) == 6 && ident[0] == 115 && ident[1] == 105 && ident[2] == 122 && ident[3] == 101 && ident[4] == 111 && ident[5] == 102 { return T_SIZEOF }   // "sizeof"
+            if str.Len(ident) == 6 && ident[0] == 115 && ident[1] == 116 && ident[2] == 114 && ident[3] == 105 && ident[4] == 110 && ident[5] == 103 { return T_STRING_TYPE }   // "string"
+            if str.Len(ident) == 6 && ident[0] == 115 && ident[1] == 116 && ident[2] == 114 && ident[3] == 117 && ident[4] == 99 && ident[5] == 116 { return T_STRUCT }   // "struct"
+            if str.Len(ident) == 6 && ident[0] == 115 && ident[1] == 119 && ident[2] == 105 && ident[3] == 116 && ident[4] == 99 && ident[5] == 104 { return T_SWITCH }   // "switch"
+        }
+        if c0 == 116 {
+            if str.Len(ident) == 6 && ident[0] == 116 && ident[1] == 101 && ident[2] == 110 && ident[3] == 115 && ident[4] == 111 && ident[5] == 114 { return T_TENSOR }   // "tensor"
+        }
+        if c0 == 117 {
+            if str.Len(ident) == 6 && ident[0] == 117 && ident[1] == 105 && ident[2] == 110 && ident[3] == 116 && ident[4] == 49 && ident[5] == 54 { return T_UINT16 }   // "uint16"
+            if str.Len(ident) == 6 && ident[0] == 117 && ident[1] == 105 && ident[2] == 110 && ident[3] == 116 && ident[4] == 51 && ident[5] == 50 { return T_UINT32 }   // "uint32"
+            if str.Len(ident) == 6 && ident[0] == 117 && ident[1] == 105 && ident[2] == 110 && ident[3] == 116 && ident[4] == 54 && ident[5] == 52 { return T_UINT64 }   // "uint64"
+            if str.Len(ident) == 6 && ident[0] == 117 && ident[1] == 110 && ident[2] == 115 && ident[3] == 97 && ident[4] == 102 && ident[5] == 101 { return T_UNSAFE }   // "unsafe"
+        }
+    }
+    if n == 7 {
+        if c0 == 97 {
+            if str.Len(ident) == 7 && ident[0] == 97 && ident[1] == 108 && ident[2] == 105 && ident[3] == 103 && ident[4] == 110 && ident[5] == 111 && ident[6] == 102 { return T_ALIGNOF }   // "alignof"
+        }
+        if c0 == 100 {
+            if str.Len(ident) == 7 && ident[0] == 100 && ident[1] == 101 && ident[2] == 102 && ident[3] == 97 && ident[4] == 117 && ident[5] == 108 && ident[6] == 116 { return T_DEFAULT }   // "default"
+        }
+        if c0 == 111 {
+            if str.Len(ident) == 7 && ident[0] == 111 && ident[1] == 114 && ident[2] == 100 && ident[3] == 101 && ident[4] == 114 && ident[5] == 98 && ident[6] == 121 { return T_ORDERBY }   // "orderby"
+        }
+        if c0 == 114 {
+            if str.Len(ident) == 7 && ident[0] == 114 && ident[1] == 117 && ident[2] == 108 && ident[3] == 101 && ident[4] == 115 && ident[5] == 101 && ident[6] == 116 { return T_RULESET }   // "ruleset"
+        }
+        if c0 == 115 {
+            if str.Len(ident) == 7 && ident[0] == 115 && ident[1] == 101 && ident[2] == 114 && ident[3] == 118 && ident[4] == 105 && ident[5] == 99 && ident[6] == 101 { return T_SERVICE }   // "service"
+        }
+    }
+    if n == 8 {
+        if c0 == 99 {
+            if str.Len(ident) == 8 && ident[0] == 99 && ident[1] == 111 && ident[2] == 109 && ident[3] == 112 && ident[4] == 116 && ident[5] == 105 && ident[6] == 109 && ident[7] == 101 { return T_COMPTIME }   // "comptime"
+            if str.Len(ident) == 8 && ident[0] == 99 && ident[1] == 111 && ident[2] == 110 && ident[3] == 116 && ident[4] == 105 && ident[5] == 110 && ident[6] == 117 && ident[7] == 101 { return T_CONTINUE }   // "continue"
+        }
+        if c0 == 112 {
+            if str.Len(ident) == 8 && ident[0] == 112 && ident[1] == 114 && ident[2] == 105 && ident[3] == 111 && ident[4] == 114 && ident[5] == 105 && ident[6] == 116 && ident[7] == 121 { return T_PRIORITY }   // "priority"
+        }
+        if c0 == 116 {
+            if str.Len(ident) == 8 && ident[0] == 116 && ident[1] == 101 && ident[2] == 109 && ident[3] == 112 && ident[4] == 108 && ident[5] == 97 && ident[6] == 116 && ident[7] == 101 { return T_TEMPLATE }   // "template"
+        }
+    }
+    if n == 9 {
+        if c0 == 97 {
+            if str.Len(ident) == 9 && ident[0] == 97 && ident[1] == 115 && ident[2] == 99 && ident[3] == 101 && ident[4] == 110 && ident[5] == 100 && ident[6] == 105 && ident[7] == 110 && ident[8] == 103 { return T_ASCENDING }   // "ascending"
+        }
+    }
+    if n == 10 {
+        if c0 == 100 {
+            if str.Len(ident) == 10 && ident[0] == 100 && ident[1] == 101 && ident[2] == 115 && ident[3] == 99 && ident[4] == 101 && ident[5] == 110 && ident[6] == 100 && ident[7] == 105 && ident[8] == 110 && ident[9] == 103 { return T_DESCENDING }   // "descending"
+        }
+    }
+    return T_IDENT
+}
+
+
+
+
+// Lexer turns a source string into a stream of tokens.
+struct Lexer {
+    input: string    // full source text
+    inputLen: int    // cached str.Len(input) — str.Len is libc strlen
+                     // (O(file size) per call), so hoisting it here keeps
+                     // lexing O(N) instead of O(N^2) per character.
+    pos: int         // byte index of current char
+    readPos: int     // byte index after current char
+    ch: int          // current char (byte value, 0 = EOF)
+    line: int        // current line (1-based)
+    col: int         // current column (1-based)
+}
+
+// New creates a Lexer for the given input string.
+pub fn New(input: string) -> *Lexer {
+    l := Lexer{input: input, inputLen: str.Len(input), pos: 0, readPos: 0, ch: 0, line: 1, col: 0}
+    l.readChar()
+    return &l
+}
+
+// readChar advances to the next byte in the input.
+fn readChar(self: *Lexer) {
+    self.pos = self.readPos
+    if self.readPos >= self.inputLen {
+        self.ch = 0
+    } else {
+        self.ch = self.input[self.readPos]
+        self.readPos = self.readPos + 1
+    }
+    if self.ch == 10 { // '\n'
+        self.line = self.line + 1
+        self.col = 0
+    } else {
+        self.col = self.col + 1
+    }
+}
+
+// peekChar returns the next byte without advancing.
+fn peekChar(self: *Lexer) -> int {
+    if self.readPos >= self.inputLen {
+        return 0
+    }
+    return self.input[self.readPos]
+}
+
+// peekChar2 returns the byte two positions ahead without advancing.
+fn peekChar2(self: *Lexer) -> int {
+    if self.readPos + 1 >= self.inputLen {
+        return 0
+    }
+    return self.input[self.readPos + 1]
+}
+
+// skipWhitespace advances past spaces, tabs, and carriage returns.
+fn skipWhitespace(self: *Lexer) {
+    for self.ch == 32 || self.ch == 9 || self.ch == 13 || self.ch == 11 || self.ch == 12 { // ' ', '\t', '\r', '\v', '\f'
+        self.readChar()
+    }
+}
+
+// isLetter returns true if ch can start or continue an identifier.
+pub fn isLetter(ch: int) -> bool {
+    return (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch == 95 // A-Z, a-z, _
+}
+
+// isDigit returns true if ch is a decimal digit.
+pub fn isDigit(ch: int) -> bool {
+    return ch >= 48 && ch <= 57 // 0-9
+}
+
+// isHexDigit returns true if ch is a hexadecimal digit.
+fn isHexDigit(ch: int) -> bool {
+    return (ch >= 48 && ch <= 57) || (ch >= 97 && ch <= 102) || (ch >= 65 && ch <= 70)
+}
+
+// isAlphaNum returns true if ch is a letter, digit, or underscore.
+pub fn isAlphaNum(ch: int) -> bool {
+    return isLetter(ch) || isDigit(ch)
+}
+
+// NextToken returns the next token from the input stream.
+pub fn NextToken(self: *Lexer) -> Token {
+    self.skipWhitespace()
+
+    line := self.line
+    col := self.col
+    ch := self.ch
+
+    if ch == 10 {
+            self.readChar()
+            return Token{kind: T_NEWLINE, literal: "\\n", line: line, col: col}
+    }
+    if ch == 61 {
+            if self.peekChar() == 61 { // '=='
+                self.readChar()
+                self.readChar()
+                return Token{kind: T_EQ, literal: "==", line: line, col: col}
+            }
+            if self.peekChar() == 62 { // '=>'
+                self.readChar()
+                self.readChar()
+                return Token{kind: T_FATARROW, literal: "=>", line: line, col: col}
+            }
+            self.readChar()
+            return Token{kind: T_ASSIGN, literal: "=", line: line, col: col}
+        }
+    if ch == 58 {
+            if self.peekChar() == 61 { // ':='
+                self.readChar()
+                self.readChar()
+                return Token{kind: T_COLONASS, literal: ":=", line: line, col: col}
+            }
+            self.readChar()
+            return Token{kind: T_COLON, literal: ":", line: line, col: col}
+        }
+    if ch == 43 {
+            if self.peekChar() == 61 { // '+='
+                self.readChar()
+                self.readChar()
+                return Token{kind: T_PLUSEQ, literal: "+=", line: line, col: col}
+            }
+            self.readChar()
+            return Token{kind: T_PLUS, literal: "+", line: line, col: col}
+        }
+    if ch == 45 {
+            if self.peekChar() == 62 { // '->'
+                self.readChar()
+                self.readChar()
+                return Token{kind: T_ARROW, literal: "->", line: line, col: col}
+            }
+            if self.peekChar() == 61 { // '-='
+                self.readChar()
+                self.readChar()
+                return Token{kind: T_MINUSEQ, literal: "-=", line: line, col: col}
+            }
+            self.readChar()
+            return Token{kind: T_MINUS, literal: "-", line: line, col: col}
+        }
+    if ch == 42 {
+            if self.peekChar() == 42 { // '**'
+                self.readChar()
+                self.readChar()
+                return Token{kind: T_DBLSTAR, literal: "**", line: line, col: col}
+            }
+            if self.peekChar() == 61 { // '*='
+                self.readChar()
+                self.readChar()
+                return Token{kind: T_STAREQ, literal: "*=", line: line, col: col}
+            }
+            self.readChar()
+            return Token{kind: T_STAR, literal: "*", line: line, col: col}
+        }
+    if ch == 47 {
+            if self.peekChar() == 47 { // '//'
+                return self.readLineComment(line, col)
+            }
+            if self.peekChar() == 42 { // '/*'
+                return self.readBlockComment(line, col)
+            }
+            if self.peekChar() == 61 { // '/='
+                self.readChar()
+                self.readChar()
+                return Token{kind: T_SLASHEQ, literal: "/=", line: line, col: col}
+            }
+            self.readChar()
+            return Token{kind: T_SLASH, literal: "/", line: line, col: col}
+        }
+    if ch == 37 {
+            if self.peekChar() == 61 { // '%='
+                self.readChar()
+                self.readChar()
+                return Token{kind: T_PERCEQ, literal: "%=", line: line, col: col}
+            }
+            self.readChar()
+            return Token{kind: T_PERCENT, literal: "%", line: line, col: col}
+        }
+    if ch == 60 {
+            if self.peekChar() == 61 { // '<='
+                self.readChar()
+                self.readChar()
+                return Token{kind: T_LE, literal: "<=", line: line, col: col}
+            }
+            if self.peekChar() == 45 { // '<-'
+                self.readChar()
+                self.readChar()
+                return Token{kind: T_SEND, literal: "<-", line: line, col: col}
+            }
+            if self.peekChar() == 60 { // '<<'
+                self.readChar()
+                if self.peekChar() == 61 { // '<<='
+                    self.readChar()
+                    self.readChar()
+                    return Token{kind: T_LSHIFTEQ, literal: "<<=", line: line, col: col}
+                }
+                self.readChar()
+                return Token{kind: T_LSHIFT, literal: "<<", line: line, col: col}
+            }
+            self.readChar()
+            return Token{kind: T_LT, literal: "<", line: line, col: col}
+        }
+    if ch == 62 {
+            if self.peekChar() == 61 { // '>='
+                self.readChar()
+                self.readChar()
+                return Token{kind: T_GE, literal: ">=", line: line, col: col}
+            }
+            if self.peekChar() == 62 { // '>>'
+                self.readChar()
+                if self.peekChar() == 61 { // '>>='
+                    self.readChar()
+                    self.readChar()
+                    return Token{kind: T_RSHIFTEQ, literal: ">>=", line: line, col: col}
+                }
+                self.readChar()
+                return Token{kind: T_RSHIFT, literal: ">>", line: line, col: col}
+            }
+            self.readChar()
+            return Token{kind: T_GT, literal: ">", line: line, col: col}
+        }
+    if ch == 38 {
+            if self.peekChar() == 38 { // '&&'
+                self.readChar()
+                self.readChar()
+                return Token{kind: T_AND, literal: "&&", line: line, col: col}
+            }
+            if self.peekChar() == 61 { // '&='
+                self.readChar()
+                self.readChar()
+                return Token{kind: T_AMPEQ, literal: "&=", line: line, col: col}
+            }
+            self.readChar()
+            return Token{kind: T_AMPERSAND, literal: "&", line: line, col: col}
+        }
+    if ch == 124 {
+            if self.peekChar() == 124 { // '||'
+                self.readChar()
+                self.readChar()
+                return Token{kind: T_OR, literal: "||", line: line, col: col}
+            }
+            if self.peekChar() == 61 { // '|='
+                self.readChar()
+                self.readChar()
+                return Token{kind: T_PIPEEQ, literal: "|=", line: line, col: col}
+            }
+            self.readChar()
+            return Token{kind: T_PIPE, literal: "|", line: line, col: col}
+        }
+    if ch == 94 {
+            if self.peekChar() == 61 { // '^='
+                self.readChar()
+                self.readChar()
+                return Token{kind: T_CARETEQ, literal: "^=", line: line, col: col}
+            }
+            self.readChar()
+            return Token{kind: T_CARET, literal: "^", line: line, col: col}
+        }
+    if ch == 126 {
+            self.readChar()
+            return Token{kind: T_TILDE, literal: "~", line: line, col: col}
+        }
+    if ch == 33 {
+            if self.peekChar() == 61 { // '!='
+                self.readChar()
+                self.readChar()
+                return Token{kind: T_NE, literal: "!=", line: line, col: col}
+            }
+            self.readChar()
+            return Token{kind: T_BANG, literal: "!", line: line, col: col}
+        }
+    if ch == 64 {
+            self.readChar()
+            return Token{kind: T_AT, literal: "@", line: line, col: col}
+        }
+    if ch == 63 {
+            self.readChar()
+            return Token{kind: T_QUESTION, literal: "?", line: line, col: col}
+        }
+    if ch == 40 {
+            self.readChar()
+            return Token{kind: T_LPAREN, literal: "(", line: line, col: col}
+        }
+    if ch == 41 {
+            self.readChar()
+            return Token{kind: T_RPAREN, literal: ")", line: line, col: col}
+        }
+    if ch == 123 {
+            self.readChar()
+            return Token{kind: T_LBRACE, literal: "{", line: line, col: col}
+        }
+    if ch == 125 {
+            self.readChar()
+            return Token{kind: T_RBRACE, literal: "}", line: line, col: col}
+        }
+    if ch == 91 {
+            self.readChar()
+            return Token{kind: T_LBRACKET, literal: "[", line: line, col: col}
+        }
+    if ch == 93 {
+            self.readChar()
+            return Token{kind: T_RBRACKET, literal: "]", line: line, col: col}
+        }
+    if ch == 44 {
+            self.readChar()
+            return Token{kind: T_COMMA, literal: ",", line: line, col: col}
+        }
+    if ch == 46 {
+            if self.peekChar() == 46 { // '..'
+                self.readChar()
+                if self.peekChar() == 46 { // '...'
+                    self.readChar()
+                    self.readChar()
+                    return Token{kind: T_ELLIPSIS, literal: "...", line: line, col: col}
+                }
+                self.readChar()
+                return Token{kind: T_DOTDOT, literal: "..", line: line, col: col}
+            }
+            self.readChar()
+            return Token{kind: T_DOT, literal: ".", line: line, col: col}
+        }
+    if ch == 59 {
+            self.readChar()
+            return Token{kind: T_SEMICOLON, literal: ";", line: line, col: col}
+        }
+    if ch == 34 {
+            return self.readString(34, line, col)
+        }
+    if ch == 96 {
+            return self.readString(96, line, col)
+        }
+    if ch == 0 {
+            return Token{kind: T_EOF, literal: "", line: line, col: col}
+        }
+    if isDigit(ch) {
+                return self.readNumber(line, col)
+            }
+    if isLetter(ch) {
+                return self.readIdentifier(line, col)
+            }
+    // Illegal character
+    self.readChar()
+    return Token{kind: T_ILLEGAL, literal: str.Substr(self.input, self.pos - 1, 1), line: line, col: col}
+}
+
+// readIdentifier consumes an identifier or keyword.
+fn readIdentifier(self: *Lexer, line: int, col: int) -> Token {
+    start := self.pos
+    for isAlphaNum(self.ch) {
+        self.readChar()
+    }
+    literal := str.Substr(self.input, start, self.pos - start)
+    kind := lookupKeyword(literal)
+    return Token{kind: kind, literal: literal, line: line, col: col}
+}
+
+// isDigitForBase returns true if ch is a valid digit for the given base.
+fn isDigitForBase(ch: int, base: int) -> bool {
+    if base == 2 {
+        return ch == 48 || ch == 49 // '0'..'1'
+    }
+    if base == 8 {
+        return ch >= 48 && ch <= 55 // '0'..'7'
+    }
+    if base == 16 {
+        return isHexDigit(ch)
+    }
+    return isDigit(ch)
+}
+
+// readNumber consumes a numeric literal (integer or float).
+// Decimal literals support '_', '.', and an e/E exponent with an optional
+// sign (the sign is only consumed when it directly follows e/E and is
+// itself followed by a digit, so `5-1` lexes as three tokens).
+fn readNumber(self: *Lexer, line: int, col: int) -> Token {
+    start := self.pos
+    isFloatVal := false
+
+    // Handle hex (0x), binary (0b), octal (0o) prefixes
+    if self.ch == 48 { // '0'
+        next := self.peekChar()
+        base := 0
+        if next == 120 || next == 88 { // 'x'/'X'
+            base = 16
+        } else if next == 98 || next == 66 { // 'b'/'B'
+            base = 2
+        } else if next == 111 || next == 79 { // 'o'/'O'
+            base = 8
+        }
+        if base != 0 {
+            self.readChar() // consume '0'
+            self.readChar() // consume prefix char
+            digitStart := self.pos
+            for isDigitForBase(self.ch, base) || self.ch == 95 { // '_'
+                self.readChar()
+            }
+            // Reject a bare prefix (0x) or a wrong-radix digit (0b12).
+            if self.pos == digitStart || isAlphaNum(self.ch) {
+                for isAlphaNum(self.ch) {
+                    self.readChar()
+                }
+                literal := str.Substr(self.input, start, self.pos - start)
+                return Token{kind: T_ILLEGAL, literal: literal, line: line, col: col}
+            }
+            literal := str.Substr(self.input, start, self.pos - start)
+            return Token{kind: T_INT, literal: literal, line: line, col: col}
+        }
+    }
+
+    for isDigit(self.ch) || self.ch == 46 || self.ch == 95 {
+        // '.', '_'
+        if self.ch == 46 { // '.'
+            if isFloatVal {
+                break
+            }
+            if self.peekChar() == 46 { // '..' — don't consume
+                break
+            }
+            if !isDigit(self.peekChar()) { // '5.foo' — leave '.' for member access
+                break
+            }
+            isFloatVal = true
+        }
+        self.readChar()
+    }
+    // Exponent: e/E followed by digits, or e/E + sign + digits.
+    if self.ch == 101 || self.ch == 69 { // 'e'/'E'
+        next2 := self.peekChar()
+        if isDigit(next2) {
+            self.readChar() // 'e'
+            for isDigit(self.ch) || self.ch == 95 {
+                self.readChar()
+            }
+            isFloatVal = true
+        } else if (next2 == 43 || next2 == 45) && isDigit(self.peekChar2()) { // 'e+'/'e-'
+            self.readChar() // 'e'
+            self.readChar() // sign
+            for isDigit(self.ch) || self.ch == 95 {
+                self.readChar()
+            }
+            isFloatVal = true
+        }
+    }
+    // A letter/identifier char directly after the literal is an error
+    // (e.g. `123abc`), except 'e'/'E' handled above.
+    if isAlphaNum(self.ch) {
+        for isAlphaNum(self.ch) {
+            self.readChar()
+        }
+        literal := str.Substr(self.input, start, self.pos - start)
+        return Token{kind: T_ILLEGAL, literal: literal, line: line, col: col}
+    }
+    literal := str.Substr(self.input, start, self.pos - start)
+    kind := T_INT
+    if isFloatVal {
+        kind = T_FLOAT
+    }
+    return Token{kind: kind, literal: literal, line: line, col: col}
+}
+
+// readString consumes a string literal up to the closing quote.
+// It interprets a small set of C-style backslash escapes.
+fn readString(self: *Lexer, quote: int, line: int, col: int) -> Token {
+    self.readChar() // consume opening quote
+    builder := str.NewBuilder(64)
+    // Backtick strings are raw: no escape processing, may span lines.
+    if quote == 96 {
+        for self.ch != 96 && self.ch != 0 {
+            str.WriteByte(&builder, self.ch)
+            self.readChar()
+        }
+        rawLiteral := str.String(builder)
+        if self.ch == 96 {
+            self.readChar() // consume closing backtick
+        }
+        return Token{kind: T_STRING, literal: rawLiteral, line: line, col: col}
+    }
+    for self.ch != quote && self.ch != 0 {
+        if self.ch == 92 { // '\' escape
+            self.readChar()
+            if self.ch == 0 {
+                break
+            }
+            if self.ch == 110 { // 'n' -> newline
+                str.WriteByte(&builder, 10)
+            } else if self.ch == 116 { // 't' -> tab
+                str.WriteByte(&builder, 9)
+            } else if self.ch == 114 { // 'r' -> carriage return
+                str.WriteByte(&builder, 13)
+            } else if self.ch == 34 { // '"' -> double quote
+                str.WriteByte(&builder, 34)
+            } else if self.ch == 39 { // '\'' -> single quote
+                str.WriteByte(&builder, 39)
+            } else if self.ch == 92 { // '\\' -> backslash
+                str.WriteByte(&builder, 92)
+            } else if self.ch == 48 { // '\0' -> NUL
+                str.WriteByte(&builder, 0)
+            } else {
+                // Unknown escape: keep both characters (backslash and following)
+                str.WriteByte(&builder, 92)
+                str.WriteByte(&builder, self.ch)
+            }
+        } else {
+            str.WriteByte(&builder, self.ch)
+        }
+        self.readChar()
+    }
+    literal := str.String(builder)
+    if self.ch == quote {
+        self.readChar() // consume closing quote
+    }
+    return Token{kind: T_STRING, literal: literal, line: line, col: col}
+}
+
+// readLineComment consumes a // comment.
+fn readLineComment(self: *Lexer, line: int, col: int) -> Token {
+    start := self.pos
+    for self.ch != 10 && self.ch != 0 { // '\n' or EOF
+        self.readChar()
+    }
+    literal := str.Substr(self.input, start, self.pos - start)
+    kind := T_COMMENT
+    // Check for doc comment (///)
+    if str.Len(literal) > 2 {
+        if literal[2] == 47 { // '/'
+            kind = T_DOC
+        }
+    }
+    return Token{kind: kind, literal: literal, line: line, col: col}
+}
+
+// readBlockComment consumes a /* */ comment.
+fn readBlockComment(self: *Lexer, line: int, col: int) -> Token {
+    start := self.pos
+    self.readChar() // consume '/'
+    self.readChar() // consume '*'
+    for {
+        if self.ch == 42 && self.peekChar() == 47 { // '*' followed by '/'
+            self.readChar()
+            self.readChar()
+            break
+        }
+        if self.ch == 0 {
+            break
+        }
+        self.readChar()
+    }
+    literal := str.Substr(self.input, start, self.pos - start)
+    return Token{kind: T_COMMENT, literal: literal, line: line, col: col}
+}
+
+// Tokenize lexes the entire input and returns a slice of all tokens
+// (including newlines and comments), ending with an EOF token.
+pub fn Tokenize(input: string) -> []Token {
+    l := New(input)
+    var tokens []Token
+    for {
+        tok := l.NextToken()
+        tokens = append(tokens, tok)
+        if tok.kind == T_EOF {
+            break
+        }
+    }
+    return tokens
+}

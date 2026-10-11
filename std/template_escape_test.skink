@@ -1,0 +1,163 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/template_escape_test.skink
+// Purpose: Regression tests for comp_error.md #95 — template fat-pointer
+//          boxes were stack-allocated in the boxing frame, so a template
+//          value stored into a slice (or returned) from inside a helper
+//          function held a pointer into dead stack and crashed on method
+//          dispatch. Boxes are now heap-allocated with RC lifetime.
+//          These tests build template values in helper frames and use
+//          them after the frame has returned.
+//
+// Author:  Mark Oxley
+// Created: 2026
+
+module template_escape_test
+
+import "testing"
+
+// Greeter is a small template interface exercised by the escape tests.
+pub template Greeter {
+    fn Greet(self: Greeter) -> string
+    fn Count(self: Greeter) -> int
+}
+
+// Alpha is a concrete Greeter implementation.
+pub struct Alpha {
+    n: int
+
+    pub fn Greet(self: *Alpha) -> string {
+        return "alpha"
+    }
+    pub fn Count(self: *Alpha) -> int {
+        return self.n
+    }
+}
+
+// Beta is a second concrete Greeter implementation — mixing types in the
+// same slice verifies each box carries the right method table.
+pub struct Beta {
+    tag: string
+
+    pub fn Greet(self: *Beta) -> string {
+        return self.tag
+    }
+    pub fn Count(self: *Beta) -> int {
+        return 99
+    }
+}
+
+// boxIt passes a Greeter through a param/return — the box must survive
+// the helper's frame.
+fn boxIt(g: Greeter) -> Greeter {
+    return g
+}
+
+// newAlpha allocates a concrete greeter.
+fn newAlpha(n: int) -> *Alpha {
+    a := Alpha{n: n}
+    return &a
+}
+
+// newBeta allocates a concrete greeter.
+fn newBeta(tag: string) -> *Beta {
+    b := Beta{tag: tag}
+    return &b
+}
+
+// makeGreeters builds a []Greeter inside this function's frame and
+// returns it — the crash case from #95.
+fn makeGreeters() -> []Greeter {
+    var gs []Greeter
+    gs = append(gs, boxIt(newAlpha(1)))
+    gs = append(gs, boxIt(newBeta("bravo")))
+    gs = append(gs, boxIt(newAlpha(3)))
+    return gs
+}
+
+// holder carries a template value in a struct field — the box must
+// outlive the function that filled it.
+pub struct holder {
+    g: Greeter
+}
+
+// makeHolder returns a struct holding a boxed template built in-frame.
+fn makeHolder(n: int) -> *holder {
+    h := holder{g: boxIt(newAlpha(n))}
+    return &h
+}
+
+// TestTemplateSliceEscape verifies every element of a function-built
+// template slice dispatches correctly after the frame returned
+// (regression: segfault on elements > 0 — comp_error.md #95).
+pub fn TestTemplateSliceEscape() {
+    gs := makeGreeters()
+    testing.AssertEqualInt(3, len(gs), "three greeters")
+    testing.AssertEqualString("alpha", gs[0].Greet(), "elem 0 greet")
+    testing.AssertEqualInt(1, gs[0].Count(), "elem 0 count")
+    testing.AssertEqualString("bravo", gs[1].Greet(), "elem 1 greet")
+    testing.AssertEqualInt(99, gs[1].Count(), "elem 1 count")
+    testing.AssertEqualString("alpha", gs[2].Greet(), "elem 2 greet")
+    testing.AssertEqualInt(3, gs[2].Count(), "elem 2 count")
+}
+
+// TestTemplateFieldEscape verifies a template value stored in a struct
+// field remains valid after the producing frame exits (#95).
+pub fn TestTemplateFieldEscape() {
+    h := makeHolder(7)
+    testing.AssertEqualString("alpha", h.g.Greet(), "field greet")
+    testing.AssertEqualInt(7, h.g.Count(), "field count")
+}
+
+// TestTemplatePassthroughReuse verifies repeatedly boxing the same
+// concrete object produces independent boxes that all dispatch (box
+// data is retained per box — #95 data lifetime).
+pub fn TestTemplatePassthroughReuse() {
+    a := newAlpha(42)
+    var gs []Greeter
+    gs = append(gs, boxIt(a))
+    gs = append(gs, boxIt(a))
+    testing.AssertEqualInt(42, gs[0].Count(), "first box count")
+    testing.AssertEqualInt(42, gs[1].Count(), "second box count")
+}
+
+// nestedGreeters builds a slice-of-slices across two helper frames.
+fn innerGreeters() -> []Greeter {
+    var gs []Greeter
+    gs = append(gs, boxIt(newAlpha(5)))
+    return gs
+}
+fn outerGreeters() -> [][]Greeter {
+    var all [][]Greeter
+    all = append(all, innerGreeters())
+    all = append(all, innerGreeters())
+    return all
+}
+
+// TestTemplateNestedSliceEscape verifies slices of template slices
+// survive two frame returns (#95).
+pub fn TestTemplateNestedSliceEscape() {
+    all := outerGreeters()
+    testing.AssertEqualInt(2, len(all), "two inner slices")
+    testing.AssertEqualInt(5, all[0][0].Count(), "inner 0 count")
+    testing.AssertEqualInt(5, all[1][0].Count(), "inner 1 count")
+    testing.AssertEqualString("alpha", all[1][0].Greet(), "inner 1 greet")
+}
+
+// TestTemplateMethodCallAfterLoop verifies dispatch through elements
+// read repeatedly — exercises box reads after many frames of alloc
+// churn would have trashed a stack box.
+pub fn TestTemplateMethodCallAfterLoop() {
+    gs := makeGreeters()
+    total := 0
+    i := 0
+    for i < len(gs) {
+        total = total + gs[i].Count()
+        i = i + 1
+    }
+    testing.AssertEqualInt(103, total, "sum of counts")
+}

@@ -1,0 +1,294 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/rand.skink
+// Purpose: Provides pseudo-random number generation using the C
+//          standard library's rand() function. This is NOT
+//          cryptographically secure; use a dedicated crypto library
+//          for security-sensitive contexts.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module rand
+
+// C standard library functions.
+extern fn rand() -> int
+extern fn srand(seed: int)
+extern fn time(t: *int64) -> int64
+
+// seeded tracks whether the generator has been seeded.
+var seeded: bool
+
+// seedOnce auto-seeds from the system clock on first use.
+fn seedOnce() {
+    if !seeded {
+        srand(int(time(nil)))
+        seeded = true
+    }
+}
+
+// Seed initializes the random number generator with the given seed.
+// Use this for reproducible sequences (e.g. in tests).
+pub fn Seed(s: int64) {
+    srand(int(s))
+    seeded = true
+}
+
+// === Full-range integer generators ===
+
+// Int returns a non-negative pseudo-random int in [0, 2^31).
+pub fn Int() -> int {
+    seedOnce()
+    return rand()
+}
+
+// Int8 returns a pseudo-random int8 in [-128, 127].
+pub fn Int8() -> int8 {
+    seedOnce()
+    v := rand() % 256
+    return int8(v)
+}
+
+// Int16 returns a pseudo-random int16 in [-32768, 32767].
+pub fn Int16() -> int16 {
+    seedOnce()
+    v := rand() % 65536
+    return int16(v)
+}
+
+// Int32 returns a pseudo-random int32 in [0, 2^31).
+pub fn Int32() -> int32 {
+    seedOnce()
+    return int32(rand())
+}
+
+// Int64 returns a pseudo-random int64.
+// Combines two 31-bit rand() calls to fill the full 64-bit range.
+pub fn Int64() -> int64 {
+    seedOnce()
+    hi := int64(rand())
+    lo := int64(rand())
+    return (hi << 31) | lo
+}
+
+// Uint returns a pseudo-random uint.
+pub fn Uint() -> uint {
+    seedOnce()
+    return uint(rand())
+}
+
+// Uint8 returns a pseudo-random uint8 in [0, 255].
+pub fn Uint8() -> uint8 {
+    seedOnce()
+    v := rand() % 256
+    return uint8(v)
+}
+
+// Uint16 returns a pseudo-random uint16 in [0, 65535].
+pub fn Uint16() -> uint16 {
+    seedOnce()
+    v := rand() % 65536
+    return uint16(v)
+}
+
+// Uint32 returns a pseudo-random uint32 in [0, 2^31).
+pub fn Uint32() -> uint32 {
+    seedOnce()
+    return uint32(rand())
+}
+
+// Uint64 returns a pseudo-random uint64.
+// Combines two 31-bit rand() calls to fill the full 64-bit range.
+pub fn Uint64() -> uint64 {
+    seedOnce()
+    hi := uint64(rand())
+    lo := uint64(rand())
+    return (hi << 31) | lo
+}
+
+// === Limited integer generators ===
+
+// Intn returns a pseudo-random int in [0, n). Returns 0 if n <= 0.
+pub fn Intn(n: int) -> int {
+    if n <= 0 {
+        return 0
+    }
+    seedOnce()
+    return rand() % n
+}
+
+// Int8n returns a pseudo-random int8 in [0, n). Returns 0 if n <= 0.
+pub fn Int8n(n: int8) -> int8 {
+    if n <= 0 {
+        return 0
+    }
+    seedOnce()
+    return int8(rand() % int(n))
+}
+
+// Int16n returns a pseudo-random int16 in [0, n). Returns 0 if n <= 0.
+pub fn Int16n(n: int16) -> int16 {
+    if n <= 0 {
+        return 0
+    }
+    seedOnce()
+    return int16(rand() % int(n))
+}
+
+// Int32n returns a pseudo-random int32 in [0, n). Returns 0 if n <= 0.
+pub fn Int32n(n: int32) -> int32 {
+    if n <= 0 {
+        return 0
+    }
+    seedOnce()
+    return int32(rand() % int(n))
+}
+
+// Int64n returns a pseudo-random int64 in [0, n). Returns 0 if n <= 0.
+pub fn Int64n(n: int64) -> int64 {
+    if n <= 0 {
+        return 0
+    }
+    seedOnce()
+    v := Int64()
+    if v < 0 {
+        v = -v // Ensure non-negative before modulo
+    }
+    return v % n
+}
+
+// Uintn returns a pseudo-random uint in [0, n). Returns 0 if n <= 0.
+pub fn Uintn(n: uint) -> uint {
+    if n == 0 {
+        return 0
+    }
+    seedOnce()
+    return uint(rand()) % n
+}
+
+// Uint8n returns a pseudo-random uint8 in [0, n). Returns 0 if n == 0.
+pub fn Uint8n(n: uint8) -> uint8 {
+    if n == 0 {
+        return 0
+    }
+    seedOnce()
+    return uint8(rand() % int(n))
+}
+
+// Uint16n returns a pseudo-random uint16 in [0, n). Returns 0 if n == 0.
+pub fn Uint16n(n: uint16) -> uint16 {
+    if n == 0 {
+        return 0
+    }
+    seedOnce()
+    return uint16(rand() % int(n))
+}
+
+// Uint32n returns a pseudo-random uint32 in [0, n). Returns 0 if n == 0.
+pub fn Uint32n(n: uint32) -> uint32 {
+    if n == 0 {
+        return 0
+    }
+    seedOnce()
+    return uint32(rand() % int(n))
+}
+
+// Uint64n returns a pseudo-random uint64 in [0, n). Returns 0 if n == 0.
+pub fn Uint64n(n: uint64) -> uint64 {
+    if n == 0 {
+        return 0
+    }
+    seedOnce()
+    v := Uint64()
+    return v % n
+}
+
+// === Float generators ===
+
+// Float returns a pseudo-random float in [0.0, 1.0).
+pub fn Float() -> float {
+    seedOnce()
+    return float(rand()) / float(2147483647)
+}
+
+// Float64 returns a pseudo-random float in [0.0, 1.0) with 53-bit precision.
+pub fn Float64() -> float {
+    seedOnce()
+    // Use 53 bits from two rand() calls for full double precision.
+    hi := int64(rand())
+    lo := int64(rand())
+    // Combine: 31 bits from hi, 22 bits from lo = 53 bits total.
+    val := (hi << 22) | (lo & ((int64(1) << 22) - int64(1)))
+    // Divisor: 2^53 = 9007199254740992
+    divisor := int64(1) << 53
+    return float(val) / float(divisor)
+}
+
+// Floatn returns a pseudo-random float in [0.0, n).
+pub fn Floatn(n: float) -> float {
+    return Float() * n
+}
+
+// === Byte generator ===
+
+// Bytes fills buf with len pseudo-random bytes.
+// Returns the number of bytes written.
+pub fn Bytes(buf: string, len: int) -> int {
+    if len <= 0 {
+        return 0
+    }
+    seedOnce()
+    for i := 0; i < len; i = i + 1 {
+        v := rand() % 256
+        buf[i] = int8(v)
+    }
+    return len
+}
+
+// === Utility ===
+
+// Read fills the given slice with pseudo-random int values in [0, 255].
+// Returns the number of elements written.
+pub fn Read(buf: []int) -> int {
+    seedOnce()
+    n := len(buf)
+    for i := 0; i < n; i = i + 1 {
+        buf[i] = rand() % 256
+    }
+    return n
+}
+
+// Perm returns a pseudo-random permutation of the integers [0, n).
+pub fn Perm(n: int) -> []int {
+    if n <= 0 {
+        return []int{}
+    }
+    seedOnce()
+    result := make([]int, n)
+    for i := 0; i < n; i = i + 1 {
+        result[i] = i
+    }
+    // Fisher-Yates shuffle
+    for i := n - 1; i > 0; i = i - 1 {
+        j := rand() % (i + 1)
+        tmp := result[i]
+        result[i] = result[j]
+        result[j] = tmp
+    }
+    return result
+}

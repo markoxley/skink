@@ -1,0 +1,162 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/web/router.skink
+// Purpose: HTTP request routing with path-parameter extraction and
+//          middleware chain composition for the Skink web framework.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module router
+
+import "std/str"
+import "std/web/types"
+
+// Route binds an HTTP method and URL pattern to a handler function.
+pub struct Route {
+    method: string
+    pattern: string
+    handler: types.Handler
+}
+
+// Router matches incoming requests to registered handlers and manages
+// the middleware chain applied to each request.
+pub struct Router {
+    routes: []Route
+    middlewares: []types.Middleware
+
+    // Handle registers a handler for the given HTTP method and URL pattern.
+    pub fn Handle(self: *Router, method: string, pattern: string, handler: types.Handler) {
+        self.routes = append(self.routes, Route{method: method, pattern: pattern, handler: handler})
+    }
+
+    // Get registers a handler for HTTP GET requests on the given pattern.
+    pub fn Get(self: *Router, pattern: string, handler: types.Handler) {
+        self.Handle("GET", pattern, handler)
+    }
+
+    // Post registers a handler for HTTP POST requests on the given pattern.
+    pub fn Post(self: *Router, pattern: string, handler: types.Handler) {
+        self.Handle("POST", pattern, handler)
+    }
+
+    // Put registers a handler for HTTP PUT requests on the given pattern.
+    pub fn Put(self: *Router, pattern: string, handler: types.Handler) {
+        self.Handle("PUT", pattern, handler)
+    }
+
+    // Delete registers a handler for HTTP DELETE requests on the given pattern.
+    pub fn Delete(self: *Router, pattern: string, handler: types.Handler) {
+        self.Handle("DELETE", pattern, handler)
+    }
+
+    // Use appends a middleware to the chain. Middlewares are applied
+    // in reverse order so that the first-registered middleware wraps outermost.
+    pub fn Use(self: *Router, mw: types.Middleware) {
+        self.middlewares = append(self.middlewares, mw)
+    }
+
+    // matchRoute finds the first route that matches the request method and path.
+    // It populates path parameters into req.headers and returns the handler and a bool indicating success.
+    pub fn matchRoute(self: Router, req: *types.Request) -> (types.Handler, bool) {
+        method := req.Method()
+        path := req.Path()
+        for i := 0; i < len(self.routes); i = i + 1 {
+            r := self.routes[i]
+            // Skip routes whose HTTP method does not match. A HEAD
+            // request falls back to GET handlers — it is a GET whose
+            // response body is suppressed by the server (#57).
+            if r.method != method && !(method == "HEAD" && r.method == "GET") {
+                continue
+            }
+            // Exact match on the full path.
+            if r.pattern == path {
+                return r.handler, true
+            }
+            // Check for trailing /* wildcard (e.g. /static/*)
+            plen := str.Len(r.pattern)
+            if plen > 1 && r.pattern[plen - 1] == 42 { // '*'
+                prefix := str.Substr(r.pattern, 0, plen - 1)
+                if str.StartsWith(path, prefix) {
+                    return r.handler, true
+                }
+            }
+            // Check for /:param pattern (e.g. /user/:id)
+            if str.StartsWith(r.pattern, "/") && str.Contains(r.pattern, "/:") {
+                // Split both pattern and request path into segments for comparison.
+                parts := str.Split(r.pattern, "/")
+                reqParts := str.Split(path, "/")
+                if len(parts) == len(reqParts) {
+                    matched := true
+                    for j := 0; j < len(parts); j = j + 1 {
+                        // A ":name" segment captures the corresponding request segment.
+                        if str.StartsWith(parts[j], ":") {
+                            name := str.Substr(parts[j], 1, len(parts[j]) - 1)
+                            // Store the parameter in the dedicated params
+                            // map so it can't collide with real headers.
+                            req.params[name] = reqParts[j]
+                            continue
+                        }
+                        // Literal segments must match exactly.
+                        if parts[j] != reqParts[j] {
+                            matched = false
+                            break
+                        }
+                    }
+                    if matched {
+                        return r.handler, true
+                    }
+                }
+            }
+        }
+        var empty types.Handler
+        return empty, false
+    }
+
+    // ServeHTTP matches a request and applies the middleware chain before
+    // invoking the final handler. Returns 404 if no route matches.
+    pub fn ServeHTTP(self: *Router, req: types.Request, w: *types.ResponseWriter) {
+        handler, found := self.matchRoute(&req)
+        if !found {
+            w.WriteHeader(404)
+            w.Write("Not Found")
+            return
+        }
+
+        // Apply middleware chain (innermost last).
+        // We iterate backwards so the first-registered middleware is outermost.
+        var final types.Handler
+        final = handler
+        for i := len(self.middlewares) - 1; i >= 0; i = i - 1 {
+            final = self.middlewares[i](final)
+        }
+        final(req, w)
+    }
+}
+
+// NewRouter creates a fresh Router with empty routes and middleware lists.
+pub fn NewRouter() -> Router {
+    var routes []Route
+    var mws []types.Middleware
+    return Router{routes: routes, middlewares: mws}
+}
+
+// New is an alias for NewRouter, matching the book's router.New() usage.
+pub fn New() -> Router {
+    return NewRouter()
+}

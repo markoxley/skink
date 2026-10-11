@@ -1,0 +1,321 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/compiler_regress_test.skink
+// Purpose: Regression tests for compiler bug fixes found in the
+//          comprehensive audit (numeric literals, typed switch,
+//          continue-in-switch, dot/norm, len(chan), closed-channel
+//          receive, spawn lifetimes, ranges, tagged unions,
+//          panic/recover, slice bounds, writable string literals).
+//
+// Licensed under the Apache License, Version 2.0.
+
+module compiler_regress_test
+
+import "testing"
+
+// === Numeric literal fixes (B1/B17) ===
+
+// TestAdjacentOperatorsNotSwallowed verifies subtraction not lexed as number.
+pub fn TestAdjacentOperatorsNotSwallowed() {
+    // Previously "5-1" lexed as a single numeric token "51".
+    testing.AssertEqualInt(4, 5 - 1, "5-1 must be subtraction")
+    testing.AssertEqualInt(5, 3 + 2, "3+2 must be addition")
+    testing.AssertEqualInt(15, 0x10 - 1, "0x10-1 must parse as hex minus 1")
+    testing.AssertEqualInt(4, 10 - 2 - 2 - 2, "chained subtraction")
+}
+
+// TestIntegerLiterals verifies hex, binary, octal, underscore literals.
+pub fn TestIntegerLiterals() {
+    testing.AssertEqualInt(255, 0xFF, "0xFF")
+    testing.AssertEqualInt(5, 0b101, "0b101")
+    testing.AssertEqualInt(15, 0o17, "0o17")
+    testing.AssertEqualInt(1000, 1_000, "underscore separator")
+    testing.AssertEqualInt(4096, 0x1_000, "hex underscore separator")
+}
+
+// TestFloatExponentLiteral verifies float literals with exponents.
+pub fn TestFloatExponentLiteral() {
+    f := 1e5
+    testing.AssertEqualFloat(100000.0, f, "1e5 must be 100000")
+    g := 2.5e2
+    testing.AssertEqualFloat(250.0, g, "2.5e2")
+    h := 1e-2
+    testing.AssertEqualFloat(0.01, h, "1e-2")
+}
+
+// TestRawStringLiterals verifies raw strings keep backslashes literally.
+pub fn TestRawStringLiterals() {
+    r := `a\nb`
+    testing.AssertEqualInt(4, len(r), "raw string keeps backslash literally")
+    s := "a\nb"
+    testing.AssertEqualInt(3, len(s), "escaped string processes \\n")
+}
+
+// === Type-aware switch (B2) ===
+
+fn switchOnString(s: string) -> int {
+    switch s {
+    case "a":
+        return 1
+    case "b":
+        return 2
+    default:
+        return -1
+    }
+}
+
+// TestSwitchString verifies string switch compares by content not pointer.
+pub fn TestSwitchString() {
+    testing.AssertEqualInt(1, switchOnString("a"), "string switch a")
+    testing.AssertEqualInt(2, switchOnString("b"), "string switch b")
+    testing.AssertEqualInt(-1, switchOnString("zzz"), "string switch default")
+    // Equal content, different allocation (built at runtime)
+    b := "b"
+    bb := ""
+    bb = bb + "b"
+    testing.AssertEqualInt(2, switchOnString(bb), "string switch compares content not pointer")
+}
+
+fn switchOnFloat(f: float) -> int {
+    switch f {
+    case 1.5:
+        return 1
+    case 2.25:
+        return 2
+    default:
+        return 0
+    }
+}
+
+// TestSwitchFloat verifies switch on float subjects.
+pub fn TestSwitchFloat() {
+    testing.AssertEqualInt(1, switchOnFloat(1.5), "float switch 1.5")
+    testing.AssertEqualInt(2, switchOnFloat(2.25), "float switch 2.25")
+    testing.AssertEqualInt(0, switchOnFloat(9.9), "float switch default")
+}
+
+// TestSwitchInt verifies switch on int subjects.
+pub fn TestSwitchInt() {
+    x := 7
+    got := -1
+    switch x {
+    case 6:
+        got = 6
+    case 7:
+        got = 7
+    default:
+        got = 0
+    }
+    testing.AssertEqualInt(7, got, "int switch")
+}
+
+// TestSwitchBool verifies switch on bool subjects.
+pub fn TestSwitchBool() {
+    x := true
+    got := -1
+    switch x {
+    case true:
+        got = 1
+    case false:
+        got = 0
+    default:
+        got = -2
+    }
+    testing.AssertEqualInt(1, got, "bool switch")
+}
+
+// === continue inside switch/select (B6) ===
+
+// TestContinueInsideSwitch verifies continue in switch targets loop.
+pub fn TestContinueInsideSwitch() {
+    sum := 0
+    for i := 0; i < 6; i = i + 1 {
+        switch i {
+        case 2:
+            continue
+        case 4:
+            continue
+        default:
+        }
+        sum = sum + i
+    }
+    // 0+1+3+5 = 9 (2 and 4 skipped)
+    testing.AssertEqualInt(9, sum, "continue in switch must target the loop")
+}
+
+// === dot / norm builtins (B3) ===
+
+// TestDotNorm verifies dot product and norm builtins.
+pub fn TestDotNorm() {
+    a := []float{1.0, 2.0, 3.0}
+    b := []float{4.0, 5.0, 6.0}
+    testing.AssertEqualFloat(32.0, dot(a, b), "dot product")
+    v := []float{3.0, 4.0}
+    testing.AssertEqualFloat(5.0, norm(v), "norm 3-4-5")
+}
+
+// === len(chan) (B13) ===
+
+// TestLenChan verifies len() on buffered channel reports queue depth.
+pub fn TestLenChan() {
+    ch := make(chan<int>, 4)
+    testing.AssertEqualInt(0, len(ch), "empty channel len")
+    ch <- 1
+    ch <- 2
+    testing.AssertEqualInt(2, len(ch), "buffered channel len")
+    <-ch
+    testing.AssertEqualInt(1, len(ch), "len after recv")
+    close(ch)
+}
+
+// === Closed-channel receive (B7) ===
+
+// TestChanRecvClosed verifies receive on closed channel yields zero.
+pub fn TestChanRecvClosed() {
+    ch := make(chan<int>, 1)
+    ch <- 42
+    close(ch)
+    v1, ok1 := <-ch
+    testing.AssertEqualInt(42, v1, "recv from closed-with-data")
+    testing.AssertTrue(ok1, "ok for buffered value")
+    v2, ok2 := <-ch
+    testing.AssertEqualInt(0, v2, "recv from closed channel yields zero value")
+    testing.AssertFalse(ok2, "ok false on closed channel")
+    // Plain receive on closed channel: zero value, no crash.
+    v3 := <-ch
+    testing.AssertEqualInt(0, v3, "plain recv on closed channel")
+}
+
+// === Range iteration (B9) ===
+
+// TestForInRange verifies for-in range over integer ranges.
+pub fn TestForInRange() {
+    sum := 0
+    for i in 0..5 {
+        sum = sum + i
+    }
+    testing.AssertEqualInt(10, sum, "for i in 0..5 sums 0..4")
+    n := 0
+    for i in 3..3 {
+        n = n + 1
+    }
+    testing.AssertEqualInt(0, n, "empty range iterates zero times")
+}
+
+// === Tagged unions (B5) ===
+
+enum RegShape {
+    RegCircle(float)
+    RegRect(float, float)
+    RegEmpty
+}
+
+fn shapeArea(s: RegShape) -> float {
+    return match s {
+        RegCircle(r) => 3.14159 * r * r
+        RegRect(w, h) => w * h
+        RegEmpty => 0.0
+    }
+}
+
+// TestTaggedUnion verifies tagged union enum with payload match.
+pub fn TestTaggedUnion() {
+    c := RegCircle(2.0)
+    testing.AssertEqualFloat(12.566, shapeArea(c), "circle area")
+    r := RegRect(3.0, 4.0)
+    testing.AssertEqualFloat(12.0, shapeArea(r), "rect area")
+    e := RegEmpty
+    testing.AssertEqualFloat(0.0, shapeArea(e), "bare variant area")
+}
+
+// === panic/recover (B4) ===
+
+fn willPanic() {
+    panic("boom")
+}
+
+fn caughtRecover() -> string {
+    defer fn() {
+        msg := recover()
+        if len(msg) > 0 {
+            io0Store(msg)
+        }
+    }()
+    willPanic()
+    return "not reached"
+}
+
+// io0Store is a tiny sink so the deferred fn can smuggle the recovered
+// message out of the panic frame for the test to observe.
+var recoveredMsg: string
+
+fn io0Store(s: string) {
+    recoveredMsg = s
+}
+
+// TestPanicRecover verifies recover() returns the panic message.
+pub fn TestPanicRecover() {
+    recoveredMsg = ""
+    caughtRecover()
+    testing.AssertEqualString("boom", recoveredMsg, "recover() must return the panic message")
+}
+
+// TestRecoverOutsidePanic verifies recover outside panic returns empty.
+pub fn TestRecoverOutsidePanic() {
+    msg := recover()
+    testing.AssertEqualInt(0, len(msg), "recover outside panic returns empty")
+}
+
+// === spawn argument pack (B8) ===
+
+fn spawnAdd(ch: chan<int>, a: int, b: int) {
+    ch <- a + b
+}
+
+// TestSpawnMultiArg verifies spawn with multiple int arguments.
+pub fn TestSpawnMultiArg() {
+    ch := make(chan<int>, 1)
+    spawn spawnAdd(ch, 20, 22)
+    v := <-ch
+    testing.AssertEqualInt(42, v, "spawn with two args")
+}
+
+fn spawnStringy(ch: chan<string>, s: string) {
+    ch <- s
+}
+
+// TestSpawnHeapArg verifies spawn with heap-allocated string argument.
+pub fn TestSpawnHeapArg() {
+    ch := make(chan<string>, 1)
+    s := "heap-arg"
+    spawn spawnStringy(ch, s)
+    v := <-ch
+    testing.AssertEqualString("heap-arg", v, "spawn with string arg")
+}
+
+// === Writable string literals (B12) ===
+
+// TestStringLiteralByteStore verifies byte store into string literal.
+pub fn TestStringLiteralByteStore() {
+    s := "hello"
+    s[0] = 74 // 'J'
+    testing.AssertEqualInt(74, s[0], "byte store into string")
+    // A different literal site must not observe the mutation.
+    t := "hello"
+    testing.AssertEqualInt(104, t[0], "other 'hello' site unmutated")
+}
+
+// === Slice bounds (B11) — only non-panicking cases in-process ===
+
+// TestSliceBoundsOk verifies slice and index operations within bounds.
+pub fn TestSliceBoundsOk() {
+    s := "hello"
+    sub := s[1:3]
+    testing.AssertEqualInt(2, len(sub), "string slice")
+    arr := []int{1, 2, 3}
+    testing.AssertEqualInt(2, arr[1], "index still works")
+}

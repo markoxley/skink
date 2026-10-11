@@ -1,0 +1,172 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/web/web_test.skink
+// Purpose: Tests for std/web types, routing, and template parsing.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Tests for std/web types, routing, and template parsing.
+
+module web_test
+
+import "std/str"
+import "std/web/router"
+import "std/web/tmpl"
+import "std/web/types"
+import "testing"
+
+// TestResponseWriter checks the response writer buffer and status.
+pub fn TestResponseWriter() {
+    w := types.NewResponseWriter()
+    w.WriteHeader(200)
+    w.Write("hello")
+    if w.Status() != 200 {
+        Errorf("ResponseWriter status should be 200")
+    }
+    if w.ResponseBody() != "hello" {
+        Errorf("ResponseWriter body mismatch")
+    }
+    w.Header("Content-Type", "text/plain")
+    if w.Status() != 200 {
+        Errorf("ResponseWriter status should still be 200")
+    }
+}
+
+// TestRequest checks request constructor and accessors.
+pub fn TestRequest() {
+    h := make(map[string]string)
+    h["x-foo"] = "bar"
+    r := types.NewRequest("POST", "/api/v1/users", "?id=1", h, "payload")
+    if r.Method() != "POST" {
+        Errorf("Request method should be POST")
+    }
+    if r.Path() != "/api/v1/users" {
+        Errorf("Request path mismatch")
+    }
+    if r.Query() != "?id=1" {
+        Errorf("Request query mismatch")
+    }
+    if r.Header("x-foo") != "bar" {
+        Errorf("Request header mismatch")
+    }
+    if r.Body() != "payload" {
+        Errorf("Request body mismatch")
+    }
+}
+
+// TestTmplParse checks valid template parsing.
+pub fn TestTmplParse() {
+    _, err := tmpl.Parse("<h1>Hello</h1>")
+    if err.message != "" {
+        Errorf("Valid template should parse: " + err.message)
+    }
+}
+
+// TestTmplExecute checks variable substitution.
+pub fn TestTmplExecute() {
+    t, _ := tmpl.Parse("<h1>Hello, {{.name}}!</h1>")
+    data := make(map[string]string)
+    data["name"] = "Ada"
+    rendered, err := tmpl.Execute(t, data)
+    if err.message != "" {
+        Errorf("Template execute should succeed: " + err.message)
+    }
+    if rendered != "<h1>Hello, Ada!</h1>" {
+        Errorf("Template rendered incorrectly: " + rendered)
+    }
+}
+
+// TestTmplIf checks conditional blocks. Guards the regression where
+// executeImpl advanced only past "{{" of {{end}}, leaking "end}}" into
+// the rendered output.
+pub fn TestTmplIf() {
+    t, _ := tmpl.Parse("{{if .show}}yes{{else}}no{{end}}!")
+    data := make(map[string]string)
+    data["show"] = "true"
+    rendered, _ := tmpl.Execute(t, data)
+    if rendered != "yes!" {
+        Errorf("if-true rendered incorrectly: " + rendered)
+    }
+    data["show"] = ""
+    rendered2, _ := tmpl.Execute(t, data)
+    if rendered2 != "no!" {
+        Errorf("if-false rendered incorrectly: " + rendered2)
+    }
+    // {{if}} without {{else}} must still render the true branch —
+    // previously the missing else produced a negative slice length and
+    // rendered "".
+    t2, _ := tmpl.Parse("{{if .show}}yes{{end}}!")
+    data["show"] = "1"
+    rendered3, _ := tmpl.Execute(t2, data)
+    if rendered3 != "yes!" {
+        Errorf("if-no-else rendered incorrectly: " + rendered3)
+    }
+}
+
+// TestTmplRange checks {{range}} iteration over a comma-separated list
+// with {{.$}} bound to the current item.
+pub fn TestTmplRange() {
+    t, _ := tmpl.Parse("{{range .items}}[{{.$}}]{{end}}")
+    data := make(map[string]string)
+    data["items"] = "a,b,c"
+    rendered, _ := tmpl.Execute(t, data)
+    if rendered != "[a][b][c]" {
+        Errorf("range rendered incorrectly: " + rendered)
+    }
+}
+
+// TestRouter checks route registration and matching.
+pub fn TestRouter() {
+    r := router.NewRouter()
+    r.Get("/", homeHandler)
+    r.Get("/about", aboutHandler)
+    r.Post("/users", createUserHandler)
+
+    req1 := types.NewRequest("GET", "/", "", make(map[string]string), "")
+    w1 := types.NewResponseWriter()
+    r.ServeHTTP(req1, w1)
+    if w1.Status() != 200 || w1.ResponseBody() != "home" {
+        Errorf("Should match root route")
+    }
+
+    req2 := types.NewRequest("GET", "/missing", "", make(map[string]string), "")
+    w2 := types.NewResponseWriter()
+    r.ServeHTTP(req2, w2)
+    if w2.Status() != 404 {
+        Errorf("Should not match missing route")
+    }
+}
+
+// homeHandler is a test handler that writes "home" to the response.
+fn homeHandler(req: types.Request, w: *types.ResponseWriter) {
+    if req.Method() == "" {}
+    w.Write("home")
+}
+
+// aboutHandler is a test handler that writes "about" to the response.
+fn aboutHandler(req: types.Request, w: *types.ResponseWriter) {
+    if req.Method() == "" {}
+    w.Write("about")
+}
+
+// createUserHandler is a test handler that writes "created" to the response.
+fn createUserHandler(req: types.Request, w: *types.ResponseWriter) {
+    if req.Method() == "" {}
+    w.Write("created")
+}

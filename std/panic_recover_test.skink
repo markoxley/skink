@@ -1,0 +1,81 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/panic_recover_test.skink
+// Purpose: Regression tests for panic/recover (B4).
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module panic_recover_test
+
+import "testing"
+import "std/str"
+
+var prMsg: string
+
+fn recSave(m: string) {
+    prMsg = m
+}
+
+fn willPanic() {
+    defer fn() {
+        recSave(recover())
+    }()
+    panic("boom")
+}
+
+// TestRecoverMessage verifies recover captures the panic message.
+pub fn TestRecoverMessage() {
+    prMsg = ""
+    willPanic()
+    testing.AssertEqualString("boom", prMsg, "recover captures panic msg")
+}
+
+var prOrder: int
+
+fn defA() {
+    prOrder = prOrder * 10 + 1
+}
+
+fn defB() {
+    prOrder = prOrder * 10 + 2
+    r := recover()
+    if str.Len(r) > 0 {
+        prOrder = prOrder * 10 + 9
+    }
+}
+
+fn panicWithTwoDefers() {
+    defer defA()
+    defer defB()
+    panic("two")
+}
+
+// TestDefersRunOnPanic verifies deferred functions run LIFO on panic.
+pub fn TestDefersRunOnPanic() {
+    prOrder = 0
+    panicWithTwoDefers()
+    // defB runs first (LIFO), sees the panic; then defA
+    testing.AssertEqualInt(291, prOrder, "deferred fns run LIFO on panic")
+}
+
+// TestRecoverOutsidePanic verifies recover outside panic returns empty.
+pub fn TestRecoverOutsidePanic() {
+    r := recover()
+    testing.AssertEqualString("", r, "recover outside panic returns empty")
+}

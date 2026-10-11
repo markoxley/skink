@@ -1,0 +1,894 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/graph.skink
+// Purpose: Computation graph with automatic differentiation for neural
+//          networks, supporting forward passes, backpropagation, and
+//          gradient-based optimizers (SGD, Adam).
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+module graph
+
+import "std/math"
+import "std/tensor" as tsr
+import "std/errors"
+import "std/str"
+
+// OpType identifies the operation performed by a node.
+pub const OP_INPUT = 0      // input/placeholder node
+// OP_PARAM marks a trainable parameter node (weights or biases).
+pub const OP_PARAM = 1      // trainable parameter (weight/bias)
+// OP_ADD marks an element-wise addition operation.
+pub const OP_ADD = 2        // element-wise addition
+// OP_SUB marks an element-wise subtraction operation.
+pub const OP_SUB = 3        // element-wise subtraction
+// OP_MUL marks an element-wise multiplication operation.
+pub const OP_MUL = 4        // element-wise multiplication
+// OP_MATMUL marks a matrix multiplication operation.
+pub const OP_MATMUL = 5     // matrix multiplication
+// OP_SCALE marks a scalar multiplication operation.
+pub const OP_SCALE = 6      // scalar multiplication
+// OP_RELU marks a ReLU activation operation.
+pub const OP_RELU = 7       // ReLU activation
+// OP_SIGMOID marks a sigmoid activation operation.
+pub const OP_SIGMOID = 8    // sigmoid activation
+// OP_TANH marks a tanh activation operation.
+pub const OP_TANH = 9       // tanh activation
+// OP_SOFTMAX marks a softmax activation operation.
+pub const OP_SOFTMAX = 10   // softmax activation
+// OP_SUM marks a sum reduction operation.
+pub const OP_SUM = 11       // sum reduction
+// OP_MEAN marks a mean reduction operation.
+pub const OP_MEAN = 12      // mean reduction
+// OP_TRANSPOSE marks a matrix transpose operation.
+pub const OP_TRANSPOSE = 13 // matrix transpose
+// OP_LOSS_MSE marks a mean squared error loss operation.
+pub const OP_LOSS_MSE = 14  // mean squared error loss
+// OP_LOSS_CE marks a cross-entropy loss operation.
+pub const OP_LOSS_CE = 15   // cross-entropy loss
+// OP_NEG marks a negation operation.
+pub const OP_NEG = 16       // negation
+
+// Node is a node in the computation graph.
+pub struct Node {
+    ID:       int
+    Op:       int
+    Name:     string
+    Value:    tsr.Tensor
+    Grad:     tsr.Tensor
+    inputs:   []int      // IDs of input nodes
+    shape:    []int
+    requiresGrad: bool
+
+    // Data returns the tensor value of this node.
+    pub fn Data(self: Node) -> tsr.Tensor {
+        return self.Value
+    }
+
+    // Gradient returns the gradient tensor of this node.
+    pub fn Gradient(self: Node) -> tsr.Tensor {
+        return self.Grad
+    }
+
+    // Shape returns the shape of this node's value.
+    pub fn Shape(self: Node) -> []int {
+        return self.shape
+    }
+
+    // RequiresGrad returns whether this node requires gradient computation.
+    pub fn RequiresGrad(self: Node) -> bool {
+        return self.requiresGrad
+    }
+
+    // Scalar returns the value as a scalar (first element).
+    pub fn Scalar(self: Node) -> float {
+        return self.Value.Get(scalarIdx())
+    }
+}
+
+// Graph is a computation graph supporting automatic differentiation.
+pub struct Graph {
+    nodes:    []Node
+    nextID:   int
+
+    // NumNodes returns the number of nodes in the graph.
+    pub fn NumNodes(self: Graph) -> int {
+        return len(self.nodes)
+    }
+
+    // GetNode returns the node with the given ID.
+    pub fn GetNode(self: Graph, id: int) -> (Node, errors.Error) {
+        if id < 0 || id >= len(self.nodes) {
+            return Node{}, errors.New("node ID out of range")
+        }
+        return self.nodes[id], errors.New("")
+    }
+
+    // Params returns all parameter node IDs (trainable).
+    pub fn Params(self: Graph) -> []int {
+        var params []int
+        for i := 0; i < len(self.nodes); i = i + 1 {
+            if self.nodes[i].Op == OP_PARAM {
+                params = append(params, self.nodes[i].ID)
+            }
+        }
+        return params
+    }
+}
+
+// NewGraph creates an empty computation graph.
+pub fn NewGraph() -> Graph {
+    return Graph{nextID: 0}
+}
+
+// scalarIdx returns the index slice [0] for scalar tensor access.
+fn scalarIdx() -> []int {
+    var idx []int
+    idx = append(idx, 0)
+    return idx
+}
+
+// inputs1 creates a single-element input slice.
+fn inputs1(a: int) -> []int {
+    var s []int
+    s = append(s, a)
+    return s
+}
+
+// inputs2 creates a two-element input slice.
+fn inputs2(a: int, b: int) -> []int {
+    var s []int
+    s = append(s, a)
+    s = append(s, b)
+    return s
+}
+
+// shape2 creates a two-element shape slice.
+fn shape2(a: int, b: int) -> []int {
+    var s []int
+    s = append(s, a)
+    s = append(s, b)
+    return s
+}
+
+// shape1 creates a single-element shape slice.
+fn shape1(a: int) -> []int {
+    var s []int
+    s = append(s, a)
+    return s
+}
+
+// shapeLen returns the total number of elements in a shape.
+fn shapeLen(shape: []int) -> int {
+    n := 1
+    for i := 0; i < len(shape); i = i + 1 {
+        n = n * shape[i]
+    }
+    return n
+}
+
+// Input creates an input/placeholder node with the given shape.
+pub fn Input(g: *Graph, name: string, shape: []int) -> int {
+    id := g.nextID
+    g.nextID = id + 1
+    node := Node{
+        ID: id,
+        Op: OP_INPUT,
+        Name: name,
+        shape: shape,
+        requiresGrad: false,
+        Value: tsr.Zeros(shape),
+        Grad: tsr.Zeros(shape),
+    }
+    g.nodes = append(g.nodes, node)
+    return id
+}
+
+// Param creates a trainable parameter node initialized to zeros.
+pub fn Param(g: *Graph, name: string, shape: []int) -> int {
+    id := g.nextID
+    g.nextID = id + 1
+    node := Node{
+        ID: id,
+        Op: OP_PARAM,
+        Name: name,
+        shape: shape,
+        requiresGrad: true,
+        Value: tsr.Zeros(shape),
+        Grad: tsr.Zeros(shape),
+    }
+    g.nodes = append(g.nodes, node)
+    return id
+}
+
+// ParamRandom creates a trainable parameter with random initialization.
+pub fn ParamRandom(g: *Graph, name: string, shape: []int) -> int {
+    id := Param(g, name, shape)
+    node := g.nodes[id]
+    node.Value = tsr.Random(shape)
+    g.nodes[id] = node
+    return id
+}
+
+// addOp adds an operation node to the graph.
+fn addOp(g: *Graph, op: int, name: string, inputs: []int, shape: []int) -> int {
+    id := g.nextID
+    g.nextID = id + 1
+    node := Node{
+        ID: id,
+        Op: op,
+        Name: name,
+        inputs: inputs,
+        shape: shape,
+        requiresGrad: true,
+        Value: tsr.Zeros(shape),
+        Grad: tsr.Zeros(shape),
+    }
+    g.nodes = append(g.nodes, node)
+    return id
+}
+
+// SetInput sets the tensor data for an input node.
+pub fn SetInput(g: *Graph, id: int, data: tsr.Tensor) -> errors.Error {
+    if id < 0 || id >= len(g.nodes) {
+        return errors.New("node ID out of range")
+    }
+    node := g.nodes[id]
+    node.Value = data
+    g.nodes[id] = node
+    return errors.New("")
+}
+
+// SetParam sets the tensor data for a parameter node.
+pub fn SetParam(g: *Graph, id: int, data: tsr.Tensor) -> errors.Error {
+    if id < 0 || id >= len(g.nodes) {
+        return errors.New("node ID out of range")
+    }
+    node := g.nodes[id]
+    node.Value = data
+    g.nodes[id] = node
+    return errors.New("")
+}
+
+// Add creates an element-wise addition node: a + b.
+pub fn Add(g: *Graph, a: int, b: int) -> (int, errors.Error) {
+    na, err := g.GetNode(a)
+    if err.message != "" {
+        return 0, err
+    }
+    return addOp(g, OP_ADD, "add", inputs2(a, b), na.shape), errors.New("")
+}
+
+// Sub creates an element-wise subtraction node: a - b.
+pub fn Sub(g: *Graph, a: int, b: int) -> (int, errors.Error) {
+    na, err := g.GetNode(a)
+    if err.message != "" {
+        return 0, err
+    }
+    return addOp(g, OP_SUB, "sub", inputs2(a, b), na.shape), errors.New("")
+}
+
+// Mul creates an element-wise multiplication node: a * b.
+pub fn Mul(g: *Graph, a: int, b: int) -> (int, errors.Error) {
+    na, err := g.GetNode(a)
+    if err.message != "" {
+        return 0, err
+    }
+    return addOp(g, OP_MUL, "mul", inputs2(a, b), na.shape), errors.New("")
+}
+
+// MatMul creates a matrix multiplication node: a @ b.
+pub fn MatMul(g: *Graph, a: int, b: int) -> (int, errors.Error) {
+    na, err := g.GetNode(a)
+    if err.message != "" {
+        return 0, err
+    }
+    nb, err2 := g.GetNode(b)
+    if err2.message != "" {
+        return 0, err2
+    }
+    if len(na.shape) < 2 || len(nb.shape) < 2 {
+        return 0, errors.New("matmul requires 2D tensors")
+    }
+    if na.shape[1] != nb.shape[0] {
+        return 0, errors.New("matmul dimension mismatch")
+    }
+    return addOp(g, OP_MATMUL, "matmul", inputs2(a, b), shape2(na.shape[0], nb.shape[1])), errors.New("")
+}
+
+// Scale creates a scalar multiplication node: a * s.
+pub fn Scale(g: *Graph, a: int, s: float) -> (int, errors.Error) {
+    na, err := g.GetNode(a)
+    if err.message != "" {
+        return 0, err
+    }
+    return addOp(g, OP_SCALE, "scale", inputs1(a), na.shape), errors.New("")
+}
+
+// ReLU creates a ReLU activation node.
+pub fn ReLU(g: *Graph, a: int) -> (int, errors.Error) {
+    na, err := g.GetNode(a)
+    if err.message != "" {
+        return 0, err
+    }
+    return addOp(g, OP_RELU, "relu", inputs1(a), na.shape), errors.New("")
+}
+
+// Sigmoid creates a sigmoid activation node.
+pub fn Sigmoid(g: *Graph, a: int) -> (int, errors.Error) {
+    na, err := g.GetNode(a)
+    if err.message != "" {
+        return 0, err
+    }
+    return addOp(g, OP_SIGMOID, "sigmoid", inputs1(a), na.shape), errors.New("")
+}
+
+// Tanh creates a tanh activation node.
+pub fn Tanh(g: *Graph, a: int) -> (int, errors.Error) {
+    na, err := g.GetNode(a)
+    if err.message != "" {
+        return 0, err
+    }
+    return addOp(g, OP_TANH, "tanh", inputs1(a), na.shape), errors.New("")
+}
+
+// Softmax creates a softmax activation node.
+pub fn Softmax(g: *Graph, a: int) -> (int, errors.Error) {
+    na, err := g.GetNode(a)
+    if err.message != "" {
+        return 0, err
+    }
+    return addOp(g, OP_SOFTMAX, "softmax", inputs1(a), na.shape), errors.New("")
+}
+
+// Transpose creates a transpose node (2D only).
+pub fn Transpose(g: *Graph, a: int) -> (int, errors.Error) {
+    na, err := g.GetNode(a)
+    if err.message != "" {
+        return 0, err
+    }
+    if len(na.shape) < 2 {
+        return 0, errors.New("transpose requires 2D tensor")
+    }
+    return addOp(g, OP_TRANSPOSE, "transpose", inputs1(a), shape2(na.shape[1], na.shape[0])), errors.New("")
+}
+
+// Mean creates a mean reduction node (scalar output).
+pub fn Mean(g: *Graph, a: int) -> (int, errors.Error) {
+    return addOp(g, OP_MEAN, "mean", inputs1(a), shape1(1)), errors.New("")
+}
+
+// Sum creates a sum reduction node (scalar output).
+pub fn Sum(g: *Graph, a: int) -> (int, errors.Error) {
+    return addOp(g, OP_SUM, "sum", inputs1(a), shape1(1)), errors.New("")
+}
+
+// MSELoss creates a mean squared error loss node.
+pub fn MSELoss(g: *Graph, pred: int, target: int) -> (int, errors.Error) {
+    return addOp(g, OP_LOSS_MSE, "mse_loss", inputs2(pred, target), shape1(1)), errors.New("")
+}
+
+// CrossEntropyLoss creates a cross-entropy loss node.
+pub fn CrossEntropyLoss(g: *Graph, pred: int, target: int) -> (int, errors.Error) {
+    return addOp(g, OP_LOSS_CE, "ce_loss", inputs2(pred, target), shape1(1)), errors.New("")
+}
+
+// ============================================================================
+// Forward pass
+// ============================================================================
+
+// Forward executes the forward pass for a node, computing its value
+// from its inputs. This recursively computes values for all dependencies.
+pub fn Forward(g: *Graph, id: int) -> (tsr.Tensor, errors.Error) {
+    if id < 0 || id >= len(g.nodes) {
+        return tsr.Zeros(shape1(1)), errors.New("node ID out of range")
+    }
+    node := g.nodes[id]
+    // Input and param nodes already have values
+    if node.Op == OP_INPUT || node.Op == OP_PARAM {
+        return node.Value, errors.New("")
+    }
+    if len(node.inputs) == 0 {
+        return node.Value, errors.New("")
+    }
+    // Recursively forward all inputs
+    var inputVals []tsr.Tensor
+    for i := 0; i < len(node.inputs); i = i + 1 {
+        val, err := Forward(g, node.inputs[i])
+        if err.message != "" {
+            return tsr.Zeros(shape1(1)), err
+        }
+        inputVals = append(inputVals, val)
+    }
+    // Compute output based on op type
+    var result tsr.Tensor
+    if node.Op == OP_ADD {
+        result = tsr.Add(inputVals[0], inputVals[1])
+    } else if node.Op == OP_SUB {
+        result = tsr.Sub(inputVals[0], inputVals[1])
+    } else if node.Op == OP_MUL {
+        result = tsr.Mul(inputVals[0], inputVals[1])
+    } else if node.Op == OP_MATMUL {
+        result = tsr.MatMul(inputVals[0], inputVals[1])
+    } else if node.Op == OP_RELU {
+        result = tsr.ReLU(inputVals[0])
+    } else if node.Op == OP_SIGMOID {
+        result = tsr.Sigmoid(inputVals[0])
+    } else if node.Op == OP_TANH {
+        result = tsr.Tanh(inputVals[0])
+    } else if node.Op == OP_SOFTMAX {
+        result = tsr.Softmax(inputVals[0])
+    } else if node.Op == OP_TRANSPOSE {
+        result = tsr.Transpose(inputVals[0])
+    } else if node.Op == OP_SUM {
+        result = tsr.Zeros(shape1(1))
+        s := tsr.Sum(inputVals[0])
+        result.Set(scalarIdx(), s)
+    } else if node.Op == OP_MEAN {
+        result = tsr.Zeros(shape1(1))
+        s := tsr.Sum(inputVals[0])
+        n := shapeLen(inputVals[0].Shape())
+        result.Set(scalarIdx(), s / float(n))
+    } else if node.Op == OP_LOSS_MSE {
+        diff := tsr.Sub(inputVals[0], inputVals[1])
+        sq := tsr.Mul(diff, diff)
+        s := tsr.Sum(sq)
+        n := shapeLen(inputVals[0].Shape())
+        result = tsr.Zeros(shape1(1))
+        result.Set(scalarIdx(), s / float(n))
+    } else if node.Op == OP_LOSS_CE {
+        // Cross-entropy: -sum(target * log(pred)) — approximate with -sum(target*pred)
+        s := tsr.Sum(tsr.Mul(inputVals[1], inputVals[0]))
+        result = tsr.Zeros(shape1(1))
+        result.Set(scalarIdx(), -s)
+    } else {
+        result = node.Value
+    }
+    // Store result
+    node.Value = result
+    g.nodes[id] = node
+    return result, errors.New("")
+}
+
+// ============================================================================
+// Backward pass (backpropagation)
+// ============================================================================
+
+// ZeroGrads resets all gradients to zero.
+pub fn ZeroGrads(g: *Graph) {
+    for i := 0; i < len(g.nodes); i = i + 1 {
+        node := g.nodes[i]
+        node.Grad = tsr.Zeros(node.shape)
+        g.nodes[i] = node
+    }
+}
+
+// accGrad accumulates gradient into node id.
+fn accGrad(g: *Graph, id: int, grad: tsr.Tensor) {
+    node := g.nodes[id]
+    node.Grad = tsr.Add(node.Grad, grad)
+    g.nodes[id] = node
+}
+
+// Backward executes the backward pass from the given node.
+// The gradient at the output node is assumed to be 1.0.
+pub fn Backward(g: *Graph, id: int) -> errors.Error {
+    if id < 0 || id >= len(g.nodes) {
+        return errors.New("node ID out of range")
+    }
+    ZeroGrads(g)
+    // Set gradient at output to 1.0
+    node := g.nodes[id]
+    node.Grad = tsr.Ones(node.shape)
+    g.nodes[id] = node
+    // Backpropagate in reverse topological order (nodes are appended in
+    // dependency order, so iterating backwards visits consumers before producers).
+    i := len(g.nodes) - 1
+    for i >= 0 {
+        backwardNode(g, i)
+        i = i - 1
+    }
+    return errors.New("")
+}
+
+// backwardNode propagates gradient from node idx to its inputs.
+fn backwardNode(g: *Graph, idx: int) {
+    node := g.nodes[idx]
+    if len(node.inputs) == 0 {
+        return
+    }
+    if node.Op == OP_ADD {
+        accGrad(g, node.inputs[0], node.Grad)
+        accGrad(g, node.inputs[1], node.Grad)
+    } else if node.Op == OP_SUB {
+        accGrad(g, node.inputs[0], node.Grad)
+        accGrad(g, node.inputs[1], tsr.Scale(node.Grad, -1.0))
+    } else if node.Op == OP_MUL {
+        a := g.nodes[node.inputs[0]].Value
+        b := g.nodes[node.inputs[1]].Value
+        accGrad(g, node.inputs[0], tsr.Mul(node.Grad, b))
+        accGrad(g, node.inputs[1], tsr.Mul(node.Grad, a))
+    } else if node.Op == OP_MATMUL {
+        a := g.nodes[node.inputs[0]].Value
+        b := g.nodes[node.inputs[1]].Value
+        // d/da = grad * b^T, d/db = a^T * grad
+        accGrad(g, node.inputs[0], tsr.MatMul(node.Grad, tsr.Transpose(b)))
+        accGrad(g, node.inputs[1], tsr.MatMul(tsr.Transpose(a), node.Grad))
+    } else if node.Op == OP_RELU {
+        // d/da = grad if a > 0, else 0
+        inputVal := g.nodes[node.inputs[0]].Value
+        result := tsr.Zeros(inputVal.Shape())
+        total := shapeLen(inputVal.Shape())
+        for e := 0; e < total; e = e + 1 {
+            // Flat offsets — Get/Set need per-dimension coordinates
+            // (comp_error.md #92).
+            if inputVal.GetFlat(e) > 0.0 {
+                result.SetFlat(e, node.Grad.GetFlat(e))
+            }
+        }
+        accGrad(g, node.inputs[0], result)
+    } else if node.Op == OP_SIGMOID {
+        // d/da = grad * sig * (1 - sig)
+        sig := node.Value
+        accGrad(g, node.inputs[0], tsr.Mul(node.Grad, tsr.Mul(sig, tsr.Sub(tsr.Ones(sig.Shape()), sig))))
+    } else if node.Op == OP_TANH {
+        // d/da = grad * (1 - tanh^2)
+        t := node.Value
+        accGrad(g, node.inputs[0], tsr.Mul(node.Grad, tsr.Sub(tsr.Ones(t.Shape()), tsr.Mul(t, t))))
+    } else if node.Op == OP_SOFTMAX {
+        // Simplified: pass gradient through directly (full Jacobian not computed).
+        accGrad(g, node.inputs[0], node.Grad)
+    } else if node.Op == OP_TRANSPOSE {
+        accGrad(g, node.inputs[0], tsr.Transpose(node.Grad))
+    } else if node.Op == OP_SUM {
+        inputNode := g.nodes[node.inputs[0]]
+        accGrad(g, node.inputs[0], tsr.Ones(inputNode.shape))
+    } else if node.Op == OP_MEAN {
+        inputNode := g.nodes[node.inputs[0]]
+        n := shapeLen(inputNode.shape)
+        scaleVal := 1.0 / float(n)
+        accGrad(g, node.inputs[0], tsr.Scale(tsr.Ones(inputNode.shape), scaleVal))
+    } else if node.Op == OP_LOSS_MSE {
+        pred := g.nodes[node.inputs[0]].Value
+        target := g.nodes[node.inputs[1]].Value
+        diff := tsr.Sub(pred, target)
+        n := shapeLen(pred.Shape())
+        scaleVal := 2.0 / float(n)
+        accGrad(g, node.inputs[0], tsr.Scale(diff, scaleVal))
+        accGrad(g, node.inputs[1], tsr.Scale(diff, -scaleVal))
+    } else if node.Op == OP_LOSS_CE {
+        // d/dpred = -target (simplified cross-entropy gradient).
+        target := g.nodes[node.inputs[1]].Value
+        accGrad(g, node.inputs[0], tsr.Scale(target, -1.0))
+    }
+}
+
+// ============================================================================
+// Optimizers
+// ============================================================================
+
+// SGD is a stochastic gradient descent optimizer.
+pub struct SGD {
+    lr: float
+
+    // Step updates all parameters using gradients.
+    pub fn Step(self: SGD, g: *Graph) {
+        for i := 0; i < len(g.nodes); i = i + 1 {
+            node := g.nodes[i]
+            if node.Op != OP_PARAM {
+                continue
+            }
+            node.Value = tsr.Sub(node.Value, tsr.Scale(node.Grad, self.lr))
+            g.nodes[i] = node
+        }
+    }
+}
+
+// NewSGD creates an SGD optimizer with the given learning rate.
+pub fn NewSGD(lr: float) -> SGD {
+    return SGD{lr: lr}
+}
+
+// Adam is the Adam optimizer with adaptive learning rates.
+pub struct Adam {
+    lr:     float
+    beta1:  float
+    beta2:  float
+    eps:    float
+    t:      int
+    m:      []tsr.Tensor    // first moment per param
+    v:      []tsr.Tensor    // second moment per param
+    paramIdx: []int         // node positions of parameters
+
+    // Step updates all parameters using Adam update rule.
+    pub fn Step(self: *Adam, g: *Graph) {
+        self.t = self.t + 1
+        for pi := 0; pi < len(self.paramIdx); pi = pi + 1 {
+            i := self.paramIdx[pi]
+            node := g.nodes[i]
+            if node.Op != OP_PARAM {
+                continue
+            }
+            grad := node.Grad
+            // Initialize moments if needed
+            if len(self.m) <= pi {
+                self.m = append(self.m, tsr.Zeros(node.shape))
+                self.v = append(self.v, tsr.Zeros(node.shape))
+            }
+            // m = beta1*m + (1-beta1)*grad
+            self.m[pi] = tsr.Add(tsr.Scale(self.m[pi], self.beta1), tsr.Scale(grad, 1.0 - self.beta1))
+            // v = beta2*v + (1-beta2)*grad^2
+            self.v[pi] = tsr.Add(tsr.Scale(self.v[pi], self.beta2), tsr.Scale(tsr.Mul(grad, grad), 1.0 - self.beta2))
+            // Bias correction
+            bc1 := 1.0 - math.Pow(self.beta1, float(self.t))
+            bc2 := 1.0 - math.Pow(self.beta2, float(self.t))
+            // update = lr * mHat / (sqrt(vHat) + eps)
+            update := tsr.Zeros(node.shape)
+            total := shapeLen(node.shape)
+            for e := 0; e < total; e = e + 1 {
+                // Flat data offsets — Get/Set take per-dimension
+                // coordinates, not flat indices (comp_error.md #92:
+                // shape1(e) was len-1 on rank-2 params → OOB read).
+                // Bias-corrected first and second moment estimates.
+                mHat := self.m[pi].GetFlat(e) / bc1
+                vHat := self.v[pi].GetFlat(e) / bc2
+                // Clamp sqrt to eps to avoid division by zero.
+                sqrtV := math.Sqrt(math.Abs(vHat))
+                if sqrtV < self.eps {
+                    sqrtV = self.eps
+                }
+                update.SetFlat(e, self.lr * mHat / sqrtV)
+            }
+            node.Value = tsr.Sub(node.Value, update)
+            g.nodes[i] = node
+        }
+    }
+}
+
+// NewAdam creates an Adam optimizer with default hyperparameters.
+pub fn NewAdam(lr: float) -> Adam {
+    return Adam{
+        lr: lr,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 0.000000001,
+        t: 0,
+    }
+}
+
+// InitAdamParams scans the graph for parameter nodes and initializes
+// the Adam optimizer's internal state. Must be called before Step.
+pub fn InitAdamParams(opt: *Adam, g: *Graph) {
+    for i := 0; i < len(g.nodes); i = i + 1 {
+        if g.nodes[i].Op == OP_PARAM {
+            opt.paramIdx = append(opt.paramIdx, i)
+        }
+    }
+}
+
+// ============================================================================
+// High-level model building
+// ============================================================================
+
+// Linear creates a linear layer: y = W*x + b.
+// Returns the output node ID.
+pub fn Linear(g: *Graph, x: int, inFeatures: int, outFeatures: int, name: string) -> (int, errors.Error) {
+    w := ParamRandom(g, name + "_W", shape2(inFeatures, outFeatures))
+    b := Param(g, name + "_b", shape1(outFeatures))
+    mm, err := MatMul(g, x, w)
+    if err.message != "" {
+        return 0, err
+    }
+    return Add(g, mm, b)
+}
+
+// MLP builds a multi-layer perceptron with the given layer sizes.
+// activation: 0=none, 1=relu, 2=sigmoid, 3=tanh.
+// Returns the output node ID.
+pub fn MLP(g: *Graph, input: int, sizes: []int, activation: int) -> (int, errors.Error) {
+    current := input
+    for i := 0; i < len(sizes) - 1; i = i + 1 {
+        out, err := Linear(g, current, sizes[i], sizes[i + 1], "mlp")
+        if err.message != "" {
+            return 0, err
+        }
+        var actErr errors.Error
+        if activation == 1 {
+            out, actErr = ReLU(g, out)
+        } else if activation == 2 {
+            out, actErr = Sigmoid(g, out)
+        } else if activation == 3 {
+            out, actErr = Tanh(g, out)
+        }
+        if actErr.message != "" {
+            return 0, actErr
+        }
+        current = out
+    }
+    return current, errors.New("")
+}
+
+// TrainStep performs one training step: forward, backward, optimizer step.
+// Returns the loss value.
+pub fn TrainStep(g: *Graph, lossNode: int, opt: *Adam) -> (float, errors.Error) {
+    loss, err := Forward(g, lossNode)
+    if err.message != "" {
+        return 0.0, err
+    }
+    berr := Backward(g, lossNode)
+    if berr.message != "" {
+        return 0.0, berr
+    }
+    opt.Step(g)
+    return loss.Get(scalarIdx()), errors.New("")
+}
+
+// TrainStepSGD performs one training step with SGD optimizer.
+pub fn TrainStepSGD(g: *Graph, lossNode: int, opt: SGD) -> (float, errors.Error) {
+    loss, err := Forward(g, lossNode)
+    if err.message != "" {
+        return 0.0, err
+    }
+    berr := Backward(g, lossNode)
+    if berr.message != "" {
+        return 0.0, berr
+    }
+    opt.Step(g)
+    return loss.Get(scalarIdx()), errors.New("")
+}
+
+
+// === Weighted graph ADT (book chapter API) ===
+//
+// The book's math chapter demonstrates a small weighted graph with
+// named nodes and Dijkstra shortest path. `Graph` is already taken by
+// the autograd computation graph, so this type is named WGraph; the
+// constructor `New()` matches the book's `graph.New()` examples.
+
+// WGraph is a weighted directed graph with named nodes.
+pub struct WGraph {
+    names:  []string
+    edgeA:  []int
+    edgeB:  []int
+    edgeW:  []float
+
+    // AddNode adds a named node if it does not already exist.
+    pub fn AddNode(self: *WGraph, name: string) {
+        if wgraphNodeIndex(self, name) < 0 {
+            self.names = append(self.names, name)
+        }
+    }
+
+    // AddEdge adds a directed edge from node a to node b with weight w.
+    // Missing endpoint nodes are created automatically.
+    pub fn AddEdge(self: *WGraph, a: string, b: string, w: float) {
+        self.AddNode(a)
+        self.AddNode(b)
+        ai := wgraphNodeIndex(self, a)
+        bi := wgraphNodeIndex(self, b)
+        self.edgeA = append(self.edgeA, ai)
+        self.edgeB = append(self.edgeB, bi)
+        self.edgeW = append(self.edgeW, w)
+    }
+
+    // NumNodes returns the number of named nodes.
+    pub fn NumNodes(self: *WGraph) -> int {
+        return len(self.names)
+    }
+
+    // ShortestPath runs Dijkstra from `a` to `b`. Returns the path as a
+    // list of node names and the total weight; an empty path with 0.0 is
+    // returned when no route exists.
+    pub fn ShortestPath(self: *WGraph, a: string, b: string) -> ([]string, float) {
+        src := wgraphNodeIndex(self, a)
+        dst := wgraphNodeIndex(self, b)
+        var empty []string
+        if src < 0 || dst < 0 {
+            return empty, 0.0
+        }
+        n := len(self.names)
+        inf := 1.0e18
+
+        var dist []float
+        var prev []int
+        var done []bool
+        i := 0
+        for i < n {
+            dist = append(dist, inf)
+            prev = append(prev, -1)
+            done = append(done, false)
+            i = i + 1
+        }
+        dist[src] = 0.0
+
+        iter := 0
+        for iter < n {
+            // Find the unvisited node with the smallest tentative distance.
+            u := -1
+            best := inf
+            i = 0
+            for i < n {
+                if !done[i] && dist[i] < best {
+                    best = dist[i]
+                    u = i
+                }
+                i = i + 1
+            }
+            if u < 0 {
+                break
+            }
+            done[u] = true
+            if u == dst {
+                break
+            }
+            // Relax outgoing edges of u.
+            e := 0
+            for e < len(self.edgeA) {
+                if self.edgeA[e] == u {
+                    v := self.edgeB[e]
+                    alt := dist[u] + self.edgeW[e]
+                    if alt < dist[v] {
+                        dist[v] = alt
+                        prev[v] = u
+                    }
+                }
+                e = e + 1
+            }
+            iter = iter + 1
+        }
+
+        if dist[dst] >= inf {
+            return empty, 0.0
+        }
+        // Reconstruct the path backwards from dst to src.
+        var rev []string
+        cur := dst
+        for cur >= 0 {
+            rev = append(rev, self.names[cur])
+            cur = prev[cur]
+        }
+        var path []string
+        i = len(rev) - 1
+        for i >= 0 {
+            path = append(path, rev[i])
+            i = i - 1
+        }
+        return path, dist[dst]
+    }
+}
+
+// New creates an empty weighted graph.
+pub fn New() -> WGraph {
+    var names []string
+    var ea []int
+    var eb []int
+    var ew []float
+    return WGraph{names: names, edgeA: ea, edgeB: eb, edgeW: ew}
+}
+
+// wgraphNodeIndex finds a node's index by name, or -1.
+fn wgraphNodeIndex(g: *WGraph, name: string) -> int {
+    i := 0
+    for i < len(g.names) {
+        if str.Equal(g.names[i], name) {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}

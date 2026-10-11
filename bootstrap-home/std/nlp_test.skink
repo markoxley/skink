@@ -1,0 +1,185 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/nlp_test.skink
+// Purpose: Skink module for nlp test.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module nlp_test
+
+import "std/nlp"
+import "std/str"
+import "std/strconv"
+import "testing"
+
+// TestTokenize verifies basic tokenization.
+pub fn TestTokenize() {
+    tokens := nlp.Tokenize("Hello, world!")
+    if len(tokens) != 4 {
+        Errorf("expected 4 tokens, got " + strconv.Itoa(len(tokens)))
+    }
+    if tokens[0].text != "Hello" {
+        Errorf("first token should be Hello")
+    }
+    if tokens[1].text != "," {
+        Errorf("second token should be comma")
+    }
+    if tokens[2].text != "world" {
+        Errorf("third token should be world")
+    }
+    if tokens[3].text != "!" {
+        Errorf("fourth token should be exclamation")
+    }
+}
+
+// TestTokenizeContractions verifies that contractions are kept as one token.
+pub fn TestTokenizeContractions() {
+    tokens := nlp.Tokenize("don't stop")
+    if len(tokens) != 2 {
+        Errorf("expected 2 tokens for contraction, got " + strconv.Itoa(len(tokens)))
+    }
+    if tokens[0].text != "don't" {
+        Errorf("first token should be don't")
+    }
+}
+
+// TestTokenizeNumbers verifies that numbers are tokenized.
+pub fn TestTokenizeNumbers() {
+    tokens := nlp.Tokenize("I have 42 apples")
+    if len(tokens) != 4 {
+        Errorf("expected 4 tokens, got " + strconv.Itoa(len(tokens)))
+    }
+    if tokens[2].text != "42" {
+        Errorf("third token should be 42")
+    }
+}
+
+// TestTokenIsPunct verifies that punctuation tokens are identified.
+pub fn TestTokenIsPunct() {
+    tokens := nlp.Tokenize("hello!")
+    if !tokens[1].IsPunct() {
+        Errorf("exclamation should be punct")
+    }
+    if !tokens[0].IsWord() {
+        Errorf("hello should be a word")
+    }
+}
+
+// TestSentenceSegment verifies sentence segmentation.
+pub fn TestSentenceSegment() {
+    sentences := nlp.SentenceSegment("Hello world. How are you? I am fine!")
+    if len(sentences) != 3 {
+        Errorf("expected 3 sentences, got " + strconv.Itoa(len(sentences)))
+    }
+    if sentences[0] != "Hello world" {
+        Errorf("first sentence should be 'Hello world'")
+    }
+}
+
+// TestTagPOS verifies basic POS tagging.
+pub fn TestTagPOS() {
+    tokens := nlp.Tokenize("the cat runs")
+    tagged := nlp.TagPOS(tokens)
+    if tagged[0].tag != "DT" {
+        Errorf("'the' should be tagged DT")
+    }
+    if tagged[1].tag != "NN" {
+        Errorf("'cat' should be tagged NN")
+    }
+    if tagged[2].tag != "VB" {
+        Errorf("'runs' should be tagged VB")
+    }
+}
+
+// TestTagPOSAdjective verifies adjective tagging.
+pub fn TestTagPOSAdjective() {
+    tokens := nlp.Tokenize("beautiful flower")
+    tagged := nlp.TagPOS(tokens)
+    if tagged[0].tag != "JJ" {
+        Errorf("'beautiful' should be tagged JJ")
+    }
+}
+
+// TestTagPOSAdverb verifies adverb tagging.
+pub fn TestTagPOSAdverb() {
+    tokens := nlp.Tokenize("quickly run")
+    tagged := nlp.TagPOS(tokens)
+    if tagged[0].tag != "RB" {
+        Errorf("'quickly' should be tagged RB")
+    }
+}
+
+// TestTagPOSNumber verifies number tagging.
+pub fn TestTagPOSNumber() {
+    tokens := nlp.Tokenize("42 apples")
+    tagged := nlp.TagPOS(tokens)
+    if tagged[0].tag != "NUM" {
+        Errorf("'42' should be tagged NUM")
+    }
+}
+
+// TestTagPOSPronoun verifies pronoun tagging.
+pub fn TestTagPOSPronoun() {
+    tokens := nlp.Tokenize("I see them")
+    tagged := nlp.TagPOS(tokens)
+    if tagged[0].tag != "PRP" {
+        Errorf("'I' should be tagged PRP")
+    }
+    if tagged[2].tag != "PRP" {
+        Errorf("'them' should be tagged PRP")
+    }
+}
+
+// TestWordCount verifies word counting.
+pub fn TestWordCount() {
+    count := nlp.WordCount("Hello, world! How are you?")
+    if count != 5 {
+        Errorf("expected 5 words, got " + strconv.Itoa(count))
+    }
+}
+
+// TestExtractWords verifies word extraction.
+pub fn TestExtractWords() {
+    words := nlp.ExtractWords("Hello, world!")
+    if len(words) != 2 {
+        Errorf("expected 2 words, got " + strconv.Itoa(len(words)))
+    }
+    if words[0] != "Hello" {
+        Errorf("first word should be Hello")
+    }
+    if words[1] != "world" {
+        Errorf("second word should be world")
+    }
+}
+
+// TestTokenizeEmpty verifies that empty input produces no tokens.
+pub fn TestTokenizeEmpty() {
+    tokens := nlp.Tokenize("")
+    if len(tokens) != 0 {
+        Errorf("empty string should produce 0 tokens")
+    }
+}
+
+// TestTokenizeWhitespaceOnly verifies that whitespace-only input produces no tokens.
+pub fn TestTokenizeWhitespaceOnly() {
+    tokens := nlp.Tokenize("   \t\n  ")
+    if len(tokens) != 0 {
+        Errorf("whitespace-only should produce 0 tokens")
+    }
+}

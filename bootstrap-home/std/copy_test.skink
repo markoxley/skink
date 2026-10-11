@@ -1,0 +1,110 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/copy_test.skink
+// Purpose: Tests for the copy() builtin (slice and map deep copy).
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module copy_test
+
+import "testing"
+
+// TestCopyIntSlice verifies copy of int slice is independent of original.
+pub fn TestCopyIntSlice() {
+    arr := []int{1, 2, 3, 4, 5}
+    dup := copy(arr)
+    testing.AssertEqualInt(5, len(dup), "copy int slice len")
+    testing.AssertEqualInt(1, dup[0], "copy int slice[0]")
+    testing.AssertEqualInt(3, dup[2], "copy int slice[2]")
+    testing.AssertEqualInt(5, dup[4], "copy int slice[4]")
+    // Mutating the copy must not affect the original.
+    dup[0] = 99
+    testing.AssertEqualInt(1, arr[0], "original unchanged after copy mutation")
+    testing.AssertEqualInt(99, dup[0], "copy mutation applied")
+}
+
+// TestCopyStringSlice verifies copy of string slice is independent.
+pub fn TestCopyStringSlice() {
+    arr := []string{"a", "bb", "ccc"}
+    dup := copy(arr)
+    testing.AssertEqualInt(3, len(dup), "copy string slice len")
+    testing.AssertEqualString("a", dup[0], "copy string slice[0]")
+    testing.AssertEqualString("bb", dup[1], "copy string slice[1]")
+    testing.AssertEqualString("ccc", dup[2], "copy string slice[2]")
+    // Mutating the copy must not affect the original.
+    dup[1] = "xx"
+    testing.AssertEqualString("bb", arr[1], "original string unchanged")
+    testing.AssertEqualString("xx", dup[1], "copy string mutation applied")
+}
+
+// TestCopyEmptySlice verifies copy of empty slice yields empty slice.
+pub fn TestCopyEmptySlice() {
+    arr := []int{}
+    dup := copy(arr)
+    testing.AssertEqualInt(0, len(dup), "copy empty slice len")
+}
+
+// TestCopyNilSlice verifies copy of nil slice yields empty slice.
+pub fn TestCopyNilSlice() {
+    var nilArr: []int
+    dup := copy(nilArr)
+    testing.AssertEqualInt(0, len(dup), "copy nil slice len")
+}
+
+// TestCopyNestedSlice verifies deep copy of nested slices.
+pub fn TestCopyNestedSlice() {
+    arr := [][]int{[]int{1, 2}, []int{3, 4, 5}}
+    dup := copy(arr)
+    testing.AssertEqualInt(2, len(dup), "copy nested slice len")
+    testing.AssertEqualInt(2, len(dup[0]), "copy nested slice[0] len")
+    testing.AssertEqualInt(3, len(dup[1]), "copy nested slice[1] len")
+    testing.AssertEqualInt(1, dup[0][0], "copy nested slice[0][0]")
+    testing.AssertEqualInt(5, dup[1][2], "copy nested slice[1][2]")
+}
+
+// TestCopyMap verifies copy of map is independent of original.
+pub fn TestCopyMap() {
+    m := make(map[string]int)
+    m["one"] = 1
+    m["two"] = 2
+    m["three"] = 3
+    dup := copy(m)
+    testing.AssertEqualInt(3, len(dup), "copy map len")
+    testing.AssertEqualInt(1, dup["one"], "copy map[one]")
+    testing.AssertEqualInt(2, dup["two"], "copy map[two]")
+    testing.AssertEqualInt(3, dup["three"], "copy map[three]")
+    // Mutating the copy must not affect the original.
+    dup["one"] = 100
+    testing.AssertEqualInt(1, m["one"], "original map unchanged")
+    testing.AssertEqualInt(100, dup["one"], "copy map mutation applied")
+}
+
+// TestCopyMapStrings verifies copy of string-valued map is independent.
+pub fn TestCopyMapStrings() {
+    m := make(map[string]string)
+    m["a"] = "alpha"
+    m["b"] = "beta"
+    dup := copy(m)
+    testing.AssertEqualInt(2, len(dup), "copy string map len")
+    testing.AssertEqualString("alpha", dup["a"], "copy string map[a]")
+    testing.AssertEqualString("beta", dup["b"], "copy string map[b]")
+    dup["a"] = "changed"
+    testing.AssertEqualString("alpha", m["a"], "original string map unchanged")
+    testing.AssertEqualString("changed", dup["a"], "copy string map mutation applied")
+}

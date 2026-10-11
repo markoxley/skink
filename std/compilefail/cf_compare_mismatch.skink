@@ -1,0 +1,8 @@
+// expect: cannot compare
+module main
+fn main() -> int {
+    if 5 == "five" {
+        return 1
+    }
+    return 0
+}

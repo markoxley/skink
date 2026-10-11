@@ -1,0 +1,81 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/logging.skink
+// Purpose: Skink module for logging.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/log"
+import "std/io"
+
+pub fn main() {
+    // Create a logger with a prefix
+    logger := log.NewLogger("[APP] ")
+
+    // Log at different levels (default level is INFO, so Debug is filtered)
+    io.PrintLine("=== Default level (INFO) ===")
+    logger.Debug("This debug message is filtered out")
+    logger.Info("Application started")
+    logger.Warn("Low disk space warning")
+    logger.Error("Failed to connect to database")
+
+    // Change the log level to see debug messages
+    io.PrintLine("")
+    io.PrintLine("=== Debug level ===")
+    logger.SetLevel(log.LevelDebug)
+    logger.Debug("Debugging mode enabled")
+    logger.Info("Processing request")
+    logger.Warn("Cache miss for key 'user:42'")
+
+    // Formatted logging with an int argument
+    io.PrintLine("")
+    io.PrintLine("=== Formatted logging ===")
+    logger.Printf("Processed {} requests", 42)
+
+    // Create a logger at WARN level (only WARN, ERROR, FATAL shown)
+    io.PrintLine("")
+    io.PrintLine("=== WARN level logger ===")
+    warnLogger := log.NewLoggerWithLevel("[WARN] ", log.LevelWarn)
+    warnLogger.Info("This info is filtered")
+    warnLogger.Warn("This warning is shown")
+    warnLogger.Error("This error is shown")
+
+    // File-based logging
+    io.PrintLine("")
+    io.PrintLine("=== File logging ===")
+    fw := log.NewFileWriter("/tmp/skink_app.log")
+    if fw.Open() {
+        io.PrintLine("Opened /tmp/skink_app.log for writing")
+        fw.Write("[INFO] Application started")
+        fw.Write("[WARN] Low memory warning")
+        fw.Write("[ERROR] Connection timeout")
+        fw.Close()
+        io.PrintLine("Closed log file")
+    } else {
+        io.PrintErrorLine("Failed to open log file")
+    }
+
+    // Package-level functions
+    io.PrintLine("")
+    io.PrintLine("=== Package-level functions ===")
+    log.Print("This uses the package-level Print function")
+    log.Printf("Formatted: count = {}", 100)
+}

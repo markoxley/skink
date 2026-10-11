@@ -1,0 +1,8 @@
+// expect: return
+module main
+fn f() -> int {
+    x := 1
+}
+fn main() -> int {
+    return f()
+}

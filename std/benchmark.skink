@@ -1,0 +1,108 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/benchmark.skink
+// Purpose: Provides benchmarking helpers for measuring elapsed time of
+//          code blocks, supporting both manual timing and automatic
+//          iteration counting.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module benchmark
+
+import "std/time"
+import "std/io"
+import "std/strconv"
+import "std/str"
+
+// B holds benchmark state including the name, start/elapsed timestamps,
+// and iteration count for a benchmark run.
+pub struct B {
+    name:    string
+    start:   int64
+    elapsed: int64
+    n:       int
+
+    // StartTimer records the current time as the benchmark start.
+    pub fn StartTimer(self: *B) {
+        self.start = time.NowUnixNano()
+    }
+
+    // StopTimer computes elapsed time since StartTimer.
+    pub fn StopTimer(self: *B) {
+        self.elapsed = time.NowUnixNano() - self.start
+    }
+
+    // N returns the iteration count.
+    pub fn N(self: B) -> int {
+        return self.n
+    }
+
+    // SetN sets the iteration count.
+    pub fn SetN(self: *B, n: int) {
+        self.n = n
+    }
+
+    // Elapsed returns the elapsed time in nanoseconds.
+    pub fn Elapsed(self: B) -> int64 {
+        return self.elapsed
+    }
+
+    // PerOp returns the nanoseconds per operation.
+    pub fn PerOp(self: B) -> int64 {
+        if self.n <= 0 {
+            return self.elapsed // No iterations; return total elapsed
+        }
+        return self.elapsed / int64(self.n)
+    }
+
+    // Report prints the benchmark result in "name\telapsed_ns\titerations\tns/op" format.
+    pub fn Report(self: B) {
+        nsPerOp := self.PerOp()
+        parts := []string{}
+        parts = append(parts, self.name)
+        parts = append(parts, "\t")
+        parts = append(parts, strconv.Itoa(int(self.elapsed)))
+        parts = append(parts, " ns\t")
+        parts = append(parts, strconv.Itoa(self.n))
+        parts = append(parts, " ops\t")
+        parts = append(parts, strconv.Itoa(int(nsPerOp)))
+        parts = append(parts, " ns/op")
+        io.PrintLine(str.Join(parts, ""))
+    }
+}
+
+// NewB creates a new benchmark with the given name.
+pub fn NewB(name: string) -> B {
+    return B{name: name, start: int64(0), elapsed: int64(0), n: 1}
+}
+
+// Run executes a function n times and reports the benchmark result.
+// The function f is called n times, and the total elapsed time is measured.
+pub fn Run(name: string, n: int, f: fn()) {
+    b := NewB(name)
+    b.SetN(n)
+    b.StartTimer()
+    i := 0
+    for i < n {
+        f()
+        i = i + 1
+    }
+    b.StopTimer()
+    b.Report()
+}

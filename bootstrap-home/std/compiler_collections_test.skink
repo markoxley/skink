@@ -1,0 +1,551 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/compiler_collections_test.skink
+// Purpose: Skink module for compiler collections test.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module compiler_collections_test
+
+import "testing"
+import "str"
+
+// === Slice Basics ===
+
+// TestSliceLen verifies slice length via len().
+pub fn TestSliceLen() {
+    arr := []int{1, 2, 3, 4, 5}
+    testing.AssertEqualInt(5, len(arr), "slice len")
+}
+
+// TestSliceIndex verifies slice element access by index.
+pub fn TestSliceIndex() {
+    arr := []int{10, 20, 30, 40, 50}
+    testing.AssertEqualInt(10, arr[0], "arr[0]")
+    testing.AssertEqualInt(30, arr[2], "arr[2]")
+    testing.AssertEqualInt(50, arr[4], "arr[4]")
+}
+
+// TestSliceMutation verifies in-place mutation of slice elements.
+pub fn TestSliceMutation() {
+    arr := []int{1, 2, 3}
+    arr[0] = 100
+    arr[1] = 200
+    arr[2] = 300
+    testing.AssertEqualInt(100, arr[0], "mutated arr[0]")
+    testing.AssertEqualInt(200, arr[1], "mutated arr[1]")
+    testing.AssertEqualInt(300, arr[2], "mutated arr[2]")
+}
+
+// TestSliceEmpty verifies empty slice literal has length zero.
+pub fn TestSliceEmpty() {
+    arr := []int{}
+    testing.AssertEqualInt(0, len(arr), "empty slice len")
+}
+
+// TestSliceAppendGrow verifies append grows slice to expected size.
+pub fn TestSliceAppendGrow() {
+    arr := []int{}
+    for i := 0; i < 100; i = i + 1 {
+        arr = append(arr, i)
+    }
+    testing.AssertEqualInt(100, len(arr), "append 100 elements")
+    testing.AssertEqualInt(0, arr[0], "first element")
+    testing.AssertEqualInt(99, arr[99], "last element")
+}
+
+// === Slice Slicing ===
+
+// TestSliceLowHigh verifies slice with low and high bounds.
+pub fn TestSliceLowHigh() {
+    arr := []int{1, 2, 3, 4, 5}
+    sub := arr[1:4]
+    testing.AssertEqualInt(3, len(sub), "arr[1:4] len")
+    testing.AssertEqualInt(2, sub[0], "arr[1:4][0]")
+    testing.AssertEqualInt(4, sub[2], "arr[1:4][2]")
+}
+
+// TestSliceHighOnly verifies slice with high bound only.
+pub fn TestSliceHighOnly() {
+    arr := []int{10, 20, 30, 40, 50}
+    sub := arr[:3]
+    testing.AssertEqualInt(3, len(sub), "arr[:3] len")
+    testing.AssertEqualInt(10, sub[0], "arr[:3][0]")
+    testing.AssertEqualInt(30, sub[2], "arr[:3][2]")
+}
+
+// TestSliceLowOnly verifies slice with low bound only.
+pub fn TestSliceLowOnly() {
+    arr := []int{10, 20, 30, 40, 50}
+    sub := arr[2:]
+    testing.AssertEqualInt(3, len(sub), "arr[2:] len")
+    testing.AssertEqualInt(30, sub[0], "arr[2:][0]")
+    testing.AssertEqualInt(50, sub[2], "arr[2:][2]")
+}
+
+// TestSliceFullRange verifies full-range slice arr[0:len].
+pub fn TestSliceFullRange() {
+    arr := []int{1, 2, 3}
+    sub := arr[0:3]
+    testing.AssertEqualInt(3, len(sub), "arr[0:3] len")
+    testing.AssertEqualInt(1, sub[0], "arr[0:3][0]")
+}
+
+// === Slice Iteration ===
+
+// TestSliceForIn verifies for-in iteration over slice elements.
+pub fn TestSliceForIn() {
+    arr := []int{10, 20, 30}
+    sum := 0
+    for v := range arr {
+        sum += v
+    }
+    testing.AssertEqualInt(60, sum, "for-in sum")
+}
+
+// TestSliceForIndex verifies for-index iteration over slice.
+pub fn TestSliceForIndex() {
+    arr := []int{5, 10, 15, 20}
+    sum := 0
+    for i := 0; i < len(arr); i = i + 1 {
+        sum += arr[i]
+    }
+    testing.AssertEqualInt(50, sum, "for-index sum")
+}
+
+// === Nested Slices ===
+
+// TestNestedSliceBasic verifies nested slice (2D array) access.
+pub fn TestNestedSliceBasic() {
+    matrix := [][]int{
+        []int{1, 2, 3},
+        []int{4, 5, 6},
+        []int{7, 8, 9},
+    }
+    testing.AssertEqualInt(3, len(matrix), "matrix rows")
+    testing.AssertEqualInt(3, len(matrix[0]), "matrix cols row 0")
+    testing.AssertEqualInt(1, matrix[0][0], "matrix[0][0]")
+    testing.AssertEqualInt(5, matrix[1][1], "matrix[1][1]")
+    testing.AssertEqualInt(9, matrix[2][2], "matrix[2][2]")
+}
+
+// TestNestedSliceShorthand verifies nested slice shorthand literal syntax.
+pub fn TestNestedSliceShorthand() {
+    matrix := [][]int{
+        {1, 2},
+        {3, 4},
+    }
+    testing.AssertEqualInt(2, len(matrix), "shorthand matrix rows")
+    testing.AssertEqualInt(2, len(matrix[0]), "shorthand matrix cols")
+    testing.AssertEqualInt(4, matrix[1][1], "shorthand matrix[1][1]")
+}
+
+// TestNestedSliceMutation verifies mutation of nested slice elements.
+pub fn TestNestedSliceMutation() {
+    matrix := [][]int{{0, 0}, {0, 0}}
+    matrix[0][0] = 1
+    matrix[1][1] = 9
+    testing.AssertEqualInt(1, matrix[0][0], "mutated matrix[0][0]")
+    testing.AssertEqualInt(9, matrix[1][1], "mutated matrix[1][1]")
+}
+
+// TestSliceOfStrings verifies slice of string elements.
+pub fn TestSliceOfStrings() {
+    arr := []string{"hello", "world", "foo"}
+    testing.AssertEqualInt(3, len(arr), "string slice len")
+    testing.AssertEqualString("hello", arr[0], "arr[0]")
+    testing.AssertEqualString("world", arr[1], "arr[1]")
+    testing.AssertEqualString("foo", arr[2], "arr[2]")
+}
+
+// === Map Basics ===
+
+// TestMapPutGet verifies map put and get operations.
+pub fn TestMapPutGet() {
+    m := make(map[string]int)
+    m["one"] = 1
+    m["two"] = 2
+    m["three"] = 3
+    testing.AssertEqualInt(1, m["one"], "map[one]")
+    testing.AssertEqualInt(2, m["two"], "map[two]")
+    testing.AssertEqualInt(3, m["three"], "map[three]")
+}
+
+// TestMapLen verifies map length after puts.
+pub fn TestMapLen() {
+    m := make(map[string]int)
+    testing.AssertEqualInt(0, len(m), "empty map len")
+    m["a"] = 1
+    testing.AssertEqualInt(1, len(m), "map len after 1 put")
+    m["b"] = 2
+    m["c"] = 3
+    testing.AssertEqualInt(3, len(m), "map len after 3 puts")
+}
+
+// TestMapOverwrite verifies map value overwrite on same key.
+pub fn TestMapOverwrite() {
+    m := make(map[string]int)
+    m["key"] = 10
+    m["key"] = 20
+    testing.AssertEqualInt(20, m["key"], "map overwrite")
+}
+
+// TestMapIntKeys verifies map with integer keys.
+pub fn TestMapIntKeys() {
+    m := make(map[int]string)
+    m[1] = "one"
+    m[2] = "two"
+    m[3] = "three"
+    testing.AssertEqualString("one", m[1], "map[1]")
+    testing.AssertEqualString("two", m[2], "map[2]")
+    testing.AssertEqualString("three", m[3], "map[3]")
+}
+
+// TestMapIteration verifies for-in iteration over map keys.
+pub fn TestMapIteration() {
+    m := make(map[string]int)
+    m["a"] = 1
+    m["b"] = 2
+    m["c"] = 3
+    total := 0
+    for k := range m {
+        total += m[k]
+    }
+    testing.AssertEqualInt(6, total, "map iteration values sum")
+}
+
+// TestMapStringStringValues verifies map with string keys and values.
+pub fn TestMapStringStringValues() {
+    m := make(map[string]string)
+    m["hello"] = "world"
+    m["foo"] = "bar"
+    testing.AssertEqualString("world", m["hello"], "map string-string")
+    testing.AssertEqualString("bar", m["foo"], "map string-string 2")
+}
+
+// === Map Literals ===
+// Note: map[k]v{...} literals are not supported by the parser.
+// Use make() and explicit puts instead.
+
+// TestMapLiteralBasic verifies map populated via make and puts.
+pub fn TestMapLiteralBasic() {
+    m := make(map[string]int)
+    m["a"] = 1
+    m["b"] = 2
+    m["c"] = 3
+    testing.AssertEqualInt(1, m["a"], "map [a]")
+    testing.AssertEqualInt(2, m["b"], "map [b]")
+    testing.AssertEqualInt(3, m["c"], "map [c]")
+    testing.AssertEqualInt(3, len(m), "map len")
+}
+
+// TestMapLiteralIntKeys verifies map with int keys via make and puts.
+pub fn TestMapLiteralIntKeys() {
+    m := make(map[int]string)
+    m[1] = "one"
+    m[2] = "two"
+    testing.AssertEqualString("one", m[1], "map int key 1")
+    testing.AssertEqualString("two", m[2], "map int key 2")
+}
+
+// === Slice of Maps ===
+
+// TestSliceOfMaps verifies slice containing map elements.
+pub fn TestSliceOfMaps() {
+    arr := make([]map[string]int, 2)
+    m0 := make(map[string]int)
+    m0["x"] = 1
+    m1 := make(map[string]int)
+    m1["y"] = 2
+    arr[0] = m0
+    arr[1] = m1
+    testing.AssertEqualInt(2, len(arr), "slice of maps len")
+    testing.AssertEqualInt(1, arr[0]["x"], "arr[0][x]")
+    testing.AssertEqualInt(2, arr[1]["y"], "arr[1][y]")
+}
+
+// === Make with size ===
+
+// TestMakeSliceWithSize verifies make([]T, n) zero-initializes elements.
+pub fn TestMakeSliceWithSize() {
+    arr := make([]int, 10)
+    testing.AssertEqualInt(10, len(arr), "make([]int, 10) len")
+    // Elements should be zero-initialized
+    testing.AssertEqualInt(0, arr[0], "make slice zero init [0]")
+    testing.AssertEqualInt(0, arr[5], "make slice zero init [5]")
+    testing.AssertEqualInt(0, arr[9], "make slice zero init [9]")
+}
+
+// TestMakeSliceWriteRead verifies make slice write and read back.
+pub fn TestMakeSliceWriteRead() {
+    arr := make([]int, 5)
+    for i := 0; i < 5; i = i + 1 {
+        arr[i] = i * i
+    }
+    testing.AssertEqualInt(0, arr[0], "arr[0] = 0")
+    testing.AssertEqualInt(1, arr[1], "arr[1] = 1")
+    testing.AssertEqualInt(4, arr[2], "arr[2] = 4")
+    testing.AssertEqualInt(9, arr[3], "arr[3] = 9")
+    testing.AssertEqualInt(16, arr[4], "arr[4] = 16")
+}
+
+// === Slice in struct ===
+
+// TestStructWithSliceField verifies struct with slice field and methods.
+pub fn TestStructWithSliceField() {
+    s := Stack{items: []int{}}
+    s.Push(10)
+    s.Push(20)
+    s.Push(30)
+    testing.AssertEqualInt(3, s.Count(), "stack count after 3 pushes")
+    val := s.Pop()
+    testing.AssertEqualInt(30, val, "stack pop returns last")
+    testing.AssertEqualInt(2, s.Count(), "stack count after pop")
+}
+
+// === Complex iteration ===
+
+// TestNestedIteration verifies nested for-loop iteration over 2D slice.
+pub fn TestNestedIteration() {
+    matrix := [][]int{{1, 2}, {3, 4}}
+    sum := 0
+    for i := 0; i < len(matrix); i = i + 1 {
+        for j := 0; j < len(matrix[i]); j = j + 1 {
+            sum += matrix[i][j]
+        }
+    }
+    testing.AssertEqualInt(10, sum, "nested iteration sum")
+}
+
+// TestSliceSumWithForIn verifies for-in sum over a slice.
+pub fn TestSliceSumWithForIn() {
+    arr := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+    sum := 0
+    for v := range arr {
+        sum += v
+    }
+    testing.AssertEqualInt(55, sum, "sum 1..10 with for-in")
+}
+
+// TestBuildSliceWithAppend verifies building slice via append in loop.
+pub fn TestBuildSliceWithAppend() {
+    arr := []int{}
+    for i := 1; i <= 10; i = i + 1 {
+        arr = append(arr, i * i)
+    }
+    testing.AssertEqualInt(10, len(arr), "squared slice len")
+    testing.AssertEqualInt(1, arr[0], "1^2")
+    testing.AssertEqualInt(4, arr[1], "2^2")
+    testing.AssertEqualInt(9, arr[2], "3^2")
+    testing.AssertEqualInt(16, arr[3], "4^2")
+    testing.AssertEqualInt(100, arr[9], "10^2")
+}
+
+// === Map with complex values ===
+
+// TestMapWithSliceValues verifies map with slice values.
+pub fn TestMapWithSliceValues() {
+    m := make(map[string][]int)
+    m["evens"] = []int{2, 4, 6, 8}
+    m["odds"] = []int{1, 3, 5, 7}
+    testing.AssertEqualInt(4, len(m["evens"]), "map[evens] len")
+    testing.AssertEqualInt(4, len(m["odds"]), "map[odds] len")
+    testing.AssertEqualInt(8, m["evens"][3], "map[evens][3]")
+    testing.AssertEqualInt(7, m["odds"][3], "map[odds][3]")
+}
+
+// === Helper structs ===
+
+struct Stack {
+    items: []int
+
+    fn Push(self: *Stack, val: int) {
+        self.items = append(self.items, val)
+    }
+
+    fn Pop(self: *Stack) -> int {
+        n := len(self.items)
+        if n == 0 {
+            return 0
+        }
+        val := self.items[n - 1]
+        self.items = self.items[:n - 1]
+        return val
+    }
+
+    fn Count(self: Stack) -> int {
+        return len(self.items)
+    }
+}
+
+// CCSliceCell is a struct with a heap-allocated field, used to verify that
+// slices of struct-by-value elements release element fields on destroy.
+struct CCSliceCell {
+    pub id: int
+    pub tags: []int
+    pub name: string
+}
+
+// TestSliceOfStructsWithHeapFields exercises the slice-element destructor
+// for struct-by-value elements containing heap fields. Regression guard
+// for comp_error.md #99: needsArrayDtor looked up structLayouts with a
+// "struct."-prefixed key, never matched, and emitted no element dtor —
+// every heap field of every element leaked when the array was freed
+// (found via ASAN on a real workload: 1536 []int fields orphaned).
+pub fn TestSliceOfStructsWithHeapFields() {
+    cells := make([]CCSliceCell, 4)
+    i := 0
+    for i < 4 {
+        cells[i] = CCSliceCell{
+            id:   i,
+            tags: make([]int, 2),
+            name: "cell"
+        }
+        i = i + 1
+    }
+    // Overwrite an element: old heap fields must be released without
+    // corrupting neighbours.
+    cells[1] = CCSliceCell{id: 99, tags: make([]int, 3), name: "replaced"}
+    cells[1].tags[0] = 7
+    // Grow via append so the backing array is reallocated — element fields
+    // must survive the move and be released exactly once.
+    cells = append(cells, CCSliceCell{id: 5, tags: make([]int, 1), name: "appended"})
+    testing.AssertEqualInt(5, len(cells), "slice grew")
+    testing.AssertEqualInt(99, cells[1].id, "overwritten element")
+    testing.AssertEqualInt(7, cells[1].tags[0], "heap field intact after overwrite")
+    testing.AssertEqualInt(5, cells[4].id, "appended element")
+    testing.AssertEqualString("cell", cells[0].name, "first element intact")
+}
+
+// === Array destructor scan count (comp_error.md #99) ===
+
+// Skink_rc_live_objects returns the number of RC-managed blocks currently
+// registered with the runtime — a deterministic leak detector usable
+// without ASAN.
+extern fn Skink_rc_live_objects() -> int64
+
+// ccNestedReslice drops a [][]int whose element was overwritten by a
+// zero-length reslice, inside its own frame so every local is released on
+// return.
+fn ccNestedReslice() {
+    grid := make([][]int, 8)
+    grid[0] = make([]int, 4)
+    grid[0] = grid[0][:0]
+}
+
+// TestArrayDtorReleasesNestedSlices is a live-object regression guard for
+// comp_error.md #99: the emitted array destructor read the RC magic field
+// at payload-16 as a byte size, computed a negative element count, and
+// iterated zero slots — every array destructor was a silent no-op, so
+// elements stored in slices (here a zero-length reslice in a [][]int)
+// leaked their backing allocation.
+pub fn TestArrayDtorReleasesNestedSlices() {
+    before := Skink_rc_live_objects()
+    ccNestedReslice()
+    leaked := Skink_rc_live_objects() - before
+    testing.AssertTrue(leaked == 0, "nested slice reslice leaked rc objects")
+}
+
+// ccStructElems drops a []CCSliceCell whose element holds a heap slice
+// field, inside its own frame so all locals are released on return.
+fn ccStructElems() {
+    cells := make([]CCSliceCell, 2)
+    cells[0] = CCSliceCell{id: 1, tags: make([]int, 3), name: "a"}
+}
+
+// TestArrayDtorReleasesStructFields guards the struct-by-value element
+// path of the same fix: freeing the array must run the element field
+// release so `tags` backing arrays are not orphaned.
+pub fn TestArrayDtorReleasesStructFields() {
+    before := Skink_rc_live_objects()
+    ccStructElems()
+    leaked := Skink_rc_live_objects() - before
+    testing.AssertTrue(leaked == 0, "struct element heap fields leaked rc objects")
+}
+
+// TestMapDeleteKeepsSharedAlive guards the slot-nulling half of #99: once
+// the array destructor scans capacity slots, the stale pointer left behind
+// by delete() would release the deleted value a second time — freeing an
+// object still referenced by user code.
+pub fn TestMapDeleteKeepsSharedAlive() {
+    m := make(map[int]string)
+    shared := str.Concat("shared", "-val")
+    m[1] = shared
+    m[2] = str.Concat("other", "-val")
+    delete(m, 1)
+    testing.AssertEqualString("shared-val", shared, "aliased value survives delete")
+    m[3] = str.Concat("more", "!")
+    testing.AssertEqualString("other-val", m[2], "map intact after delete")
+}
+
+// CCBox is a heap struct used to verify pointer call-arg ownership.
+struct CCBox {
+    items: []int
+}
+
+// ccTakePtr borrows a *CCBox — the callee reads the pointee but takes no
+// ownership of the caller's variable.
+fn ccTakePtr(b: *CCBox) {
+    _ = b
+}
+
+// ccPassPtrArg confines the caller-side bookkeeping to its own frame.
+fn ccPassPtrArg() {
+    b := &CCBox{items: make([]int, 4)}
+    ccTakePtr(b)
+}
+
+// TestPointerArgKeepsOwnership guards comp_error.md #100: an identifier
+// argument whose declared param type ended in "*" was unconditionally
+// marked borrowed, suppressing the caller's scope-exit release — every
+// f(ptrVar) call leaked the variable and its whole subtree. Borrowed
+// marking is only legitimate for by-value composite args, where the ABI
+// hands the callee a pointer into the caller's storage.
+pub fn TestPointerArgKeepsOwnership() {
+    before := Skink_rc_live_objects()
+    ccPassPtrArg()
+    leaked := Skink_rc_live_objects() - before
+    testing.AssertTrue(leaked == 0, "pointer call arg leaked its variable")
+}
+
+// === Zero-size allocation lifecycle (comp_error.md #101) ===
+
+// ccZeroSizeLifecycle exercises alloc → retain → release → free for a
+// zero-size payload inside its own frame so every local is released on
+// return.
+fn ccZeroSizeLifecycle() {
+    empty := make([]int, 0)
+    empty = append(empty, 1)
+    empty = empty[:0]
+    _ = empty
+}
+
+// TestZeroSizeAllocLifecycle guards comp_error.md #101: Skink_rc_alloc(0)
+// used to allocate exactly RC_PREFIX_SIZE bytes, leaving the payload
+// pointer one-past-the-end of the chunk — invisible to LeakSanitizer's
+// reachability scan, which reported live empty blocks as leaks whenever a
+// detached worker's teardown raced process exit. The runtime now allocates
+// at least one payload byte so payload pointers are strictly interior;
+// this test pins that the counting and free paths still balance.
+pub fn TestZeroSizeAllocLifecycle() {
+    before := Skink_rc_live_objects()
+    ccZeroSizeLifecycle()
+    leaked := Skink_rc_live_objects() - before
+    testing.AssertTrue(leaked == 0, "zero-size slice lifecycle leaked rc objects")
+}

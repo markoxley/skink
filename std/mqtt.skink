@@ -1,0 +1,160 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/mqtt.skink
+// Purpose: Minimal MQTT 3.1.1 client built on libmosquitto, supporting
+//          publish, subscribe, and event-loop polling.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module mqtt
+
+import "std/errors"
+import "std/libc"
+import "std/str"
+
+extern fn mosquitto_lib_init() -> int
+extern fn mosquitto_lib_cleanup() -> int
+extern fn mosquitto_new(id: string, clean_session: bool, obj: int64) -> int64
+extern fn mosquitto_destroy(mosq: int64)
+extern fn mosquitto_connect(mosq: int64, host: string, port: int, keepalive: int) -> int
+extern fn mosquitto_disconnect(mosq: int64) -> int
+extern fn mosquitto_publish(mosq: int64, mid: int64, topic: string, payloadlen: int, payload: string, qos: int, retain: bool) -> int
+extern fn mosquitto_subscribe(mosq: int64, mid: int64, topic: string, qos: int) -> int
+extern fn mosquitto_loop_start(mosq: int64) -> int
+extern fn mosquitto_loop_stop(mosq: int64, force: bool) -> int
+extern fn mosquitto_loop(mosq: int64, timeout: int, max_packets: int) -> int
+
+// Message represents a received MQTT message with its topic and payload.
+pub struct Message {
+    topic: string
+    payload: string
+}
+
+// Client wraps a libmosquitto handle for MQTT communication.
+pub struct Client {
+    handle: int64
+    host: string
+    port: int
+
+    // Connect establishes a connection to the MQTT broker with a 60s keepalive.
+    pub fn Connect(self: *Client) -> errors.Error {
+        if self.handle == 0 {
+            return errors.New("invalid client")
+        }
+        // keepalive of 60 seconds is the MQTT default.
+        rc := mosquitto_connect(self.handle, self.host, self.port, 60)
+        if rc == 0 {
+            return errors.New("")
+        }
+        return errors.New("connect failed")
+    }
+
+    // Disconnect cleanly closes the MQTT broker connection.
+    pub fn Disconnect(self: *Client) -> errors.Error {
+        if self.handle == 0 {
+            return errors.New("invalid client")
+        }
+        rc := mosquitto_disconnect(self.handle)
+        if rc == 0 {
+            return errors.New("")
+        }
+        return errors.New("disconnect failed")
+    }
+
+    // Publish sends a message to the given topic with the specified QoS level.
+    pub fn Publish(self: *Client, topic: string, payload: string, qos: int) -> errors.Error {
+        if self.handle == 0 {
+            return errors.New("invalid client")
+        }
+        n := str.Len(payload)
+        // retain=false: do not instruct the broker to retain this message.
+        rc := mosquitto_publish(self.handle, 0, topic, n, payload, qos, false)
+        if rc == 0 {
+            return errors.New("")
+        }
+        return errors.New("publish failed")
+    }
+
+    // Subscribe registers interest in a topic at the given QoS level.
+    pub fn Subscribe(self: *Client, topic: string, qos: int) -> errors.Error {
+        if self.handle == 0 {
+            return errors.New("invalid client")
+        }
+        rc := mosquitto_subscribe(self.handle, 0, topic, qos)
+        if rc == 0 {
+            return errors.New("")
+        }
+        return errors.New("subscribe failed")
+    }
+
+    // Loop runs a single iteration of the MQTT network loop for the given
+    // timeout (in milliseconds), processing one packet.
+    pub fn Loop(self: *Client, timeout: int) -> errors.Error {
+        if self.handle == 0 {
+            return errors.New("invalid client")
+        }
+        rc := mosquitto_loop(self.handle, timeout, 1)
+        if rc == 0 {
+            return errors.New("")
+        }
+        return errors.New("loop failed")
+    }
+
+    // Close destroys the underlying mosquitto handle and releases resources.
+    pub fn Close(self: *Client) {
+        if self.handle != 0 {
+            mosquitto_destroy(self.handle)
+            // Null out the handle so subsequent calls fail safely.
+            self.handle = 0
+        }
+    }
+}
+
+// NewClient initializes the mosquitto library and creates a new MQTT client
+// with the given client ID, broker host, and port.
+pub fn NewClient(clientId: string, host: string, port: int) -> (Client, errors.Error) {
+    // Initialize the mosquitto library once per client creation.
+    mosquitto_lib_init()
+    // clean_session=true: the broker will not persist session state.
+    handle := mosquitto_new(clientId, true, 0)
+    if handle == 0 {
+        return Client{handle: 0, host: host, port: port}, errors.New("client creation failed")
+    }
+    return Client{handle: handle, host: host, port: port}, errors.New("")
+}
+
+// Connect is a convenience wrapper matching the book's
+// `mqtt.Connect(host, port)` usage: it creates a client with a generated
+// id and connects to the broker.
+pub fn Connect(host: string, port: int) -> (Client, errors.Error) {
+    c, err := NewClient("skink-client", host, port)
+    if err.message != "" {
+        return c, err
+    }
+    cerr := c.Connect()
+    if cerr.message != "" {
+        return c, cerr
+    }
+    return c, errors.New("")
+}
+
+// Cleanup releases all mosquitto library resources. Call once at program exit.
+pub fn Cleanup() {
+    mosquitto_lib_cleanup()
+}

@@ -1,0 +1,65 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/libc.skink
+// Purpose: Thin Skink wrappers around the C standard library memory
+//          management and string manipulation functions, exposing them
+//          with Skink-friendly type signatures.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module libc
+
+extern fn Skink_raw_alloc(size: int64) -> string
+extern fn Skink_mem_realloc(ptr: string, size: int64) -> string
+extern fn Skink_mem_free(ptr: string)
+extern fn Skink_raw_calloc(num: int64, size: int64) -> string
+
+// malloc allocates size bytes of uninitialized heap memory and returns
+// a string (raw pointer) to the allocated block.
+pub fn malloc(size: int) -> string {
+    return Skink_raw_alloc(int64(size))
+}
+
+// realloc resizes the previously allocated block ptr to size bytes,
+// copying existing contents as needed, and returns the new pointer.
+pub fn realloc(ptr: string, size: int) -> string {
+    return Skink_mem_realloc(ptr, int64(size))
+}
+
+// free releases a heap block previously allocated by malloc or realloc.
+pub fn free(ptr: string) {
+    Skink_mem_free(ptr)
+}
+
+// calloc allocates zero-initialized memory for num elements of size bytes each.
+pub fn calloc(num: int, size: int) -> string {
+    return Skink_raw_calloc(int64(num), int64(size))
+}
+
+extern fn memcpy(dest: string, src: string, n: int) -> string
+extern fn memset(dest: string, c: int, n: int) -> string
+extern fn strlen(s: string) -> int
+extern fn strcmp(a: string, b: string) -> int
+extern fn strstr(haystack: string, needle: string) -> string
+extern fn strcpy(dest: string, src: string) -> string
+extern fn strncpy(dest: string, src: string, n: int) -> string
+extern fn strcat(dest: string, src: string) -> string
+extern fn strchr(s: string, c: int) -> string
+extern fn tolower(c: int) -> int
+extern fn toupper(c: int) -> int

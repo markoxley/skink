@@ -1,0 +1,184 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/log.skink
+// Purpose: Provides structured logging with configurable output targets
+//          (console, file, or custom writer) and severity levels.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module log
+
+import "std/io"
+import "std/libc"
+import "std/str"
+
+extern fn exit(code: int)
+extern fn fopen(path: string, mode: string) -> string
+extern fn fputs(s: string, stream: string) -> int
+extern fn fclose(stream: string) -> int
+
+// LevelDebug is the debug severity level (lowest, most verbose).
+pub const LevelDebug = 0
+// LevelInfo is the info severity level.
+pub const LevelInfo = 1
+// LevelWarn is the warning severity level.
+pub const LevelWarn = 2
+// LevelError is the error severity level.
+pub const LevelError = 3
+// LevelFatal is the fatal severity level (highest, terminates the process).
+pub const LevelFatal = 4
+
+// levelString returns the string representation of a log level.
+fn levelString(l: int) -> string {
+    if l == LevelDebug { return "DEBUG" }
+    if l == LevelInfo { return "INFO" }
+    if l == LevelWarn { return "WARN" }
+    if l == LevelError { return "ERROR" }
+    if l == LevelFatal { return "FATAL" }
+    return "UNKNOWN"
+}
+
+// Logger writes log messages with a configurable prefix and level filter.
+pub struct Logger {
+    prefix: string
+    minLevel: int
+
+    // Print writes a message line with the logger's prefix.
+    pub fn Print(self: Logger, message: string) {
+        self.writeLine(LevelInfo, message)
+    }
+
+    // Printf writes a formatted message with one int argument.
+    pub fn Printf(self: Logger, fmt: string, a1: int) {
+        s := io.Sprintf1(fmt, a1)
+        self.Print(s)
+        libc.free(s) // Sprintf1 allocates a new string; free it after printing
+    }
+
+    // Debug writes a debug-level message.
+    pub fn Debug(self: Logger, message: string) {
+        self.writeLine(LevelDebug, message)
+    }
+
+    // Info writes an info-level message.
+    pub fn Info(self: Logger, message: string) {
+        self.writeLine(LevelInfo, message)
+    }
+
+    // Warn writes a warning-level message.
+    pub fn Warn(self: Logger, message: string) {
+        self.writeLine(LevelWarn, message)
+    }
+
+    // Error writes an error-level message.
+    pub fn Error(self: Logger, message: string) {
+        self.writeLine(LevelError, message)
+    }
+
+    // Fatal writes a fatal message and terminates the process.
+    pub fn Fatal(self: Logger, message: string) {
+        self.writeLine(LevelFatal, message)
+        exit(1) // Fatal always exits with code 1
+    }
+
+    // SetLevel sets the minimum log level.
+    pub fn SetLevel(self: *Logger, level: int) {
+        self.minLevel = level
+    }
+
+    // writeLine writes a message if it passes the level filter.
+    fn writeLine(self: Logger, level: int, message: string) {
+        if level < self.minLevel {
+            return // Message below the configured threshold; skip it
+        }
+        full := str.Concat(self.prefix, str.Concat(levelString(level), str.Concat(": ", message)))
+        io.PrintLine(full)
+    }
+}
+
+// NewLogger creates a Logger with the given prefix that writes to stdout.
+// New is an alias for NewLogger, matching the book's log.New() usage.
+pub fn New(prefix: string) -> Logger {
+    return NewLogger(prefix)
+}
+
+// NewLogger creates a Logger with the given prefix that writes to stdout.
+pub fn NewLogger(prefix: string) -> Logger {
+    return Logger{prefix: prefix, minLevel: LevelInfo}
+}
+
+// NewLoggerWithLevel creates a Logger with a specific minimum level.
+pub fn NewLoggerWithLevel(prefix: string, level: int) -> Logger {
+    return Logger{prefix: prefix, minLevel: level}
+}
+
+// FileWriter writes log messages to a file.
+pub struct FileWriter {
+    path: string
+    handle: string
+
+    // Open opens the file for appending.
+    pub fn Open(self: *FileWriter) -> bool {
+        self.handle = fopen(self.path, "a")
+        if int64(self.handle) == 0 {
+            return false // fopen returned NULL; file could not be opened
+        }
+        return true
+    }
+
+    // Close closes the file.
+    pub fn Close(self: *FileWriter) {
+        if int64(self.handle) != 0 {
+            fclose(self.handle)
+            self.handle = "" // Reset handle to avoid double-close
+        }
+    }
+
+    // Write writes a message to the file.
+    pub fn Write(self: *FileWriter, message: string) {
+        if int64(self.handle) == 0 {
+            return // File not open; silently ignore
+        }
+        line := str.Concat(message, "\n")
+        fputs(line, self.handle)
+    }
+}
+
+// NewFileWriter creates a FileWriter for the given path.
+pub fn NewFileWriter(path: string) -> FileWriter {
+    return FileWriter{path: path, handle: ""}
+}
+
+// Print writes a message line to standard output.
+pub fn Print(message: string) {
+    io.PrintLine(message)
+}
+
+// Printf writes a formatted message with one int argument to standard output.
+pub fn Printf(fmt: string, a1: int) {
+    s := io.Sprintf1(fmt, a1)
+    io.PrintLine(s)
+    libc.free(s) // Free the string allocated by Sprintf1
+}
+
+// Fatal writes a message to standard error and terminates the process.
+pub fn Fatal(message: string) {
+    io.PrintErrorLine(message)
+    exit(1) // Fatal always exits with code 1
+}

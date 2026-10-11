@@ -1,0 +1,83 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/json_parsing.skink
+// Purpose: Skink module for json parsing.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/json"
+import "std/io"
+import "std/strconv"
+
+pub fn main() {
+    // Parse a JSON string
+    input := "{\"name\": \"Alice\", \"age\": 30, \"active\": true, \"tags\": [\"dev\", \"skink\"]}"
+    io.PrintLine("Input JSON: " + input)
+
+    v, err := json.Unmarshal(input)
+    if err.message != "" {
+        io.PrintErrorLine("Parse error: " + err.message)
+        return
+    }
+
+    // Access object fields
+    nameVal := json.ObjectGet(v, "name")
+    io.PrintLine("name: " + json.AsString(nameVal))
+
+    ageVal := json.ObjectGet(v, "age")
+    age := json.AsNumber(ageVal)
+    io.PrintLine("age: " + strconv.Itoa(int(age)))
+
+    activeVal := json.ObjectGet(v, "active")
+    if json.AsBool(activeVal) {
+        io.PrintLine("active: true")
+    } else {
+        io.PrintLine("active: false")
+    }
+
+    // Access array elements
+    tagsVal := json.ObjectGet(v, "tags")
+    n := json.ArrayLen(tagsVal)
+    io.PrintString("tags: ")
+    i := 0
+    for i < n {
+        tag := json.ArrayGet(tagsVal, i)
+        io.PrintString(json.AsString(tag))
+        if i < n - 1 {
+            io.PrintString(", ")
+        }
+        i = i + 1
+    }
+    io.PrintLine("")
+
+    // Build a JSON value programmatically
+    io.PrintLine("")
+    io.PrintLine("=== Building JSON ===")
+    keys := []string{"product", "price", "inStock"}
+    vals := []json.Value{
+        json.FromString("Skink Compiler"),
+        json.FromNumber(99.99),
+        json.FromBool(true),
+    }
+    obj := json.FromObject(keys, vals)
+    output := json.MarshalValue(obj)
+    io.PrintLine("Output: " + output)
+}

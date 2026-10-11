@@ -1,0 +1,7 @@
+// expect: duplicate
+module main
+struct D { x: int x: int }
+fn main() -> int {
+    d := D{x: 1}
+    return 0
+}

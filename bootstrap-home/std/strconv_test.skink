@@ -1,0 +1,198 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/strconv_test.skink
+// Purpose: Skink module for strconv test.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module strconv_test
+
+import "std/strconv"
+import "testing"
+
+// TestParseInt verifies ParseInt parses valid and rejects invalid input.
+pub fn TestParseInt() {
+    v, ok := strconv.ParseInt("123")
+    testing.AssertTrue(ok, "ParseInt 123 ok")
+    testing.AssertEqualInt(123, v, "ParseInt 123 value")
+
+    v2, ok2 := strconv.ParseInt("  -45  ")
+    testing.AssertTrue(ok2, "ParseInt -45 with whitespace ok")
+    testing.AssertEqualInt(-45, v2, "ParseInt -45 value")
+
+    _, ok3 := strconv.ParseInt("abc")
+    testing.AssertFalse(ok3, "ParseInt invalid should fail")
+
+    _, ok4 := strconv.ParseInt("")
+    testing.AssertFalse(ok4, "ParseInt empty should fail")
+}
+
+// TestParseFloat verifies ParseFloat parses decimal and scientific notation.
+pub fn TestParseFloat() {
+    v, ok := strconv.ParseFloat("3.14")
+    testing.AssertTrue(ok, "ParseFloat 3.14 ok")
+    if v != 3.14 {
+        testing.Errorf("ParseFloat 3.14 value mismatch")
+    }
+
+    v2, ok2 := strconv.ParseFloat("-2.5e1")
+    testing.AssertTrue(ok2, "ParseFloat -2.5e1 ok")
+    if v2 != -25.0 {
+        testing.Errorf("ParseFloat -2.5e1 value mismatch")
+    }
+
+    _, ok3 := strconv.ParseFloat("1e10")
+    testing.AssertTrue(ok3, "ParseFloat 1e10 ok")
+}
+
+// TestItoa verifies Itoa converts ints to string representation.
+pub fn TestItoa() {
+    testing.AssertEqualString("42", strconv.Itoa(42), "Itoa 42")
+    testing.AssertEqualString("-7", strconv.Itoa(-7), "Itoa -7")
+    testing.AssertEqualString("0", strconv.Itoa(0), "Itoa 0")
+}
+
+// TestParseBool verifies ParseBool parses true/false and rejects invalid.
+pub fn TestParseBool() {
+    b, ok := strconv.ParseBool("true")
+    testing.AssertTrue(ok, "ParseBool true ok")
+    testing.AssertEqualBool(true, b, "ParseBool true value")
+
+    b2, ok2 := strconv.ParseBool("0")
+    testing.AssertTrue(ok2, "ParseBool 0 ok")
+    testing.AssertEqualBool(false, b2, "ParseBool 0 value")
+
+    _, ok3 := strconv.ParseBool("maybe")
+    testing.AssertFalse(ok3, "ParseBool invalid should fail")
+}
+
+// TestParseBoolFalse verifies ParseBool parses "false" string.
+pub fn TestParseBoolFalse() {
+    b, ok := strconv.ParseBool("false")
+    testing.AssertTrue(ok, "ParseBool false ok")
+    testing.AssertEqualBool(false, b, "ParseBool false value")
+}
+
+// TestParseBoolOne verifies ParseBool parses "1" as true.
+pub fn TestParseBoolOne() {
+    b, ok := strconv.ParseBool("1")
+    testing.AssertTrue(ok, "ParseBool 1 ok")
+    testing.AssertEqualBool(true, b, "ParseBool 1 value")
+}
+
+// TestParseIntNegative verifies ParseInt parses negative numbers.
+pub fn TestParseIntNegative() {
+    v, ok := strconv.ParseInt("-123")
+    testing.AssertTrue(ok, "ParseInt -123 ok")
+    testing.AssertEqualInt(-123, v, "ParseInt -123 value")
+}
+
+// TestParseIntPositive verifies ParseInt parses explicit positive numbers.
+pub fn TestParseIntPositive() {
+    v, ok := strconv.ParseInt("+456")
+    testing.AssertTrue(ok, "ParseInt +456 ok")
+    testing.AssertEqualInt(456, v, "ParseInt +456 value")
+}
+
+// TestParseIntZero verifies ParseInt parses zero.
+pub fn TestParseIntZero() {
+    v, ok := strconv.ParseInt("0")
+    testing.AssertTrue(ok, "ParseInt 0 ok")
+    testing.AssertEqualInt(0, v, "ParseInt 0 value")
+}
+
+// TestParseIntLarge verifies ParseInt parses large numbers.
+pub fn TestParseIntLarge() {
+    v, ok := strconv.ParseInt("999999")
+    testing.AssertTrue(ok, "ParseInt 999999 ok")
+    testing.AssertEqualInt(999999, v, "ParseInt 999999 value")
+}
+
+// TestParseFloatZero verifies ParseFloat parses "0.0".
+pub fn TestParseFloatZero() {
+    v, ok := strconv.ParseFloat("0.0")
+    testing.AssertTrue(ok, "ParseFloat 0.0 ok")
+    if v != 0.0 {
+        testing.Errorf("ParseFloat 0.0 should be 0")
+    }
+}
+
+// TestParseFloatNegative verifies ParseFloat parses negative floats.
+pub fn TestParseFloatNegative() {
+    v, ok := strconv.ParseFloat("-3.5")
+    testing.AssertTrue(ok, "ParseFloat -3.5 ok")
+    if v != -3.5 {
+        testing.Errorf("ParseFloat -3.5 value mismatch")
+    }
+}
+
+// TestParseFloatInteger verifies ParseFloat parses integer strings.
+pub fn TestParseFloatInteger() {
+    v, ok := strconv.ParseFloat("42")
+    testing.AssertTrue(ok, "ParseFloat 42 ok")
+    if v != 42.0 {
+        testing.Errorf("ParseFloat 42 should be 42.0")
+    }
+}
+
+// TestParseFloatScientific verifies ParseFloat parses scientific notation.
+pub fn TestParseFloatScientific() {
+    v, ok := strconv.ParseFloat("1.5e3")
+    testing.AssertTrue(ok, "ParseFloat 1.5e3 ok")
+    if v != 1500.0 {
+        testing.Errorf("ParseFloat 1.5e3 should be 1500")
+    }
+}
+
+// TestItoaNegative verifies Itoa converts negative int to string.
+pub fn TestItoaNegative() {
+    testing.AssertEqualString("-1", strconv.Itoa(-1), "Itoa -1")
+}
+
+// TestItoaLarge verifies Itoa converts large int to string.
+pub fn TestItoaLarge() {
+    testing.AssertEqualString("999999", strconv.Itoa(999999), "Itoa 999999")
+}
+
+// TestFormatFloat verifies FormatFloat produces expected string parts.
+pub fn TestFormatFloat() {
+    s := strconv.FormatFloat(3.14, 2)
+    testing.AssertContains(s, "3", "FormatFloat should contain integer part")
+    testing.AssertContains(s, ".", "FormatFloat should contain decimal point")
+    testing.AssertContains(s, "14", "FormatFloat should contain fractional part")
+}
+
+// TestFormatFloatZero verifies FormatFloat formats zero correctly.
+pub fn TestFormatFloatZero() {
+    s := strconv.FormatFloat(0.0, 2)
+    testing.AssertContains(s, "0", "FormatFloat 0 should contain 0")
+}
+
+// TestFormatFloatNegative verifies FormatFloat formats negative values.
+pub fn TestFormatFloatNegative() {
+    s := strconv.FormatFloat(-2.5, 1)
+    testing.AssertContains(s, "-", "FormatFloat negative should contain -")
+    testing.AssertContains(s, "2", "FormatFloat negative should contain 2")
+}
+
+// TestFormatFloatNoPrecision verifies FormatFloat with zero precision.
+pub fn TestFormatFloatNoPrecision() {
+    s := strconv.FormatFloat(42.0, 0)
+    testing.AssertContains(s, "42", "FormatFloat with 0 precision should show integer")
+}

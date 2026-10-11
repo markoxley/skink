@@ -1,0 +1,3372 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    bootstrap-home/std/checker_installed.skink
+// Purpose: Type checker for Skink, written in Skink.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Type checker for Skink, written in Skink.
+//
+// This module implements a two-pass type checker that validates type
+// correctness of Skink programs. It is a port of the Go type checker
+// in skink-lang/compiler/types, adapted to use the self-hosted AST
+// (std/ast) and tagged-union type representations instead of Go interfaces.
+//
+// Pass 1: Collect all top-level declarations (functions, structs, enums,
+//         constants, variables, services, rulesets, templates) and build
+//         a global symbol table.
+// Pass 2: Type-check every function body, validating expressions, statements,
+//         and declarations against Skink's type rules.
+
+module checker
+
+import "std/str"
+import "std/ast"
+
+// === Type Kind Constants ===
+
+pub const TK_BUILTIN      = 1
+pub const TK_POINTER      = 2
+pub const TK_ARRAY        = 3
+pub const TK_SET          = 4
+pub const TK_MAP          = 5
+pub const TK_CHAN         = 6
+pub const TK_TENSOR       = 7
+pub const TK_NAMED        = 8
+pub const TK_FUNCTION     = 9
+pub const TK_TUPLE        = 10
+pub const TK_NIL          = 11
+pub const TK_INTERFACE    = 12
+pub const TK_ERROR        = 13
+pub const TK_ANY          = 14
+pub const TK_UNKNOWN      = 15
+pub const TK_SERVICE      = 16
+pub const TK_RULESET      = 17
+pub const TK_TEMPLATE     = 18
+pub const TK_TAGGED_UNION = 19
+
+// === Type Representation ===
+
+pub struct TType {
+    kind: int
+    name: string
+    genericArgs: []TType
+    elem: []TType
+    keyType: []TType
+    params:   []TType
+    retTypes: []TType
+    variadic: bool
+    tupleTypes: []TType
+    variants: []TaggedVariant
+    methodNames: []string
+    methodTypes: []TType
+}
+
+pub struct TaggedVariant {
+    name:        string
+    payloadType: []TType
+}
+
+// === Type Constructors ===
+
+pub fn builtinType(name: string) -> TType {
+    t := TType{kind: TK_BUILTIN}
+    t.name = name
+    return t
+}
+
+pub fn pointerType(elem: TType) -> TType {
+    t := TType{kind: TK_POINTER}
+    t.elem = singleTType(elem)
+    return t
+}
+
+pub fn arrayType(elem: TType) -> TType {
+    t := TType{kind: TK_ARRAY}
+    t.elem = singleTType(elem)
+    return t
+}
+
+pub fn setType(elem: TType) -> TType {
+    t := TType{kind: TK_SET}
+    t.elem = singleTType(elem)
+    return t
+}
+
+pub fn mapType(key: TType, elem: TType) -> TType {
+    t := TType{kind: TK_MAP}
+    t.keyType = singleTType(key)
+    t.elem = singleTType(elem)
+    return t
+}
+
+pub fn chanType(elem: TType) -> TType {
+    t := TType{kind: TK_CHAN}
+    t.elem = singleTType(elem)
+    return t
+}
+
+pub fn tensorType(elem: TType) -> TType {
+    t := TType{kind: TK_TENSOR}
+    t.elem = singleTType(elem)
+    return t
+}
+
+pub fn namedType(name: string) -> TType {
+    t := TType{kind: TK_NAMED}
+    t.name = name
+    return t
+}
+
+pub fn functionType(params: []TType, retTypes: []TType) -> TType {
+    t := TType{kind: TK_FUNCTION}
+    t.params = params
+    t.retTypes = retTypes
+    return t
+}
+
+pub fn tupleType(types: []TType) -> TType {
+    t := TType{kind: TK_TUPLE}
+    t.tupleTypes = types
+    return t
+}
+
+pub fn nilType() -> TType {
+    return TType{kind: TK_NIL}
+}
+
+pub fn anyType() -> TType {
+    return TType{kind: TK_ANY}
+}
+
+pub fn unknownType() -> TType {
+    return TType{kind: TK_UNKNOWN}
+}
+
+pub fn errorType() -> TType {
+    t := TType{kind: TK_ERROR}
+    t.name = "error"
+    return t
+}
+
+pub fn voidType() -> TType {
+    return builtinType("void")
+}
+
+// === TType Slice Helpers ===
+
+// singleTType wraps a single TType in a slice.
+pub fn singleTType(t: TType) -> []TType {
+    s := []TType{}
+    s = append(s, t)
+    return s
+}
+
+// typeOptT returns the first element of a TType slice, or an empty TType.
+pub fn typeOptT(s: []TType) -> TType {
+    if len(s) > 0 {
+        return s[0]
+    }
+    return TType{}
+}
+
+// === Map Key Existence Helpers ===
+// Skink does not support comma-ok map access, so we use helper functions
+// that check key existence by comparing the returned value to its zero value.
+
+fn scopeHasBinding(s: *Scope, name: string) -> bool {
+    if s == nil {
+        return false
+    }
+    if str.Len(name) == 0 {
+        return false
+    }
+    b := s.bindings[name]
+    if b.typ.kind != 0 {
+        return true
+    }
+    return false
+}
+
+fn scopeGetBinding(s: *Scope, name: string) -> Binding {
+    return s.bindings[name]
+}
+
+fn checkerHasBinding(c: *Checker, scopeIdx: int, name: string) -> bool {
+    return scopeHasBinding(&c.scopes[scopeIdx], name)
+}
+
+fn mapStringDeclHasKey(m: map[string]ast.Decl, key: string) -> bool {
+    v := m[key]
+    // Zero Decl has empty structName, fnName, etc.
+    // Use != "" (null-safe with emitter fix) to check if the entry is real.
+    if v.structName != "" || v.fnName != "" || v.enumName != "" || v.aliasName != "" || v.templateName != "" || v.rulesetName != "" || v.serviceName != "" || v.constName != "" {
+        return true
+    }
+    return false
+}
+
+fn mapStringTTypeHasKey(m: map[string]TType, key: string) -> bool {
+    v := m[key]
+    return v.kind != 0
+}
+
+fn mapStringStringSliceHasKey(m: map[string][]string, key: string) -> bool {
+    v := m[key]
+    return len(v) > 0
+}
+
+fn mapStringStringHasKey(m: map[string]string, key: string) -> bool {
+    v := m[key]
+    return v != ""
+}
+
+fn mapStringBoolHasKey(m: map[string]bool, key: string) -> bool {
+    v := m[key]
+    return v
+}
+
+fn mapStringSymbolInfoHasKey(m: map[string]SymbolInfo, key: string) -> bool {
+    v := m[key]
+    return v.moduleName != ""
+}
+
+// lastIndexOf finds the last occurrence of substr in s, or -1 if not found.
+fn lastIndexOf(s: string, substr: string) -> int {
+    if str.Len(substr) == 0 {
+        return str.Len(s)
+    }
+    if str.Len(substr) > str.Len(s) {
+        return -1
+    }
+    lastPos := str.Len(s) - str.Len(substr)
+    for lastPos >= 0 {
+        candidate := str.Substr(s, lastPos, str.Len(substr))
+        if str.Equal(candidate, substr) {
+            return lastPos
+        }
+        lastPos = lastPos - 1
+    }
+    return -1
+}
+
+// === Type String and Equality ===
+
+pub fn typeString(t: TType) -> string {
+    if t.kind == TK_BUILTIN { return t.name }
+    if t.kind == TK_POINTER { return str.Concat("*", typeString(typeOptT(t.elem))) }
+    if t.kind == TK_ARRAY { return str.Concat("[]", typeString(typeOptT(t.elem))) }
+    if t.kind == TK_SET { return str.Concat(str.Concat("set<", typeString(typeOptT(t.elem))), ">") }
+    if t.kind == TK_MAP { return str.Concat(str.Concat(str.Concat("map[", typeString(typeOptT(t.keyType))), "]"), typeString(typeOptT(t.elem))) }
+    if t.kind == TK_CHAN { return str.Concat(str.Concat("chan<", typeString(typeOptT(t.elem))), ">") }
+    if t.kind == TK_TENSOR { return str.Concat(str.Concat("tensor<", typeString(typeOptT(t.elem))), ">") }
+    if t.kind == TK_NAMED { return t.name }
+    if t.kind == TK_FUNCTION { return "<function>" }
+    if t.kind == TK_TUPLE { return tupleTypeString(t.tupleTypes) }
+    if t.kind == TK_NIL { return "nil" }
+    if t.kind == TK_INTERFACE { return t.name }
+    if t.kind == TK_ERROR { return "error" }
+    if t.kind == TK_ANY { return "any" }
+    if t.kind == TK_UNKNOWN { return "<unknown>" }
+    if t.kind == TK_SERVICE { return str.Concat("service ", t.name) }
+    if t.kind == TK_RULESET { return str.Concat("ruleset ", t.name) }
+    if t.kind == TK_TEMPLATE { return str.Concat("template ", t.name) }
+    if t.kind == TK_TAGGED_UNION { return t.name }
+    return "<invalid>"
+}
+
+fn tupleTypeString(types: []TType) -> string {
+    if len(types) == 0 {
+        return "()"
+    }
+    s := str.Concat("(", typeString(types[0]))
+    for i := 1; i < len(types); i = i + 1 {
+        s = str.Concat(str.Concat(s, ", "), typeString(types[i]))
+    }
+    return str.Concat(s, ")")
+}
+
+pub fn typeEquals(a: TType, b: TType) -> bool {
+    if a.kind != b.kind {
+        if a.kind == TK_NAMED && b.kind == TK_TAGGED_UNION {
+            return normalizeName(a.name) == normalizeName(b.name)
+        }
+        if a.kind == TK_TAGGED_UNION && b.kind == TK_NAMED {
+            return normalizeName(a.name) == normalizeName(b.name)
+        }
+        return false
+    }
+    if a.kind == TK_BUILTIN { return str.Equal(a.name, b.name) }
+    if a.kind == TK_NAMED { return normalizeName(a.name) == normalizeName(b.name) }
+    if a.kind == TK_POINTER { return typeEquals(typeOptT(a.elem), typeOptT(b.elem)) }
+    if a.kind == TK_ARRAY { return typeEquals(typeOptT(a.elem), typeOptT(b.elem)) }
+    if a.kind == TK_SET { return typeEquals(typeOptT(a.elem), typeOptT(b.elem)) }
+    if a.kind == TK_CHAN { return typeEquals(typeOptT(a.elem), typeOptT(b.elem)) }
+    if a.kind == TK_TENSOR { return typeEquals(typeOptT(a.elem), typeOptT(b.elem)) }
+    if a.kind == TK_MAP { return typeEquals(typeOptT(a.keyType), typeOptT(b.keyType)) && typeEquals(typeOptT(a.elem), typeOptT(b.elem)) }
+    if a.kind == TK_NIL { return true }
+    if a.kind == TK_ANY { return true }
+    if a.kind == TK_UNKNOWN { return true }
+    if a.kind == TK_ERROR { return true }
+    if a.kind == TK_SERVICE { return str.Equal(a.name, b.name) }
+    if a.kind == TK_RULESET { return str.Equal(a.name, b.name) }
+    if a.kind == TK_TEMPLATE { return str.Equal(a.name, b.name) }
+    if a.kind == TK_TAGGED_UNION { return normalizeName(a.name) == normalizeName(b.name) }
+    if a.kind == TK_INTERFACE { return str.Equal(a.name, b.name) }
+    if a.kind == TK_FUNCTION { return functionTypeEquals(a, b) }
+    if a.kind == TK_TUPLE { return tupleTypeEquals(a.tupleTypes, b.tupleTypes) }
+    return false
+}
+
+fn functionTypeEquals(a: TType, b: TType) -> bool {
+    if len(a.params) != len(b.params) {
+        return false
+    }
+    if len(a.retTypes) != len(b.retTypes) {
+        return false
+    }
+    for i := 0; i < len(a.params); i = i + 1 {
+        if !typeEquals(a.params[i], b.params[i]) {
+            return false
+        }
+    }
+    for i := 0; i < len(a.retTypes); i = i + 1 {
+        if !typeEquals(a.retTypes[i], b.retTypes[i]) {
+            return false
+        }
+    }
+    return a.variadic == b.variadic
+}
+
+fn tupleTypeEquals(a: []TType, b: []TType) -> bool {
+    if len(a) != len(b) {
+        return false
+    }
+    for i := 0; i < len(a); i = i + 1 {
+        if !typeEquals(a[i], b[i]) {
+            return false
+        }
+    }
+    return true
+}
+
+fn normalizeName(s: string) -> string {
+    return str.Replace(s, ".", "_")
+}
+
+// === Type Classification ===
+
+pub fn isNumeric(t: TType) -> bool {
+    if t.kind != TK_BUILTIN {
+        return false
+    }
+    if t.name == "int" { return true }
+    if t.name == "int8" { return true }
+    if t.name == "int16" { return true }
+    if t.name == "int32" { return true }
+    if t.name == "int64" { return true }
+    if t.name == "uint" { return true }
+    if t.name == "uint8" { return true }
+    if t.name == "uint16" { return true }
+    if t.name == "uint32" { return true }
+    if t.name == "uint64" { return true }
+    if t.name == "float" { return true }
+    return false
+}
+
+pub fn isInteger(t: TType) -> bool {
+    if t.kind != TK_BUILTIN {
+        return false
+    }
+    if t.name == "int" { return true }
+    if t.name == "int8" { return true }
+    if t.name == "int16" { return true }
+    if t.name == "int32" { return true }
+    if t.name == "int64" { return true }
+    if t.name == "uint" { return true }
+    if t.name == "uint8" { return true }
+    if t.name == "uint16" { return true }
+    if t.name == "uint32" { return true }
+    if t.name == "uint64" { return true }
+    return false
+}
+
+pub fn isBuiltinTypeName(name: string) -> bool {
+    if name == "int" { return true }
+    if name == "int8" { return true }
+    if name == "int16" { return true }
+    if name == "int32" { return true }
+    if name == "int64" { return true }
+    if name == "uint" { return true }
+    if name == "uint8" { return true }
+    if name == "uint16" { return true }
+    if name == "uint32" { return true }
+    if name == "uint64" { return true }
+    if name == "float" { return true }
+    if name == "bool" { return true }
+    if name == "string" { return true }
+    if name == "bytes" { return true }
+    return false
+}
+
+pub fn lookupType(name: string) -> TType {
+    if name == "int" { return builtinType("int") }
+    if name == "int8" { return builtinType("int8") }
+    if name == "int16" { return builtinType("int16") }
+    if name == "int32" { return builtinType("int32") }
+    if name == "int64" { return builtinType("int64") }
+    if name == "uint" { return builtinType("uint") }
+    if name == "uint8" { return builtinType("uint8") }
+    if name == "uint16" { return builtinType("uint16") }
+    if name == "uint32" { return builtinType("uint32") }
+    if name == "uint64" { return builtinType("uint64") }
+    if name == "float" { return builtinType("float") }
+    if name == "bool" { return builtinType("bool") }
+    if name == "string" { return builtinType("string") }
+    if name == "bytes" { return builtinType("bytes") }
+    if name == "void" { return builtinType("void") }
+    if name == "error" { return errorType() }
+    return namedType(name)
+}
+
+// === Assignability ===
+
+pub fn isAssignable(dst: TType, src: TType) -> bool {
+    if typeEquals(dst, src) {
+        return true
+    }
+    if dst.kind == TK_ANY {
+        return true
+    }
+    if isInteger(dst) && isInteger(src) {
+        return true
+    }
+    if src.kind == TK_ANY && isInteger(dst) {
+        return true
+    }
+    if src.kind == TK_ANY && dst.kind == TK_BUILTIN && str.Equal(dst.name, "float") {
+        return true
+    }
+    if src.kind == TK_BUILTIN && str.Equal(src.name, "bool") && isInteger(dst) {
+        return true
+    }
+    if src.kind == TK_NIL {
+        if dst.kind == TK_ERROR {
+            return true
+        }
+        if dst.kind == TK_BUILTIN && str.Equal(dst.name, "string") {
+            return true
+        }
+        if dst.kind == TK_POINTER || dst.kind == TK_ARRAY || dst.kind == TK_CHAN || dst.kind == TK_MAP {
+            return true
+        }
+    }
+    if dst.kind == TK_MAP && src.kind == TK_MAP {
+        srcKey := typeOptT(src.keyType)
+        dstKey := typeOptT(dst.keyType)
+        srcElem := typeOptT(src.elem)
+        dstElem := typeOptT(dst.elem)
+        keyCompatible := typeEquals(srcKey, dstKey) || srcKey.kind == TK_ANY
+        valCompatible := typeEquals(srcElem, dstElem) || srcElem.kind == TK_ANY
+        if keyCompatible && valCompatible {
+            return true
+        }
+    }
+    if src.kind == TK_ARRAY {
+        srcElem := typeOptT(src.elem)
+        if srcElem.kind == TK_ANY && dst.kind == TK_ARRAY {
+            return true
+        }
+    }
+    return false
+}
+
+// === Scope Binding ===
+
+struct Binding {
+    typ:     TType
+    used:    bool
+    isParam: bool
+    isBlank: bool
+}
+
+// Scope is a lexical scope with ordered names for iteration.
+struct Scope {
+    bindings: map[string]Binding
+    names:    []string
+}
+
+// scopeMake creates an empty Scope.
+fn scopeMake() -> Scope {
+    s := Scope{}
+    s.bindings = make(map[string]Binding)
+    s.names = []string{}
+    return s
+}
+
+// scopeSet adds or updates a binding in the scope.
+fn scopeSet(s: *Scope, name: string, b: Binding) {
+    if s == nil {
+        return
+    }
+    exists := false
+    for i := 0; i < len(s.names); i = i + 1 {
+        if str.Equal(s.names[i], name) {
+            exists = true
+            break
+        }
+    }
+    if !exists {
+        s.names = append(s.names, name)
+    }
+    s.bindings[name] = b
+}
+
+pub struct SymbolInfo {
+    moduleName: string
+    isPub:  bool
+}
+
+// === Checker ===
+
+pub struct Checker {
+    errors:        []string
+    scopes:        []Scope
+    scopeDepth:    int
+    currentFn:     []TType
+    structs:       map[string]ast.Decl
+    services:      map[string]TType
+    rulesets:      map[string]TType
+    templates:     map[string]ast.Decl
+    fns:           map[string]ast.Decl
+    templateNamesList: []string
+    aliases:       map[string]TType
+    taggedUnions:  map[string]ast.Decl
+    symbolInfo:    map[string]SymbolInfo
+    currentModule: string
+    imports:       map[string][]string
+    importModules: []string
+    importAliases: map[string]string
+    usedImports:   map[string]bool
+    currentFile:   string
+}
+
+pub fn newChecker() -> Checker {
+    c := Checker{}
+    c.errors = []string{}
+    c.scopes = make([]Scope, 0)
+    c.scopeDepth = 0
+    c.structs = make(map[string]ast.Decl)
+    c.services = make(map[string]TType)
+    c.rulesets = make(map[string]TType)
+    c.templates = make(map[string]ast.Decl)
+    c.fns = make(map[string]ast.Decl)
+    c.aliases = make(map[string]TType)
+    c.taggedUnions = make(map[string]ast.Decl)
+    c.symbolInfo = make(map[string]SymbolInfo)
+    c.imports = make(map[string][]string)
+    c.importModules = []string{}
+    c.importAliases = make(map[string]string)
+    c.usedImports = make(map[string]bool)
+
+    global := scopeMake()
+    scopeSet(&global, "print", Binding{typ: makeVariadicFn([]TType{anyType()}, []TType{voidType()}), isBlank: true})
+    scopeSet(&global, "println", Binding{typ: makeVariadicFn([]TType{anyType()}, []TType{voidType()}), isBlank: true})
+    scopeSet(&global, "len", Binding{typ: functionType([]TType{anyType()}, []TType{builtinType("int")}), isBlank: true})
+    scopeSet(&global, "assert", Binding{typ: functionType([]TType{builtinType("bool")}, []TType{voidType()}), isBlank: true})
+    scopeSet(&global, "append", Binding{typ: functionType([]TType{anyType(), anyType()}, []TType{anyType()}), isBlank: true})
+    scopeSet(&global, "close", Binding{typ: functionType([]TType{anyType()}, []TType{voidType()}), isBlank: true})
+    scopeSet(&global, "panic", Binding{typ: functionType([]TType{builtinType("string")}, []TType{voidType()}), isBlank: true})
+    scopeSet(&global, "recover", Binding{typ: functionType([]TType{}, []TType{builtinType("string")}), isBlank: true})
+    scopeSet(&global, "sin", Binding{typ: functionType([]TType{builtinType("float")}, []TType{builtinType("float")}), isBlank: true})
+    scopeSet(&global, "cos", Binding{typ: functionType([]TType{builtinType("float")}, []TType{builtinType("float")}), isBlank: true})
+    scopeSet(&global, "tan", Binding{typ: functionType([]TType{builtinType("float")}, []TType{builtinType("float")}), isBlank: true})
+    scopeSet(&global, "sqrt", Binding{typ: functionType([]TType{builtinType("float")}, []TType{builtinType("float")}), isBlank: true})
+    scopeSet(&global, "pow", Binding{typ: functionType([]TType{builtinType("float"), builtinType("float")}, []TType{builtinType("float")}), isBlank: true})
+    scopeSet(&global, "dot", Binding{typ: functionType([]TType{anyType(), anyType()}, []TType{builtinType("float")}), isBlank: true})
+    scopeSet(&global, "norm", Binding{typ: functionType([]TType{anyType()}, []TType{builtinType("float")}), isBlank: true})
+
+    c.scopes = append(c.scopes, global)
+    return c
+}
+
+fn makeVariadicFn(params: []TType, retTypes: []TType) -> TType {
+    t := functionType(params, retTypes)
+    t.variadic = true
+    return t
+}
+
+fn substituteType(c: *Checker, t: TType, mapping: map[string]TType) -> TType {
+    if t.kind == TK_NAMED {
+        if mapStringTTypeHasKey(mapping, t.name) {
+            return mapping[t.name]
+        }
+        if len(t.genericArgs) == 0 {
+            return t
+        }
+        result := namedType(t.name)
+        args := []TType{}
+        for i := 0; i < len(t.genericArgs); i = i + 1 {
+            args = append(args, substituteType(c, t.genericArgs[i], mapping))
+        }
+        result.genericArgs = args
+        return result
+    }
+    if t.kind == TK_POINTER {
+        return pointerType(substituteType(c, t.elem[0], mapping))
+    }
+    if t.kind == TK_ARRAY {
+        return arrayType(substituteType(c, t.elem[0], mapping))
+    }
+    if t.kind == TK_SET {
+        return setType(substituteType(c, t.elem[0], mapping))
+    }
+    if t.kind == TK_MAP {
+        kt := typeOptT(t.keyType)
+        vt := typeOptT(t.elem)
+        return mapType(substituteType(c, kt, mapping), substituteType(c, vt, mapping))
+    }
+    if t.kind == TK_TUPLE {
+        elems := []TType{}
+        for i := 0; i < len(t.tupleTypes); i = i + 1 {
+            elems = append(elems, substituteType(c, t.tupleTypes[i], mapping))
+        }
+        return tupleType(elems)
+    }
+    if t.kind == TK_FUNCTION {
+        params := []TType{}
+        for i := 0; i < len(t.params); i = i + 1 {
+            params = append(params, substituteType(c, t.params[i], mapping))
+        }
+        rets := []TType{}
+        for i := 0; i < len(t.retTypes); i = i + 1 {
+            rets = append(rets, substituteType(c, t.retTypes[i], mapping))
+        }
+        ft := functionType(params, rets)
+        ft.variadic = t.variadic
+        return ft
+    }
+    if t.kind == TK_CHAN {
+        return chanType(substituteType(c, t.elem[0], mapping))
+    }
+    return t
+}
+
+pub fn setSymbolInfo(c: *Checker, info: map[string]SymbolInfo) {
+    c.symbolInfo = info
+}
+
+pub fn NewSymbolInfo(moduleName: string, isPub: bool) -> SymbolInfo {
+    return SymbolInfo{moduleName: moduleName, isPub: isPub}
+}
+
+pub fn Errors(c: *Checker) -> []string {
+    return c.errors
+}
+
+// templateNames returns the list of registered template names.
+pub fn templateNames(c: *Checker) -> []string {
+    return c.templateNamesList
+}
+
+// importsFor returns the list of import aliases for a given module name.
+pub fn importsFor(c: *Checker, moduleName: string) -> []string {
+    imps := c.imports[moduleName]
+    return imps
+}
+
+// getTemplate returns the declaration for a template by name.
+pub fn getTemplate(c: *Checker, name: string) -> ast.Decl {
+    return c.templates[name]
+}
+
+fn report(c: *Checker, msg: string) {
+    if str.Len(c.currentFile) > 0 {
+        msg = str.Concat(str.Concat(c.currentFile, ": "), msg)
+    }
+    c.errors = append(c.errors, msg)
+}
+
+fn reportAt(c: *Checker, line: int, col: int, msg: string) {
+    full := str.Concat(str.Concat(str.Concat(str.Concat(itoa(line), ":"), itoa(col)), ": "), msg)
+    if str.Len(c.currentFile) > 0 {
+        full = str.Concat(str.Concat(c.currentFile, ":"), full)
+    }
+    c.errors = append(c.errors, full)
+}
+
+fn itoa(n: int) -> string {
+    if n == 0 {
+        return "0"
+    }
+    neg := false
+    if n < 0 {
+        neg = true
+        n = -n
+    }
+    digits := ""
+    for n > 0 {
+        d := n % 10
+        ch := str.Substr("0123456789", d, 1)
+        digits = str.Concat(ch, digits)
+        n = n / 10
+    }
+    if neg {
+        digits = str.Concat("-", digits)
+    }
+    return digits
+}
+
+// === Scope Management ===
+
+fn pushScope(c: *Checker) {
+    c.scopeDepth = c.scopeDepth + 1
+    scope := scopeMake()
+    if len(c.scopes) > c.scopeDepth {
+        c.scopes[c.scopeDepth] = scope
+    } else {
+        c.scopes = append(c.scopes, scope)
+    }
+}
+
+fn popScope(c: *Checker) {
+    if c.scopeDepth <= 0 {
+        return
+    }
+    current := &c.scopes[c.scopeDepth]
+    for i := 0; i < len(current.names); i = i + 1 {
+        name := current.names[i]
+        b := current.bindings[name]
+        if !b.isBlank && !b.isParam && !b.used {
+            report(c, str.Concat("unused variable \"", str.Concat(name, "\"")))
+        }
+    }
+    c.scopeDepth = c.scopeDepth - 1
+}
+
+fn declare(c: *Checker, name: string, typ: TType) {
+    current := &c.scopes[c.scopeDepth]
+    exists := scopeHasBinding(current, name)
+    if exists && !str.Equal(name, "_") {
+        report(c, str.Concat("variable \"", str.Concat(name, "\" already declared in this scope")))
+        return
+    }
+    isLocal := c.scopeDepth > 0
+    isBlank := str.Equal(name, "_")
+    b := Binding{typ: typ}
+    b.isBlank = isBlank
+    b.used = !isLocal || isBlank
+    scopeSet(current, name, b)
+}
+
+fn declareParam(c: *Checker, name: string, typ: TType) {
+    current := &c.scopes[c.scopeDepth]
+    exists := scopeHasBinding(current, name)
+    if exists && !str.Equal(name, "_") {
+        report(c, str.Concat("parameter \"", str.Concat(name, "\" already declared in this scope")))
+        return
+    }
+    b := Binding{typ: typ}
+    b.isParam = true
+    b.used = true
+    scopeSet(current, name, b)
+}
+
+fn resolveWithKey(c: *Checker, name: string) -> TType {
+    for i := c.scopeDepth; i >= 0; i = i - 1 {
+        b := c.scopes[i].bindings[name]
+        ok := scopeHasBinding(&c.scopes[i], name)
+        if ok {
+            if i > 0 {
+                b.used = true
+                scopeSet(&c.scopes[i], name, b)
+            }
+            if i == 0 {
+                info := c.symbolInfo[name]
+                hasInfo := mapStringSymbolInfoHasKey(c.symbolInfo, name)
+                if hasInfo {
+                    if str.Len(info.moduleName) > 0 && !str.Equal(info.moduleName, c.currentModule) && !info.isPub {
+                        report(c, str.Concat("cannot access private symbol \"", str.Concat(name, str.Concat("\" from module \"", str.Concat(info.moduleName, "\"")))))
+                    }
+                }
+            }
+            return b.typ
+        }
+    }
+    if str.Len(c.currentModule) > 0 && !str.Equal(c.currentModule, "main") {
+        qualified := str.Concat(str.Concat(c.currentModule, "."), name)
+        b := c.scopes[0].bindings[qualified]
+        ok := scopeHasBinding(&c.scopes[0], qualified)
+        if ok {
+            return b.typ
+        }
+    }
+    if str.Len(c.currentModule) > 0 {
+        cm := c.currentModule
+        imps := c.imports[cm]
+        exists := mapStringStringSliceHasKey(c.imports, cm)
+        if exists {
+            for impName in imps {
+                qualified := str.Concat(str.Concat(impName, "."), name)
+                b := c.scopes[0].bindings[qualified]
+        ok := scopeHasBinding(&c.scopes[0], qualified)
+                if ok {
+                    markImportUsed(c, impName)
+                    return b.typ
+                }
+            }
+        }
+    }
+    return TType{kind: TK_UNKNOWN}
+}
+
+fn resolve(c: *Checker, name: string) -> TType {
+    typ := resolveWithKey(c, name)
+    if typ.kind == TK_UNKNOWN && str.Contains(name, ".") {
+        idx := lastIndexOf(name, ".")
+        if idx >= 0 {
+            short := str.Substr(name, idx + 1, str.Len(name) - idx - 1)
+            typ = resolveWithKey(c, short)
+        }
+    }
+    return typ
+}
+
+fn markVarUsed(c: *Checker, name: string) {
+    for i := c.scopeDepth; i >= 0; i = i - 1 {
+        b := c.scopes[i].bindings[name]
+        ok := scopeHasBinding(&c.scopes[i], name)
+        if ok {
+            b.used = true
+            scopeSet(&c.scopes[i], name, b)
+            return
+        }
+    }
+}
+
+fn markImportUsed(c: *Checker, alias: string) {
+    c.usedImports[alias] = true
+    c.usedImports[str.Concat(alias, ".")] = true
+}
+
+fn resolveImportAlias(c: *Checker, name: string) -> string {
+    real := c.importAliases[name]
+    ok := mapStringStringHasKey(c.importAliases, name)
+    if ok {
+        return real
+    }
+    return name
+}
+
+fn markInterpolatedVars(c: *Checker, s: string) {
+    i := 0
+    for i < str.Len(s) {
+        ch := str.Substr(s, i, 1)
+        if str.Equal(ch, "{") {
+            j := i + 1
+            for j < str.Len(s) && !str.Equal(str.Substr(s, j, 1), "}") {
+                j = j + 1
+            }
+            if j < str.Len(s) {
+                id := str.Substr(s, i + 1, j - i - 1)
+                dotIdx := str.IndexOf(id, ".")
+                if dotIdx >= 0 {
+                    id = str.Substr(id, 0, dotIdx)
+                }
+                if str.Len(id) > 0 && !str.Equal(id, "_") {
+                    markVarUsed(c, id)
+                }
+                i = j + 1
+                continue
+            }
+        }
+        i = i + 1
+    }
+}
+
+// === String Helpers ===
+
+fn splitOnFirstDot(s: string) -> []string {
+    idx := str.IndexOf(s, ".")
+    if idx < 0 {
+        return []string{s, ""}
+    }
+    return []string{str.Substr(s, 0, idx), str.Substr(s, idx + 1, str.Len(s) - idx - 1)}
+}
+
+fn splitOnLastDot(s: string) -> []string {
+    idx := lastIndexOf(s, ".")
+    if idx < 0 {
+        return []string{"", s}
+    }
+    return []string{str.Substr(s, 0, idx), str.Substr(s, idx + 1, str.Len(s) - idx - 1)}
+}
+
+// === AST Type to TType ===
+
+pub fn astTypeToType(c: *Checker, t: ast.Type) -> TType {
+    if t.kind == 0 && str.Len(t.name) == 0 && len(t.elem) == 0 && len(t.paramTypes) == 0 && len(t.tupleTypes) == 0 {
+        return voidType()
+    }
+    if t.kind == ast.TY_NAMED { return astNamedToType(c, t) }
+    if t.kind == ast.TY_POINTER { return pointerType(astTypeToType(c, ast.typeOpt(t.elem))) }
+    if t.kind == ast.TY_ARRAY { return arrayType(astTypeToType(c, ast.typeOpt(t.elem))) }
+    if t.kind == ast.TY_SET { return setType(astTypeToType(c, ast.typeOpt(t.elem))) }
+    if t.kind == ast.TY_MAP { return mapType(astTypeToType(c, ast.typeOpt(t.keyType)), astTypeToType(c, ast.typeOpt(t.elem))) }
+    if t.kind == ast.TY_CHAN { return chanType(astTypeToType(c, ast.typeOpt(t.elem))) }
+    if t.kind == ast.TY_TENSOR { return tensorType(astTypeToType(c, ast.typeOpt(t.elem))) }
+    if t.kind == ast.TY_FUNC { return astFuncTypeToType(c, t) }
+    if t.kind == ast.TY_TUPLE { return astTupleTypeToType(c, t) }
+    return unknownType()
+}
+
+fn astNamedToType(c: *Checker, t: ast.Type) -> TType {
+    name := t.name
+    if str.Contains(name, ".") {
+        parts := splitOnFirstDot(name)
+        resolved := resolveImportAlias(c, parts[0])
+        if !str.Equal(resolved, parts[0]) {
+            name = str.Concat(str.Concat(resolved, "."), parts[1])
+        }
+    }
+    if str.Len(c.currentModule) > 0 && !str.Equal(c.currentModule, "main") && !str.Contains(name, ".") {
+        qualified := str.Concat(str.Concat(c.currentModule, "."), name)
+        exists := scopeHasBinding(&c.scopes[0], qualified)
+        if exists {
+            result := lookupType(qualified)
+            if len(t.genericArgs) > 0 {
+                args := []TType{}
+                for i := 0; i < len(t.genericArgs); i = i + 1 {
+                    args = append(args, astTypeToType(c, t.genericArgs[i]))
+                }
+                result.genericArgs = args
+            }
+            return result
+        }
+    }
+    if str.Len(c.currentModule) > 0 && !str.Contains(name, ".") {
+        cm := c.currentModule
+        imps := c.imports[cm]
+        exists := mapStringStringSliceHasKey(c.imports, cm)
+        if exists {
+            j := 0
+            for j < len(imps) {
+                impName := imps[j]
+                qualified := str.Concat(str.Concat(impName, "."), name)
+                existsScope := scopeHasBinding(&c.scopes[0], qualified)
+                if existsScope {
+                    markImportUsed(c, impName)
+                    result := lookupType(qualified)
+                    if len(t.genericArgs) > 0 {
+                        args := []TType{}
+                        for i := 0; i < len(t.genericArgs); i = i + 1 {
+                            args = append(args, astTypeToType(c, t.genericArgs[i]))
+                        }
+                        result.genericArgs = args
+                    }
+                    return result
+                }
+                j = j + 1
+            }
+        }
+    }
+    isTemplate := mapStringDeclHasKey(c.templates, name)
+    if isTemplate {
+        // Mark import as used for qualified template names (e.g. "reader.Reader")
+        if str.Contains(name, ".") {
+            parts := splitOnFirstDot(name)
+            markImportUsed(c, parts[0])
+        }
+        tt := TType{kind: TK_TEMPLATE}
+        tt.name = name
+        return tt
+    }
+    // Try module-qualified name for unqualified type references
+    if str.Len(c.currentModule) > 0 && !str.Contains(name, ".") {
+        qualified := str.Concat(str.Concat(c.currentModule, "."), name)
+        isQTmpl := mapStringDeclHasKey(c.templates, qualified)
+        if isQTmpl {
+            tt := TType{kind: TK_TEMPLATE}
+            tt.name = qualified
+            return tt
+        }
+    }
+    if str.Contains(name, ".") {
+        parts := splitOnFirstDot(name)
+        // Try the full qualified name first (templates are stored qualified)
+        isTmplQualified := mapStringDeclHasKey(c.templates, name)
+        if isTmplQualified {
+            markImportUsed(c, parts[0])
+            tt := TType{kind: TK_TEMPLATE}
+            tt.name = name
+            return tt
+        }
+        // Also try the unqualified part
+        isTmpl := mapStringDeclHasKey(c.templates, parts[1])
+        if isTmpl {
+            markImportUsed(c, parts[0])
+            tt := TType{kind: TK_TEMPLATE}
+            tt.name = parts[1]
+            return tt
+        }
+        markImportUsed(c, parts[0])
+    }
+    aliased := c.aliases[name]
+    hasAlias := mapStringTTypeHasKey(c.aliases, name)
+    if hasAlias {
+        return aliased
+    }
+    isTU := mapStringDeclHasKey(c.taggedUnions, name)
+    if isTU {
+        b := c.scopes[0].bindings[name]
+        exists := scopeHasBinding(&c.scopes[0], name)
+        if exists && b.typ.kind == TK_TAGGED_UNION {
+            return b.typ
+        }
+    }
+    result := lookupType(name)
+    if len(t.genericArgs) > 0 {
+        args := []TType{}
+        for i := 0; i < len(t.genericArgs); i = i + 1 {
+            args = append(args, astTypeToType(c, t.genericArgs[i]))
+        }
+        result.genericArgs = args
+    }
+    return result
+}
+
+fn astFuncTypeToType(c: *Checker, t: ast.Type) -> TType {
+    params := make([]TType, 0)
+    for i := 0; i < len(t.paramTypes); i = i + 1 {
+        params = append(params, astTypeToType(c, t.paramTypes[i]))
+    }
+    var retTypes []TType
+    if len(t.retTypes) > 0 {
+        retTypes = []TType{}
+        for i := 0; i < len(t.retTypes); i = i + 1 {
+            retTypes = append(retTypes, astTypeToType(c, t.retTypes[i]))
+        }
+    } else {
+        retTypes = []TType{voidType()}
+    }
+    return functionType(params, retTypes)
+}
+
+fn astTupleTypeToType(c: *Checker, t: ast.Type) -> TType {
+    types := []TType{}
+    for i := 0; i < len(t.tupleTypes); i = i + 1 {
+        types = append(types, astTypeToType(c, t.tupleTypes[i]))
+    }
+    return tupleType(types)
+}
+
+// === Assignability with interface/template duck-typing ===
+
+fn checkerIsAssignable(c: *Checker, dst: TType, src: TType) -> bool {
+    dst = resolveAlias(c, dst)
+    src = resolveAlias(c, src)
+    if isAssignable(dst, src) {
+        return true
+    }
+    // Generic type parameters (unqualified TK_NAMED that aren't known
+    // structs/tagged-unions/templates) are assignable to each other.
+    // The Go compiler handles this via monomorphization; without it,
+    // different type parameter names (T, K, V) should be compatible.
+    if dst.kind == TK_NAMED && src.kind == TK_NAMED {
+        if !str.Contains(dst.name, ".") && !str.Contains(src.name, ".") {
+            dstIsStruct := mapStringDeclHasKey(c.structs, dst.name)
+            dstIsTU := mapStringDeclHasKey(c.taggedUnions, dst.name)
+            dstIsTmpl := mapStringDeclHasKey(c.templates, dst.name)
+            srcIsStruct := mapStringDeclHasKey(c.structs, src.name)
+            srcIsTU := mapStringDeclHasKey(c.taggedUnions, src.name)
+            srcIsTmpl := mapStringDeclHasKey(c.templates, src.name)
+            if !dstIsStruct && !dstIsTU && !dstIsTmpl && !srcIsStruct && !srcIsTU && !srcIsTmpl {
+                return true
+            }
+        }
+    }
+    if dst.kind == TK_INTERFACE || dst.kind == TK_ERROR {
+        typeName := ""
+        if src.kind == TK_NAMED {
+            typeName = src.name
+        } else if src.kind == TK_POINTER {
+            inner := typeOptT(src.elem)
+            if inner.kind == TK_NAMED {
+                typeName = inner.name
+            }
+        }
+        if str.Len(typeName) == 0 {
+            return false
+        }
+        for i := 0; i < len(dst.methodNames); i = i + 1 {
+            methodName := dst.methodNames[i]
+            found := false
+            ft := resolve(c, str.Concat(str.Concat(typeName, "."), methodName))
+            if ft.kind != TK_UNKNOWN {
+                found = true
+            }
+            if !found && str.Contains(typeName, ".") {
+                parts := splitOnLastDot(typeName)
+                ft = resolve(c, str.Concat(str.Concat(parts[0], "."), methodName))
+                if ft.kind != TK_UNKNOWN {
+                    found = true
+                }
+            }
+            if !found {
+                parts := splitOnLastDot(typeName)
+                ft = resolve(c, str.Concat(str.Concat(parts[1], "."), methodName))
+                if ft.kind != TK_UNKNOWN {
+                    found = true
+                }
+            }
+            if !found {
+                ft = resolve(c, methodName)
+                if ft.kind != TK_UNKNOWN {
+                    found = true
+                }
+            }
+            if !found {
+                return false
+            }
+        }
+        return true
+    }
+    if dst.kind == TK_TEMPLATE {
+        tmpl := c.templates[dst.name]
+        exists := mapStringDeclHasKey(c.templates, dst.name)
+        if !exists {
+            return false
+        }
+        typeName := ""
+        if src.kind == TK_NAMED {
+            typeName = src.name
+        } else if src.kind == TK_POINTER {
+            inner := typeOptT(src.elem)
+            if inner.kind == TK_NAMED {
+                typeName = inner.name
+            }
+        }
+        if str.Len(typeName) == 0 {
+            return false
+        }
+        for i := 0; i < len(tmpl.templateMethods); i = i + 1 {
+            methodName := tmpl.templateMethods[i].fnName
+            found := false
+            ft := resolve(c, str.Concat(str.Concat(typeName, "."), methodName))
+            if ft.kind != TK_UNKNOWN {
+                found = true
+            }
+            var moduleName string
+            var structName string
+            if str.Contains(typeName, ".") {
+                parts := splitOnLastDot(typeName)
+                moduleName = parts[0]
+                structName = parts[1]
+            } else {
+                structName = typeName
+            }
+            if !found && str.Len(moduleName) > 0 {
+                ft = resolve(c, str.Concat(str.Concat(moduleName, "."), methodName))
+                if ft.kind != TK_UNKNOWN {
+                    found = true
+                }
+            }
+            if !found && str.Len(structName) > 0 {
+                ft = resolve(c, str.Concat(str.Concat(structName, "."), methodName))
+                if ft.kind != TK_UNKNOWN {
+                    found = true
+                }
+            }
+            if !found {
+                ft = resolve(c, methodName)
+                if ft.kind != TK_UNKNOWN {
+                    found = true
+                }
+            }
+            if !found {
+                return false
+            }
+        }
+        return true
+    }
+    return false
+}
+
+pub fn resolveAlias(c: *Checker, t: TType) -> TType {
+    visited := make(map[string]bool)
+    for {
+        if t.kind != TK_NAMED {
+            return t
+        }
+        alias := c.aliases[t.name]
+        ok := mapStringTTypeHasKey(c.aliases, t.name)
+        if !ok {
+            return t
+        }
+        if visited[t.name] {
+            return t
+        }
+        visited[t.name] = true
+        t = alias
+    }
+}
+
+// === Function Type from Decl ===
+
+fn fnTypeFromDecl(c: *Checker, fnDecl: ast.Decl) -> TType {
+    params := make([]TType, 0)
+    for i := 0; i < len(fnDecl.fnParams); i = i + 1 {
+        pt := unknownType()
+        if len(fnDecl.fnParams[i].typ) > 0 {
+            pt = astTypeToType(c, fnDecl.fnParams[i].typ[0])
+        }
+        params = append(params, pt)
+    }
+    var retTypes []TType
+    if len(fnDecl.fnRetTypes) > 0 {
+        retTypes = []TType{}
+        for i := 0; i < len(fnDecl.fnRetTypes); i = i + 1 {
+            retTypes = append(retTypes, astTypeToType(c, fnDecl.fnRetTypes[i]))
+        }
+    } else {
+        retTypes = []TType{voidType()}
+    }
+    ft := functionType(params, retTypes)
+    return ft
+}
+
+// === Main Entry Point ===
+
+pub fn checkProgram(c: *Checker, decls: []ast.Stmt) -> bool {
+    // Pre-pass: collect all top-level type names
+    c.currentModule = ""
+    for i := 0; i < len(decls); i = i + 1 {
+        decl := decls[i]
+        if decl.kind == ast.ST_MODULE {
+            c.currentModule = decl.decl.moduleName
+            continue
+        }
+        setModuleFromDecl(c, decl)
+        if decl.kind == ast.ST_STRUCT {
+            d := decl.decl
+            declare(c, d.structName, namedType(d.structName))
+            c.structs[d.structName] = d
+        } else if decl.kind == ast.ST_ENUM {
+            d := decl.decl
+            hasPayload := false
+            for j := 0; j < len(d.enumVariants); j = j + 1 {
+                if len(d.enumVariants[j].payloads) > 0 {
+                    hasPayload = true
+                    break
+                }
+            }
+            if hasPayload || len(d.enumGenerics) > 0 {
+                tu := TType{kind: TK_TAGGED_UNION}
+                tu.name = d.enumName
+                declare(c, d.enumName, tu)
+                c.taggedUnions[d.enumName] = d
+                var variants []TaggedVariant
+                for j := 0; j < len(d.enumVariants); j = j + 1 {
+                    v := TaggedVariant{name: d.enumVariants[j].name}
+                    if len(d.enumVariants[j].payloads) > 0 {
+                        v.payloadType = singleTType(astTypeToType(c, d.enumVariants[j].payloads[0]))
+                    }
+                    variants = append(variants, v)
+                }
+                tu.variants = variants
+                for j := 0; j < len(d.enumVariants); j = j + 1 {
+                    if len(d.enumVariants[j].payloads) > 0 {
+                        pt := astTypeToType(c, d.enumVariants[j].payloads[0])
+                        ctor := functionType([]TType{pt}, []TType{tu})
+                        declare(c, d.enumVariants[j].name, ctor)
+                    } else {
+                        declare(c, d.enumVariants[j].name, tu)
+                    }
+                }
+            } else {
+                declare(c, d.enumName, namedType(d.enumName))
+            }
+        } else if decl.kind == ast.ST_SERVICE {
+            d := decl.decl
+            if str.Len(d.serviceForType) == 0 {
+                svc := TType{kind: TK_SERVICE}
+                svc.name = d.serviceName
+                declare(c, d.serviceName, svc)
+            }
+        } else if decl.kind == ast.ST_RULESET {
+            d := decl.decl
+            rs := TType{kind: TK_RULESET}
+            rs.name = d.rulesetName
+            declare(c, d.rulesetName, rs)
+        } else if decl.kind == ast.ST_TEMPLATE {
+            c.templates[decl.decl.templateName] = decl.decl
+            c.templateNamesList = append(c.templateNamesList, decl.decl.templateName)
+        } else if decl.kind == ast.ST_TYPEALIAS {
+            d := decl.decl
+            if len(d.aliasType) > 0 {
+                resolved := astTypeToType(c, d.aliasType[0])
+                if resolved.kind != TK_UNKNOWN {
+                    c.aliases[d.aliasName] = resolved
+                    declare(c, d.aliasName, resolved)
+                }
+            }
+        } else if decl.kind == ast.ST_CONST {
+            d := decl.decl
+            declare(c, d.constName, namedType(d.constName))
+            for j := 0; j < len(d.constBlock); j = j + 1 {
+                declare(c, d.constBlock[j].name, namedType(d.constBlock[j].name))
+            }
+        }
+    }
+
+    // First pass: register all top-level names and types
+    for i := 0; i < len(decls); i = i + 1 {
+        decl := decls[i]
+        if decl.kind == ast.ST_MODULE {
+            c.currentModule = decl.decl.moduleName
+            continue
+        }
+        setModuleFromDecl(c, decl)
+
+        if decl.kind == ast.ST_IMPORT {
+            d := decl.decl
+            realName := d.importPath
+            lastSlash := lastIndexOf(realName, "/")
+            if lastSlash >= 0 {
+                realName = str.Substr(realName, lastSlash + 1, str.Len(realName) - lastSlash - 1)
+            }
+            realName = str.Replace(realName, ".skink", "")
+            alias := d.importAlias
+            if str.Len(alias) == 0 {
+                alias = realName
+            }
+            moduleKey := c.currentModule
+            if str.Len(moduleKey) == 0 {
+                moduleKey = "main"
+            }
+            exists := false
+            imps := c.imports[moduleKey]
+            hasImps := mapStringStringSliceHasKey(c.imports, moduleKey)
+            if hasImps {
+                for existing in imps {
+                    if str.Equal(existing, alias) {
+                        exists = true
+                        break
+                    }
+                }
+            }
+            existingMod := c.importAliases[alias]
+            hasExisting := mapStringStringHasKey(c.importAliases, alias)
+            if hasExisting && !str.Equal(existingMod, realName) {
+                report(c, str.Concat("duplicate import alias \"", str.Concat(alias, "\"")))
+            } else if exists {
+                report(c, str.Concat("duplicate import alias \"", str.Concat(alias, str.Concat("\" in module \"", str.Concat(moduleKey, "\"")))))
+            } else {
+                c.imports[moduleKey] = append(c.imports[moduleKey], alias)
+                // Track module keys for iteration
+                found := false
+                for mk in c.importModules {
+                    if str.Equal(mk, moduleKey) {
+                        found = true
+                    }
+                }
+                if !found {
+                    c.importModules = append(c.importModules, moduleKey)
+                }
+            }
+            if str.StartsWith(d.importPath, "C:") {
+                markImportUsed(c, alias)
+            }
+            if str.Len(d.importAlias) > 0 && !str.Equal(d.importAlias, realName) {
+                c.importAliases[d.importAlias] = realName
+            }
+        } else if decl.kind == ast.ST_FN {
+            d := decl.decl
+            fnType := fnTypeFromDecl(c, d)
+            declare(c, d.fnName, fnType)
+            c.fns[d.fnName] = d
+        } else if decl.kind == ast.ST_CONST {
+            // Consts are pre-registered in the pre-pass; their types are
+            // resolved during the const-evaluation pass below.
+            continue
+        } else if decl.kind == ast.ST_STRUCT {
+            d := decl.decl
+            for j := 0; j < len(d.structMethods); j = j + 1 {
+                fnType := fnTypeFromDecl(c, d.structMethods[j])
+                declare(c, str.Concat(str.Concat(d.structName, "."), d.structMethods[j].fnName), fnType)
+            }
+        } else if decl.kind == ast.ST_ENUM {
+            d := decl.decl
+            isTaggedUnion := false
+            for j := 0; j < len(d.enumVariants); j = j + 1 {
+                if len(d.enumVariants[j].payloads) > 0 {
+                    isTaggedUnion = true
+                    break
+                }
+            }
+            if len(d.enumGenerics) > 0 {
+                isTaggedUnion = true
+            }
+            if !isTaggedUnion {
+                for j := 0; j < len(d.enumVariants); j = j + 1 {
+                    declare(c, d.enumVariants[j].name, builtinType("int"))
+                }
+            }
+        } else if decl.kind == ast.ST_SERVICE {
+            d := decl.decl
+            if str.Len(d.serviceForType) == 0 {
+                for j := 0; j < len(d.serviceMethods); j = j + 1 {
+                    fnType := fnTypeFromDecl(c, d.serviceMethods[j])
+                    declare(c, d.serviceMethods[j].fnName, fnType)
+                }
+                svc := TType{kind: TK_SERVICE}
+                svc.name = d.serviceName
+                b := c.scopes[0].bindings[d.serviceName]
+                exists := scopeHasBinding(&c.scopes[0], d.serviceName)
+                if exists {
+                    b.typ = svc
+                    scopeSet(&c.scopes[0], d.serviceName, b)
+                }
+                c.services[d.serviceName] = svc
+            } else {
+                forType := d.serviceForType
+                if str.Len(c.currentModule) > 0 && !str.Equal(c.currentModule, "main") && !str.Contains(forType, ".") {
+                    qualified := str.Concat(str.Concat(c.currentModule, "."), forType)
+                    exists := scopeHasBinding(&c.scopes[0], qualified)
+                    if exists {
+                        forType = qualified
+                    }
+                }
+                for j := 0; j < len(d.serviceMethods); j = j + 1 {
+                    fnType := fnTypeFromDecl(c, d.serviceMethods[j])
+                    declare(c, str.Concat(str.Concat(forType, "."), d.serviceMethods[j].fnName), fnType)
+                }
+            }
+        } else if decl.kind == ast.ST_RULESET {
+            d := decl.decl
+            c.rulesets[d.rulesetName] = namedType(d.rulesetName)
+            implicitMethods := []string{"start", "stop", "restart", "reset"}
+            for j := 0; j < len(implicitMethods); j = j + 1 {
+                declare(c, str.Concat(str.Concat(d.rulesetName, "."), implicitMethods[j]), functionType([]TType{}, []TType{voidType()}))
+            }
+        } else if decl.kind == ast.ST_TEMPLATE {
+            c.templates[decl.decl.templateName] = decl.decl
+            c.templateNamesList = append(c.templateNamesList, decl.decl.templateName)
+        } else if decl.kind == ast.ST_VARDECL {
+            declare(c, decl.varName, anyType())
+        } else if decl.kind == ast.ST_EXTERN {
+            d := decl.decl
+            fnType := fnTypeFromDecl(c, d)
+            declare(c, d.fnName, fnType)
+        }
+    }
+
+    // Second pass: evaluate const declarations first
+    for i := 0; i < len(decls); i = i + 1 {
+        decl := decls[i]
+        if decl.kind == ast.ST_MODULE {
+            c.currentModule = decl.decl.moduleName
+            continue
+        }
+        setModuleFromDecl(c, decl)
+        if decl.kind == ast.ST_CONST {
+            checkDeclaration(c, decl)
+        }
+    }
+
+    // Second pass continued: check everything else
+    for i := 0; i < len(decls); i = i + 1 {
+        decl := decls[i]
+        if decl.kind == ast.ST_MODULE {
+            c.currentModule = decl.decl.moduleName
+            continue
+        }
+        setModuleFromDecl(c, decl)
+        if decl.kind == ast.ST_CONST {
+            continue
+        }
+        checkDeclaration(c, decl)
+    }
+
+    // Report unused imports
+    for mi := 0; mi < len(c.importModules); mi = mi + 1 {
+        modName := c.importModules[mi]
+        imps := c.imports[modName]
+        for imp in imps {
+            if str.Equal(imp, "_") {
+                continue
+            }
+            if !c.usedImports[imp] && !str.EndsWith(imp, ".") {
+                report(c, str.Concat("unused import \"", str.Concat(imp, str.Concat("\" in module \"", str.Concat(modName, "\"")))))
+            }
+        }
+    }
+
+    return len(c.errors) == 0
+}
+
+fn setModuleFromDecl(c: *Checker, decl: ast.Stmt) {
+    if decl.kind == ast.ST_MODULE {
+        c.currentModule = decl.decl.moduleName
+    }
+}
+
+// === Declaration Checking ===
+
+fn checkDeclaration(c: *Checker, stmt: ast.Stmt) {
+    if stmt.kind == ast.ST_FN {
+        checkFnDecl(c, stmt.decl)
+    } else if stmt.kind == ast.ST_CONST {
+        checkConstDecl(c, stmt.decl)
+    } else if stmt.kind == ast.ST_STRUCT {
+        checkStructDecl(c, stmt.decl)
+    } else if stmt.kind == ast.ST_SERVICE {
+        d := stmt.decl
+        for i := 0; i < len(d.serviceMethods); i = i + 1 {
+            checkFnDecl(c, d.serviceMethods[i])
+        }
+    } else if stmt.kind == ast.ST_RULESET {
+        d := stmt.decl
+        for i := 0; i < len(d.rulesetRules); i = i + 1 {
+            if len(d.rulesetRules[i].condition) > 0 {
+                condType := checkExpr(c, d.rulesetRules[i].condition[0])
+                if condType.kind != TK_UNKNOWN && !typeEquals(condType, builtinType("bool")) {
+                    report(c, str.Concat("rule \"", str.Concat(d.rulesetRules[i].name, str.Concat("\" condition must be bool, got ", typeString(condType)))))
+                }
+            }
+            checkBlockStmt(c, d.rulesetRules[i].ruleAction)
+        }
+    } else if stmt.kind == ast.ST_TEMPLATE {
+        checkTemplateDecl(c, stmt.decl)
+    } else if stmt.kind == ast.ST_VARDECL {
+        checkVarDecl(c, stmt)
+    }
+}
+
+fn checkVarDecl(c: *Checker, s: ast.Stmt) {
+    if len(s.varValue) > 0 {
+        valType := checkExpr(c, s.varValue[0])
+        b := c.scopes[0].bindings[s.varName]
+        exists := scopeHasBinding(&c.scopes[0], s.varName)
+        if exists {
+            b.typ = valType
+            scopeSet(&c.scopes[0], s.varName, b)
+        }
+    }
+}
+
+fn checkConstDecl(c: *Checker, d: ast.Decl) {
+    if len(d.constValue) > 0 {
+        valType := checkExpr(c, d.constValue[0])
+        if valType.kind == TK_UNKNOWN {
+            report(c, str.Concat("cannot infer type for constant \"", str.Concat(d.constName, "\"")))
+            return
+        }
+        b := c.scopes[0].bindings[d.constName]
+        exists := scopeHasBinding(&c.scopes[0], d.constName)
+        if exists {
+            b.typ = valType
+            scopeSet(&c.scopes[0], d.constName, b)
+        }
+    }
+    for i := 0; i < len(d.constBlock); i = i + 1 {
+        if len(d.constBlock[i].value) > 0 {
+            valType := checkExpr(c, d.constBlock[i].value[0])
+            if valType.kind == TK_UNKNOWN {
+                report(c, str.Concat("cannot infer type for constant \"", str.Concat(d.constBlock[i].name, "\"")))
+            } else {
+                b := c.scopes[0].bindings[d.constBlock[i].name]
+                exists := scopeHasBinding(&c.scopes[0], d.constBlock[i].name)
+                if exists {
+                    b.typ = valType
+                    scopeSet(&c.scopes[0], d.constBlock[i].name, b)
+                }
+            }
+        }
+    }
+}
+
+fn checkStructDecl(c: *Checker, d: ast.Decl) {
+    for i := 0; i < len(d.structFields); i = i + 1 {
+        if len(d.structFields[i].typ) == 0 {
+            reportAt(c, 0, 0, str.Concat("field \"", str.Concat(d.structFields[i].name, str.Concat("\" in struct \"", str.Concat(d.structName, "\" has no type")))))
+            continue
+        }
+        ft := astTypeToType(c, d.structFields[i].typ[0])
+        if ft.kind == TK_UNKNOWN {
+            reportAt(c, 0, 0, str.Concat("unknown type for field \"", str.Concat(d.structFields[i].name, str.Concat("\" in struct \"", str.Concat(d.structName, "\"")))))
+        }
+    }
+    c.structs[d.structName] = d
+    for i := 0; i < len(d.structMethods); i = i + 1 {
+        checkFnDecl(c, d.structMethods[i])
+    }
+}
+
+fn checkTemplateDecl(c: *Checker, d: ast.Decl) {
+    for i := 0; i < len(d.templateMethods); i = i + 1 {
+        m := d.templateMethods[i]
+        if len(m.fnParams) == 0 {
+            report(c, str.Concat("template method \"", str.Concat(m.fnName, "\" must have a receiver parameter")))
+            continue
+        }
+        fnTypeFromDecl(c, m)
+    }
+}
+
+fn checkFnDecl(c: *Checker, fnDecl: ast.Decl) {
+    fnType := fnTypeFromDecl(c, fnDecl)
+    oldFn := c.currentFn
+    c.currentFn = singleTType(fnType)
+    pushScope(c)
+    for i := 0; i < len(fnDecl.fnParams); i = i + 1 {
+        pt := unknownType()
+        if len(fnDecl.fnParams[i].typ) > 0 {
+            pt = astTypeToType(c, fnDecl.fnParams[i].typ[0])
+        }
+        declareParam(c, fnDecl.fnParams[i].name, pt)
+        if i < len(fnType.params) {
+            fnType.params[i] = pt
+        }
+    }
+    if len(fnDecl.fnBody) > 0 {
+        checkBlockStmt(c, fnDecl.fnBody)
+        if len(fnType.retTypes) == 1 && !typeEquals(fnType.retTypes[0], voidType()) {
+            if !stmtAlwaysReturnsBlock(c, fnDecl.fnBody) {
+                // Check for implicit return: last statement is an expression
+                // whose type matches the return type.
+                hasImplicitReturn := false
+                if len(fnDecl.fnBody) > 0 {
+                    last := fnDecl.fnBody[len(fnDecl.fnBody) - 1]
+                    if last.kind == ast.ST_EXPR && ast.hasExpr(last.expr) {
+                        lastType := checkExpr(c, last.expr[0])
+                        if typeEquals(lastType, fnType.retTypes[0]) || checkerIsAssignable(c, fnType.retTypes[0], lastType) {
+                            hasImplicitReturn = true
+                        }
+                    }
+                }
+                if !hasImplicitReturn {
+                    report(c, str.Concat("missing return at end of function \"", str.Concat(fnDecl.fnName, str.Concat("\" (expected ", str.Concat(typeString(fnType.retTypes[0]), ")")))))
+                }
+            }
+        }
+    }
+    popScope(c)
+    c.currentFn = oldFn
+}
+
+// === Statement Checking ===
+
+fn checkBlockStmt(c: *Checker, stmts: []ast.Stmt) {
+    pushScope(c)
+    for i := 0; i < len(stmts); i = i + 1 {
+        checkStatement(c, stmts[i])
+    }
+    popScope(c)
+}
+
+fn checkStatement(c: *Checker, stmt: ast.Stmt) {
+    if stmt.kind == ast.ST_VAR {
+        checkVarStmt(c, stmt)
+    } else if stmt.kind == ast.ST_ASSIGN {
+        checkAssignStmt(c, stmt)
+    } else if stmt.kind == ast.ST_TUPLEASSIGN {
+        checkTupleAssignStmt(c, stmt)
+    } else if stmt.kind == ast.ST_RETURN {
+        checkReturnStmt(c, stmt)
+    } else if stmt.kind == ast.ST_IF {
+        checkIfStmt(c, stmt)
+    } else if stmt.kind == ast.ST_FOR {
+        checkForStmt(c, stmt)
+    } else if stmt.kind == ast.ST_WHILE {
+        checkWhileStmt(c, stmt)
+    } else if stmt.kind == ast.ST_UNTIL {
+        checkUntilStmt(c, stmt)
+    } else if stmt.kind == ast.ST_EXPR {
+        checkExprStmt(c, stmt)
+    } else if stmt.kind == ast.ST_BLOCK {
+        checkBlockStmt(c, stmt.thenBody)
+    } else if stmt.kind == ast.ST_DEFER {
+        checkDeferStmt(c, stmt)
+    } else if stmt.kind == ast.ST_SPAWN {
+        checkSpawnStmt(c, stmt)
+    } else if stmt.kind == ast.ST_SELECT {
+        checkSelectStmt(c, stmt)
+    } else if stmt.kind == ast.ST_SWITCH {
+        checkSwitchStmt(c, stmt)
+    } else if stmt.kind == ast.ST_MATCH {
+        checkMatchStmt(c, stmt)
+    }
+}
+
+fn checkVarStmt(c: *Checker, stmt: ast.Stmt) {
+    if len(stmt.varNames) > 0 {
+        valType := unknownType()
+        if len(stmt.varValue) > 0 {
+            valType = checkExpr(c, stmt.varValue[0])
+        }
+        for i := 0; i < len(stmt.varNames); i = i + 1 {
+            itemType := unknownType()
+            if valType.kind == TK_TUPLE && i < len(valType.tupleTypes) {
+                itemType = valType.tupleTypes[i]
+            }
+            declare(c, stmt.varNames[i], itemType)
+        }
+        return
+    }
+    if len(stmt.varType) > 0 {
+        annotType := astTypeToType(c, stmt.varType[0])
+        if len(stmt.varValue) > 0 {
+            valType := checkExpr(c, stmt.varValue[0])
+            if !checkerIsAssignable(c, annotType, valType) {
+                reportAt(c, stmt.line, stmt.col, str.Concat("cannot assign ", str.Concat(typeString(valType), str.Concat(" to ", str.Concat(typeString(annotType), str.Concat(" for variable \"", str.Concat(stmt.varName, "\"")))))))
+            }
+        }
+        declare(c, stmt.varName, annotType)
+    } else if len(stmt.varValue) > 0 {
+        valType := checkExpr(c, stmt.varValue[0])
+        if valType.kind == TK_UNKNOWN {
+            reportAt(c, stmt.line, stmt.col, str.Concat("cannot infer type for variable \"", str.Concat(stmt.varName, "\"")))
+            declare(c, stmt.varName, unknownType())
+        } else {
+            declare(c, stmt.varName, valType)
+        }
+    } else {
+        declare(c, stmt.varName, unknownType())
+    }
+}
+
+fn checkAssignStmt(c: *Checker, stmt: ast.Stmt) {
+    lvalType := checkExpr(c, stmt.assignTarget[0])
+    if lvalType.kind == TK_UNKNOWN {
+        return
+    }
+    valType := checkExpr(c, stmt.assignValue[0])
+    if valType.kind == TK_UNKNOWN {
+        return
+    }
+    if str.Equal(stmt.assignOp, "=") {
+        if !checkerIsAssignable(c, lvalType, valType) {
+            reportAt(c, stmt.line, stmt.col, str.Concat("cannot assign ", str.Concat(typeString(valType), str.Concat(" to ", typeString(lvalType)))))
+        }
+    } else {
+        isBitwise := str.Equal(stmt.assignOp, "&=") || str.Equal(stmt.assignOp, "|=") || str.Equal(stmt.assignOp, "^=") || str.Equal(stmt.assignOp, "<<=") || str.Equal(stmt.assignOp, ">>=")
+        if isBitwise {
+            if !isInteger(lvalType) || !isInteger(valType) {
+                reportAt(c, stmt.line, stmt.col, str.Concat("bitwise compound assignment ", str.Concat(stmt.assignOp, " requires integer operands")))
+            }
+        } else if !isNumeric(lvalType) || !isNumeric(valType) {
+            reportAt(c, stmt.line, stmt.col, str.Concat("compound assignment ", str.Concat(stmt.assignOp, " requires numeric operands")))
+        }
+    }
+}
+
+fn checkTupleAssignStmt(c: *Checker, stmt: ast.Stmt) {
+    valType := checkExpr(c, stmt.assignValue[0])
+    if valType.kind == TK_UNKNOWN {
+        return
+    }
+    if valType.kind != TK_TUPLE {
+        reportAt(c, stmt.line, stmt.col, str.Concat("cannot use tuple assignment with non-tuple value of type ", typeString(valType)))
+        return
+    }
+    if len(stmt.tupleTargets) != len(valType.tupleTypes) {
+        reportAt(c, stmt.line, stmt.col, "tuple assignment count mismatch")
+        return
+    }
+    for i := 0; i < len(stmt.tupleTargets); i = i + 1 {
+        lvalType := checkExpr(c, stmt.tupleTargets[i])
+        if lvalType.kind == TK_UNKNOWN {
+            continue
+        }
+        if !checkerIsAssignable(c, lvalType, valType.tupleTypes[i]) {
+            reportAt(c, stmt.line, stmt.col, str.Concat("cannot assign ", str.Concat(typeString(valType.tupleTypes[i]), str.Concat(" to ", str.Concat(typeString(lvalType), str.Concat(" in tuple assignment at position ", itoa(i)))))))
+        }
+    }
+}
+
+fn checkReturnStmt(c: *Checker, stmt: ast.Stmt) {
+    if len(c.currentFn) == 0 {
+        report(c, "return outside of function")
+        return
+    }
+    fnType := typeOptT(c.currentFn)
+    expected := fnType.retTypes
+    if len(expected) == 1 {
+        exp := expected[0]
+        if len(stmt.returnValues) == 0 {
+            if !typeEquals(exp, voidType()) {
+                reportAt(c, stmt.line, stmt.col, str.Concat("missing return value (expected ", str.Concat(typeString(exp), ")")))
+            }
+            return
+        }
+        if len(stmt.returnValues) > 1 {
+            reportAt(c, stmt.line, stmt.col, "too many return values (expected 1)")
+            return
+        }
+        actual := checkExpr(c, stmt.returnValues[0])
+        if actual.kind != TK_UNKNOWN && !checkerIsAssignable(c, exp, actual) {
+            reportAt(c, stmt.line, stmt.col, str.Concat("return type mismatch: expected ", str.Concat(typeString(exp), str.Concat(", got ", typeString(actual)))))
+        }
+        return
+    }
+    if len(stmt.returnValues) != len(expected) {
+        if len(stmt.returnValues) == 1 {
+            actual := checkExpr(c, stmt.returnValues[0])
+            if actual.kind == TK_TUPLE && len(actual.tupleTypes) == len(expected) {
+                for i := 0; i < len(expected); i = i + 1 {
+                    if !checkerIsAssignable(c, expected[i], actual.tupleTypes[i]) {
+                        reportAt(c, stmt.line, stmt.col, str.Concat("return type mismatch at position ", str.Concat(itoa(i), str.Concat(": expected ", str.Concat(typeString(expected[i]), str.Concat(", got ", typeString(actual.tupleTypes[i])))))))
+                    }
+                }
+                return
+            }
+        }
+        reportAt(c, stmt.line, stmt.col, str.Concat("return value count mismatch: expected ", str.Concat(itoa(len(expected)), str.Concat(", got ", itoa(len(stmt.returnValues))))))
+        return
+    }
+    for i := 0; i < len(stmt.returnValues); i = i + 1 {
+        actual := checkExpr(c, stmt.returnValues[i])
+        if actual.kind != TK_UNKNOWN && !checkerIsAssignable(c, expected[i], actual) {
+            reportAt(c, stmt.line, stmt.col, str.Concat("return type mismatch at position ", str.Concat(itoa(i), str.Concat(": expected ", str.Concat(typeString(expected[i]), str.Concat(", got ", typeString(actual)))))))
+        }
+    }
+}
+
+fn checkIfStmt(c: *Checker, stmt: ast.Stmt) {
+    if len(stmt.cond) > 0 {
+        condType := checkExpr(c, stmt.cond[0])
+        if condType.kind != TK_UNKNOWN && !typeEquals(condType, builtinType("bool")) {
+            reportAt(c, stmt.line, stmt.col, str.Concat("if condition must be bool, got ", typeString(condType)))
+        }
+    }
+    checkBlockStmt(c, stmt.thenBody)
+    if len(stmt.elseBody) > 0 {
+        checkBlockStmt(c, stmt.elseBody)
+    }
+}
+
+fn checkWhileStmt(c: *Checker, stmt: ast.Stmt) {
+    if len(stmt.cond) > 0 {
+        condType := checkExpr(c, stmt.cond[0])
+        if condType.kind != TK_UNKNOWN && !typeEquals(condType, builtinType("bool")) {
+            reportAt(c, stmt.line, stmt.col, str.Concat("while condition must be bool, got ", typeString(condType)))
+        }
+    }
+    checkBlockStmt(c, stmt.thenBody)
+}
+
+fn checkUntilStmt(c: *Checker, stmt: ast.Stmt) {
+    if len(stmt.cond) > 0 {
+        condType := checkExpr(c, stmt.cond[0])
+        if condType.kind != TK_UNKNOWN && !typeEquals(condType, builtinType("bool")) {
+            reportAt(c, stmt.line, stmt.col, str.Concat("until condition must be bool, got ", typeString(condType)))
+        }
+    }
+    checkBlockStmt(c, stmt.thenBody)
+}
+
+fn checkForStmt(c: *Checker, stmt: ast.Stmt) {
+    pushScope(c)
+    if len(stmt.forIterExpr) > 0 {
+        iterType := checkExpr(c, stmt.forIterExpr[0])
+        if iterType.kind == TK_ARRAY {
+            declare(c, stmt.forIterVar, typeOptT(iterType.elem))
+        } else if iterType.kind == TK_CHAN {
+            declare(c, stmt.forIterVar, typeOptT(iterType.elem))
+        } else if isInteger(iterType) {
+            declare(c, stmt.forIterVar, builtinType("int"))
+        } else {
+            declare(c, stmt.forIterVar, anyType())
+        }
+        checkBlockStmt(c, stmt.thenBody)
+    } else {
+        if len(stmt.forInit) > 0 {
+            checkStatement(c, stmt.forInit[0])
+        }
+        if len(stmt.cond) > 0 {
+            condType := checkExpr(c, stmt.cond[0])
+            if condType.kind != TK_UNKNOWN && !typeEquals(condType, builtinType("bool")) {
+                reportAt(c, stmt.line, stmt.col, str.Concat("for condition must be bool, got ", typeString(condType)))
+            }
+        }
+        if len(stmt.forPost) > 0 {
+            checkStatement(c, stmt.forPost[0])
+        }
+        checkBlockStmt(c, stmt.thenBody)
+    }
+    popScope(c)
+}
+
+fn checkExprStmt(c: *Checker, stmt: ast.Stmt) {
+    if len(stmt.expr) > 0 {
+        checkExpr(c, stmt.expr[0])
+    }
+}
+
+fn checkDeferStmt(c: *Checker, stmt: ast.Stmt) {
+    if len(stmt.deferStmt) > 0 {
+        checkStatement(c, stmt.deferStmt[0])
+    }
+}
+
+fn checkSpawnStmt(c: *Checker, stmt: ast.Stmt) {
+    if len(stmt.spawnCall) > 0 {
+        checkExpr(c, stmt.spawnCall[0])
+    }
+}
+
+fn checkSelectStmt(c: *Checker, stmt: ast.Stmt) {
+    for i := 0; i < len(stmt.selectCases); i = i + 1 {
+        sc := stmt.selectCases[i]
+        if !sc.isDefault && len(sc.cond) > 0 {
+            checkExpr(c, sc.cond[0])
+            if str.Len(sc.recvVar) > 0 && !str.Equal(sc.recvVar, "_") {
+                condExpr := sc.cond[0]
+                if condExpr.kind == ast.EX_PREFIX && str.Equal(condExpr.prefixOp, "<-") {
+                    chElemType := checkExpr(c, condExpr.prefixRight[0])
+                    if chElemType.kind == TK_CHAN {
+                        pushScope(c)
+                        declare(c, sc.recvVar, typeOptT(chElemType.elem))
+                        checkBlockStmt(c, sc.body)
+                        popScope(c)
+                        continue
+                    }
+                }
+                pushScope(c)
+                declare(c, sc.recvVar, unknownType())
+                checkBlockStmt(c, sc.body)
+                popScope(c)
+                continue
+            }
+        }
+        checkBlockStmt(c, sc.body)
+    }
+}
+
+fn checkSwitchStmt(c: *Checker, stmt: ast.Stmt) {
+    var subjType TType
+    if len(stmt.cond) > 0 {
+        subjType = checkExpr(c, stmt.cond[0])
+    }
+    hasDefault := false
+    for i := 0; i < len(stmt.selectCases); i = i + 1 {
+        sc := stmt.selectCases[i]
+        if sc.isDefault {
+            hasDefault = true
+        }
+        for j := 0; j < len(sc.cond); j = j + 1 {
+            valType := checkExpr(c, sc.cond[j])
+            if subjType.kind != TK_UNKNOWN && valType.kind != TK_UNKNOWN {
+                if !typeEquals(subjType, valType) {
+                    reportAt(c, stmt.line, stmt.col, str.Concat("switch case value type ", str.Concat(typeString(valType), str.Concat(" does not match subject type ", typeString(subjType)))))
+                }
+            }
+        }
+        checkBlockStmt(c, sc.body)
+    }
+    if !hasDefault {
+        reportAt(c, stmt.line, stmt.col, "switch statement must have a default case")
+    }
+}
+
+fn checkMatchStmt(c: *Checker, stmt: ast.Stmt) {
+    var subjectType TType
+    if len(stmt.matchSubject) > 0 {
+        subjectType = checkExpr(c, stmt.matchSubject[0])
+    }
+    hasWildcard := false
+    for i := 0; i < len(stmt.matchArms); i = i + 1 {
+        arm := stmt.matchArms[i]
+        if arm.isWildcard {
+            hasWildcard = true
+        }
+        if arm.pattern.kind == ast.PK_VARIANT && subjectType.kind == TK_TAGGED_UNION {
+            variant := findVariant(subjectType, arm.pattern.variantName)
+            if variant.name == "" {
+                reportAt(c, stmt.line, stmt.col, str.Concat("match variant \"", str.Concat(arm.pattern.variantName, str.Concat("\" does not exist in enum \"", str.Concat(subjectType.name, "\"")))))
+            } else {
+                if len(variant.payloadType) > 0 && len(arm.pattern.bindings) > 0 {
+                    pushScope(c)
+                    for j := 0; j < len(arm.pattern.bindings); j = j + 1 {
+                        declare(c, arm.pattern.bindings[j], typeOptT(variant.payloadType))
+                    }
+                }
+            }
+        }
+        if len(arm.guard) > 0 {
+            guardType := checkExpr(c, arm.guard[0])
+            if guardType.kind != TK_UNKNOWN && !typeEquals(guardType, builtinType("bool")) {
+                reportAt(c, stmt.line, stmt.col, str.Concat("match guard must be bool, got ", typeString(guardType)))
+            }
+        }
+        checkBlockStmt(c, arm.body)
+        if arm.pattern.kind == ast.PK_VARIANT && subjectType.kind == TK_TAGGED_UNION {
+            variant := findVariant(subjectType, arm.pattern.variantName)
+            if variant.name != "" && len(variant.payloadType) > 0 && len(arm.pattern.bindings) > 0 {
+                popScope(c)
+            }
+        }
+    }
+    if !hasWildcard && subjectType.kind == TK_TAGGED_UNION {
+        covered := make(map[string]bool)
+        for i := 0; i < len(stmt.matchArms); i = i + 1 {
+            if stmt.matchArms[i].pattern.kind == ast.PK_VARIANT {
+                covered[stmt.matchArms[i].pattern.variantName] = true
+            }
+        }
+        allCovered := true
+        for i := 0; i < len(subjectType.variants); i = i + 1 {
+            if !covered[subjectType.variants[i].name] {
+                allCovered = false
+                break
+            }
+        }
+        if !allCovered {
+            reportAt(c, stmt.line, stmt.col, str.Concat("match expression on enum \"", str.Concat(subjectType.name, "\" must have a wildcard (_) arm or cover all variants")))
+        }
+    } else if !hasWildcard {
+        reportAt(c, stmt.line, stmt.col, "match expression must have a wildcard (_) arm")
+    }
+}
+
+fn findVariant(tu: TType, name: string) -> TaggedVariant {
+    for i := 0; i < len(tu.variants); i = i + 1 {
+        if str.Equal(tu.variants[i].name, name) {
+            return tu.variants[i]
+        }
+    }
+    return TaggedVariant{}
+}
+
+// === Expression Checking ===
+
+fn checkExpr(c: *Checker, e: ast.Expr) -> TType {
+    if e.kind == ast.EX_INT { return builtinType("int") }
+    if e.kind == ast.EX_FLOAT { return builtinType("float") }
+    if e.kind == ast.EX_STRING { return checkStringLit(c, e) }
+    if e.kind == ast.EX_BOOL { return builtinType("bool") }
+    if e.kind == ast.EX_NIL { return nilType() }
+    if e.kind == ast.EX_IDENT { return checkIdent(c, e) }
+    if e.kind == ast.EX_PREFIX { return checkPrefixExpr(c, e) }
+    if e.kind == ast.EX_INFIX { return checkInfixExpr(c, e) }
+    if e.kind == ast.EX_CALL { return checkCallExpr(c, e) }
+    if e.kind == ast.EX_INDEX { return checkIndexExpr(c, e) }
+    if e.kind == ast.EX_FIELD { return checkFieldAccessExpr(c, e) }
+    if e.kind == ast.EX_ARRAY_LIT { return checkArrayLit(c, e) }
+    if e.kind == ast.EX_MAP_LIT { return checkMapLit(c, e) }
+    if e.kind == ast.EX_SET_LIT { return checkSetLit(c, e) }
+    if e.kind == ast.EX_STRUCT_LIT { return checkStructLit(c, e) }
+    if e.kind == ast.EX_SLICE { return checkSliceExpr(c, e) }
+    if e.kind == ast.EX_RANGE { return checkRangeExpr(c, e) }
+    if e.kind == ast.EX_FN_LIT { return checkFnLit(c, e) }
+    if e.kind == ast.EX_IF_EXPR { return checkIfExpr(c, e) }
+    if e.kind == ast.EX_MATCH_EXPR { return checkMatchExpr(c, e) }
+    if e.kind == ast.EX_MAKE { return checkMakeExpr(c, e) }
+    if e.kind == ast.EX_SIZEOF { return builtinType("int") }
+    if e.kind == ast.EX_ALIGNOF { return builtinType("int") }
+    if e.kind == ast.EX_SPREAD { return checkExpr(c, e.spreadExpr[0]) }
+    if e.kind == ast.EX_ERROR_PROP { return checkErrorProp(c, e) }
+    if e.kind == ast.EX_NONNULL { return checkNonNullAssert(c, e) }
+    if e.kind == ast.EX_AWAIT { return checkExpr(c, e.awaitExpr[0]) }
+    if e.kind == ast.EX_ASYNC { return checkExpr(c, e.inner[0]) }
+    if e.kind == ast.EX_FROM_END { return builtinType("int") }
+    if e.kind == ast.EX_PAREN { return checkExpr(c, e.inner[0]) }
+    if e.kind == ast.EX_TUPLE { return checkTupleExpr(c, e) }
+    return unknownType()
+}
+
+fn checkStringLit(c: *Checker, e: ast.Expr) -> TType {
+    markInterpolatedVars(c, e.strVal)
+    return builtinType("string")
+}
+
+fn makeGenericMap(c: *Checker, params: []ast.TypeParam, args: []ast.Type) -> map[string]TType {
+    m := make(map[string]TType)
+    for i := 0; i < len(params); i = i + 1 {
+        if i < len(args) {
+            m[params[i].name] = astTypeToType(c, args[i])
+        }
+    }
+    return m
+}
+
+fn makeGenericMapFromAst(c: *Checker, e: ast.Expr, fnDecl: ast.Decl) -> map[string]TType {
+    return makeGenericMap(c, fnDecl.fnGenerics, e.genericArgs)
+}
+
+fn checkIdent(c: *Checker, e: ast.Expr) -> TType {
+    typ := resolveWithKey(c, e.ident)
+    if typ.kind == TK_UNKNOWN {
+        reportAt(c, e.line, e.col, str.Concat("undefined variable: ", e.ident))
+        return unknownType()
+    }
+    if len(e.genericArgs) > 0 {
+        if typ.kind != TK_FUNCTION {
+            reportAt(c, e.line, e.col, str.Concat("cannot instantiate non-function ", e.ident))
+            return unknownType()
+        }
+        fnKey := e.ident
+        if !mapStringDeclHasKey(c.fns, fnKey) && str.Len(c.currentModule) > 0 && !str.Equal(c.currentModule, "main") {
+            fnKey = str.Concat(str.Concat(c.currentModule, "."), e.ident)
+        }
+        if !mapStringDeclHasKey(c.fns, fnKey) {
+            reportAt(c, e.line, e.col, str.Concat("cannot find generic declaration for ", e.ident))
+            return unknownType()
+        }
+        fnDecl := c.fns[fnKey]
+        if len(fnDecl.fnGenerics) != len(e.genericArgs) {
+            reportAt(c, e.line, e.col, "generic argument count mismatch")
+            return unknownType()
+        }
+        mapping := makeGenericMapFromAst(c, e, fnDecl)
+        return substituteType(c, fnTypeFromDecl(c, fnDecl), mapping)
+    }
+    return typ
+}
+
+fn checkPrefixExpr(c: *Checker, e: ast.Expr) -> TType {
+    operand := checkExpr(c, e.prefixRight[0])
+    if operand.kind == TK_UNKNOWN {
+        return unknownType()
+    }
+    if e.prefixOp == "-" { return checkNumericPrefix(c, e.prefixOp, operand) }
+    if e.prefixOp == "+" { return checkNumericPrefix(c, e.prefixOp, operand) }
+    if e.prefixOp == "!" { return checkBoolPrefix(c, operand) }
+    if e.prefixOp == "~" { return checkIntPrefix(c, e.prefixOp, operand) }
+    if e.prefixOp == "*" { return checkDerefPrefix(c, operand) }
+    if e.prefixOp == "&" { return pointerType(operand) }
+    if e.prefixOp == "<-" { return checkRecvPrefix(c, operand) }
+    return unknownType()
+}
+
+fn checkNumericPrefix(c: *Checker, op: string, operand: TType) -> TType {
+    if !isNumeric(operand) {
+        report(c, str.Concat("unary ", str.Concat(op, str.Concat(" requires numeric operand, got ", typeString(operand)))))
+        return unknownType()
+    }
+    return operand
+}
+
+fn checkBoolPrefix(c: *Checker, operand: TType) -> TType {
+    if !typeEquals(operand, builtinType("bool")) {
+        report(c, str.Concat("! requires bool, got ", typeString(operand)))
+        return unknownType()
+    }
+    return builtinType("bool")
+}
+
+fn checkIntPrefix(c: *Checker, op: string, operand: TType) -> TType {
+    if !isInteger(operand) {
+        report(c, str.Concat("~ requires integer, got ", typeString(operand)))
+        return unknownType()
+    }
+    return operand
+}
+
+fn checkDerefPrefix(c: *Checker, operand: TType) -> TType {
+    if operand.kind != TK_POINTER {
+        report(c, str.Concat("cannot dereference non-pointer ", typeString(operand)))
+        return unknownType()
+    }
+    return typeOptT(operand.elem)
+}
+
+fn checkRecvPrefix(c: *Checker, operand: TType) -> TType {
+    if operand.kind == TK_CHAN {
+        return typeOptT(operand.elem)
+    }
+    report(c, str.Concat("cannot receive from non-channel ", typeString(operand)))
+    return unknownType()
+}
+
+fn checkInfixExpr(c: *Checker, e: ast.Expr) -> TType {
+    left := checkExpr(c, e.infixLeft[0])
+    right := checkExpr(c, e.infixRight[0])
+    if left.kind == TK_UNKNOWN || right.kind == TK_UNKNOWN {
+        return unknownType()
+    }
+    op := e.infixOp
+
+    // Set operations take priority over bitwise/arithmetic
+    if str.Equal(op, "&") || str.Equal(op, "|") || str.Equal(op, "-") {
+        if left.kind == TK_SET && right.kind == TK_SET {
+            leftElem := typeOptT(left.elem)
+            rightElem := typeOptT(right.elem)
+            if !typeEquals(leftElem, rightElem) {
+                report(c, str.Concat("set operation ", str.Concat(op, str.Concat(" requires matching element types, got ", str.Concat(typeString(leftElem), str.Concat(" and ", typeString(rightElem)))))))
+                return unknownType()
+            }
+            return left
+        }
+    }
+
+    if op == "+" { return checkAdd(c, left, right) }
+    if op == "-" { return checkArith(c, op, left, right) }
+    if op == "*" { return checkArith(c, op, left, right) }
+    if op == "/" { return checkArith(c, op, left, right) }
+    if op == "%" { return checkArith(c, op, left, right) }
+    if op == "**" { return checkPower(c, left, right) }
+    if op == "<" { return checkComparison(c, op, left, right) }
+    if op == ">" { return checkComparison(c, op, left, right) }
+    if op == "<=" { return checkComparison(c, op, left, right) }
+    if op == ">=" { return checkComparison(c, op, left, right) }
+    if op == "==" { return checkEquality(c, op, left, right) }
+    if op == "!=" { return checkEquality(c, op, left, right) }
+    if op == "&&" { return checkLogical(c, op, left, right) }
+    if op == "||" { return checkLogical(c, op, left, right) }
+    if op == "in" { return checkInOp(c, left, right) }
+    if op == "&" { return checkBitwise(c, op, left, right) }
+    if op == "|" { return checkBitwise(c, op, left, right) }
+    if op == "^" { return checkBitwise(c, op, left, right) }
+    if op == "<<" { return checkBitwise(c, op, left, right) }
+    if op == ">>" { return checkBitwise(c, op, left, right) }
+    if op == "@" { return checkMatmul(c, left, right) }
+    if op == "<-" { return checkChannelSend(c, left, right) }
+    return unknownType()
+}
+
+fn checkAdd(c: *Checker, left: TType, right: TType) -> TType {
+    if typeEquals(left, builtinType("string")) && typeEquals(right, builtinType("string")) {
+        return builtinType("string")
+    }
+    if left.kind == TK_POINTER && isInteger(right) {
+        return left
+    }
+    if right.kind == TK_POINTER && isInteger(left) {
+        return right
+    }
+    return checkArith(c, "+", left, right)
+}
+
+fn checkArith(c: *Checker, op: string, left: TType, right: TType) -> TType {
+    if !isNumeric(left) || !isNumeric(right) {
+        report(c, str.Concat("operator ", str.Concat(op, str.Concat(" requires numeric operands, got ", str.Concat(typeString(left), str.Concat(" and ", typeString(right)))))))
+        return unknownType()
+    }
+    if typeEquals(left, builtinType("float")) || typeEquals(right, builtinType("float")) {
+        return builtinType("float")
+    }
+    return left
+}
+
+fn checkPower(c: *Checker, left: TType, right: TType) -> TType {
+    if !isNumeric(left) || !isNumeric(right) {
+        report(c, "** requires numeric operands")
+        return unknownType()
+    }
+    if typeEquals(left, builtinType("float")) || typeEquals(right, builtinType("float")) {
+        return builtinType("float")
+    }
+    return left
+}
+
+fn checkComparison(c: *Checker, op: string, left: TType, right: TType) -> TType {
+    if !isNumeric(left) || !isNumeric(right) {
+        if !typeEquals(left, builtinType("string")) || !typeEquals(right, builtinType("string")) {
+            report(c, str.Concat("comparison requires numeric or string operands, got ", str.Concat(typeString(left), str.Concat(" and ", typeString(right)))))
+            return unknownType()
+        }
+    }
+    return builtinType("bool")
+}
+
+fn checkEquality(c: *Checker, op: string, left: TType, right: TType) -> TType {
+    if isNumeric(left) && isNumeric(right) {
+        return builtinType("bool")
+    }
+    if left.kind == TK_NIL || right.kind == TK_NIL {
+        if left.kind == TK_NIL && right.kind == TK_NIL {
+            return builtinType("bool")
+        }
+        var nonNil TType
+        if left.kind == TK_NIL {
+            nonNil = right
+        } else {
+            nonNil = left
+        }
+        if nonNil.kind == TK_ERROR || (nonNil.kind == TK_BUILTIN && str.Equal(nonNil.name, "string")) {
+            return builtinType("bool")
+        }
+        if nonNil.kind == TK_POINTER || nonNil.kind == TK_ARRAY || nonNil.kind == TK_CHAN || nonNil.kind == TK_MAP || nonNil.kind == TK_FUNCTION {
+            return builtinType("bool")
+        }
+        report(c, str.Concat("cannot compare ", str.Concat(typeString(nonNil), " with nil")))
+        return unknownType()
+    }
+    if !typeEquals(left, right) {
+        report(c, str.Concat("cannot compare ", str.Concat(typeString(left), str.Concat(" with ", typeString(right)))))
+        return unknownType()
+    }
+    return builtinType("bool")
+}
+
+fn checkLogical(c: *Checker, op: string, left: TType, right: TType) -> TType {
+    if !typeEquals(left, builtinType("bool")) || !typeEquals(right, builtinType("bool")) {
+        report(c, str.Concat("logical operator ", str.Concat(op, " requires bool operands")))
+        return unknownType()
+    }
+    return builtinType("bool")
+}
+
+fn checkInOp(c: *Checker, left: TType, right: TType) -> TType {
+    if right.kind == TK_SET {
+        leftElem := typeOptT(right.elem)
+        if !typeEquals(left, leftElem) {
+            report(c, str.Concat("cannot check membership of ", str.Concat(typeString(left), str.Concat(" in set<", str.Concat(typeString(leftElem), ">")))))
+            return unknownType()
+        }
+        return builtinType("bool")
+    }
+    report(c, str.Concat("'in' requires a set on the right side, got ", typeString(right)))
+    return unknownType()
+}
+
+fn checkBitwise(c: *Checker, op: string, left: TType, right: TType) -> TType {
+    if !isInteger(left) || !isInteger(right) {
+        report(c, str.Concat("bitwise operator ", str.Concat(op, " requires integer operands")))
+        return unknownType()
+    }
+    return left
+}
+
+fn checkMatmul(c: *Checker, left: TType, right: TType) -> TType {
+    if left.kind != TK_TENSOR {
+        report(c, str.Concat("operator @ requires tensor operands, got ", typeString(left)))
+        return unknownType()
+    }
+    if right.kind != TK_TENSOR {
+        report(c, str.Concat("operator @ requires tensor operands, got ", typeString(right)))
+        return unknownType()
+    }
+    return left
+}
+
+fn checkChannelSend(c: *Checker, left: TType, right: TType) -> TType {
+    if left.kind != TK_CHAN {
+        report(c, str.Concat("cannot send on non-channel ", typeString(left)))
+        return unknownType()
+    }
+    chElem := typeOptT(left.elem)
+    if !typeEquals(chElem, right) {
+        report(c, str.Concat("cannot send ", str.Concat(typeString(right), str.Concat(" on channel of ", typeString(chElem)))))
+        return unknownType()
+    }
+    return voidType()
+}
+
+fn checkCallExpr(c: *Checker, e: ast.Expr) -> TType {
+    if e.callFunc[0].kind == ast.EX_IDENT && str.Equal(e.callFunc[0].ident, "len") {
+        if len(e.callArgs) != 1 {
+            report(c, str.Concat("len() takes exactly 1 argument, got ", itoa(len(e.callArgs))))
+            return builtinType("int")
+        }
+        checkExpr(c, e.callArgs[0])
+        return builtinType("int")
+    }
+    if e.callFunc[0].kind == ast.EX_IDENT && isBuiltinTypeName(e.callFunc[0].ident) {
+        return checkTypeCast(c, e)
+    }
+    if e.callFunc[0].kind == ast.EX_IDENT && str.Equal(e.callFunc[0].ident, "append") {
+        return checkAppendCall(c, e)
+    }
+    if e.callFunc[0].kind == ast.EX_IDENT && str.Equal(e.callFunc[0].ident, "panic") {
+        return checkPanicCall(c, e)
+    }
+    if e.callFunc[0].kind == ast.EX_IDENT && str.Equal(e.callFunc[0].ident, "recover") {
+        return builtinType("string")
+    }
+    if e.callFunc[0].kind == ast.EX_FIELD {
+        return checkMethodCall(c, e)
+    }
+    fnType := checkExpr(c, e.callFunc[0])
+    if fnType.kind == TK_UNKNOWN {
+        return unknownType()
+    }
+    if fnType.kind != TK_FUNCTION {
+        reportAt(c, e.line, e.col, str.Concat("cannot call non-function ", typeString(fnType)))
+        return unknownType()
+    }
+    return checkCallArgs(c, e, fnType, false)
+}
+
+fn checkTypeCast(c: *Checker, e: ast.Expr) -> TType {
+    castName := e.callFunc[0].ident
+    castType := lookupType(castName)
+    if castType.kind == TK_UNKNOWN {
+        return castType
+    }
+    if len(e.callArgs) != 1 {
+        report(c, str.Concat("type cast requires exactly 1 argument, got ", itoa(len(e.callArgs))))
+        return castType
+    }
+    argType := checkExpr(c, e.callArgs[0])
+    if argType.kind == TK_UNKNOWN {
+        return castType
+    }
+    if isNumeric(castType) && isNumeric(argType) {
+        return castType
+    }
+    if typeEquals(castType, builtinType("bool")) && (isInteger(argType) || typeEquals(argType, builtinType("float"))) {
+        return castType
+    }
+    if (isInteger(castType) || typeEquals(castType, builtinType("float"))) && typeEquals(argType, builtinType("bool")) {
+        return castType
+    }
+    if isInteger(castType) && argType.kind == TK_POINTER {
+        return castType
+    }
+    if castType.kind == TK_POINTER {
+        if isInteger(argType) || argType.kind == TK_POINTER || argType.kind == TK_NIL {
+            return castType
+        }
+    }
+    if typeEquals(castType, builtinType("string")) && typeEquals(argType, builtinType("bytes")) {
+        return castType
+    }
+    if typeEquals(castType, builtinType("bytes")) && typeEquals(argType, builtinType("string")) {
+        return castType
+    }
+    if (typeEquals(castType, builtinType("string")) || typeEquals(castType, builtinType("bytes"))) && isInteger(argType) {
+        return castType
+    }
+    if isInteger(castType) && (typeEquals(argType, builtinType("string")) || typeEquals(argType, builtinType("bytes"))) {
+        return castType
+    }
+    report(c, str.Concat("cannot cast ", str.Concat(typeString(argType), str.Concat(" to ", typeString(castType)))))
+    return castType
+}
+
+fn checkAppendCall(c: *Checker, e: ast.Expr) -> TType {
+    if len(e.callArgs) != 2 {
+        report(c, str.Concat("append() takes exactly 2 arguments, got ", itoa(len(e.callArgs))))
+        return unknownType()
+    }
+    arrType := checkExpr(c, e.callArgs[0])
+    valType := checkExpr(c, e.callArgs[1])
+    if arrType.kind == TK_ARRAY {
+        arrElem := typeOptT(arrType.elem)
+        if !typeEquals(arrElem, valType) && valType.kind != TK_ANY && arrElem.kind != TK_ANY {
+            report(c, str.Concat("append value type mismatch: expected ", str.Concat(typeString(arrElem), str.Concat(", got ", typeString(valType)))))
+        }
+        return arrType
+    }
+    report(c, str.Concat("append requires an array as first argument, got ", typeString(arrType)))
+    return unknownType()
+}
+
+fn checkPanicCall(c: *Checker, e: ast.Expr) -> TType {
+    if len(e.callArgs) != 1 {
+        report(c, str.Concat("panic() takes exactly 1 argument, got ", itoa(len(e.callArgs))))
+        return voidType()
+    }
+    argType := checkExpr(c, e.callArgs[0])
+    if argType.kind != TK_UNKNOWN && !typeEquals(argType, builtinType("string")) {
+        report(c, str.Concat("panic() argument must be string, got ", typeString(argType)))
+    }
+    return voidType()
+}
+
+fn checkMethodCall(c: *Checker, e: ast.Expr) -> TType {
+    fa := e.callFunc[0]
+    // Handle module-qualified top-level function call
+    if fa.fieldTarget[0].kind == ast.EX_IDENT {
+        ident := fa.fieldTarget[0]
+        moduleName := resolveImportAlias(c, ident.ident)
+        isModuleName := false
+        if str.Len(c.currentModule) > 0 {
+            cm := c.currentModule
+        imps := c.imports[cm]
+        exists := mapStringStringSliceHasKey(c.imports, cm)
+            if exists {
+                for imp in imps {
+                    if str.Equal(imp, ident.ident) {
+                        isModuleName = true
+                        break
+                    }
+                }
+            }
+        }
+        if !isModuleName {
+            fqName := str.Concat(str.Concat(moduleName, "."), fa.fieldName)
+            exactType := resolveWithKey(c, fqName)
+            if exactType.kind != TK_UNKNOWN {
+                isModuleName = true
+            }
+        }
+        if isModuleName {
+            markImportUsed(c, ident.ident)
+            fqName := str.Concat(str.Concat(moduleName, "."), fa.fieldName)
+            typ := resolve(c, fqName)
+            if typ.kind == TK_UNKNOWN {
+                typ = resolve(c, fa.fieldName)
+            }
+            if typ.kind == TK_FUNCTION && len(fa.genericArgs) > 0 {
+                fnKey := fqName
+                if mapStringDeclHasKey(c.fns, fnKey) {
+                    fnDecl := c.fns[fnKey]
+                    mapping := makeGenericMap(c, fnDecl.fnGenerics, fa.genericArgs)
+                    typ = substituteType(c, typ, mapping)
+                }
+            }
+            if typ.kind != TK_UNKNOWN {
+                if typ.kind != TK_FUNCTION {
+                    report(c, str.Concat("cannot call non-function ", typeString(typ)))
+                    return unknownType()
+                }
+                return checkCallArgs(c, e, typ, false)
+            }
+            report(c, str.Concat("module \"", str.Concat(moduleName, str.Concat("\" has no exported symbol \"", str.Concat(fa.fieldName, "\"")))))
+            return unknownType()
+        }
+    }
+
+    recvType := checkExpr(c, fa.fieldTarget[0])
+    if recvType.kind == TK_UNKNOWN {
+        return unknownType()
+    }
+    if recvType.kind == TK_SERVICE {
+        return checkServiceMethodCall(c, e, recvType, fa.fieldName)
+    }
+    if recvType.kind == TK_RULESET {
+        fnType := resolve(c, str.Concat(str.Concat(recvType.name, "."), fa.fieldName))
+        if fnType.kind == TK_UNKNOWN {
+            report(c, str.Concat("unknown method \"", str.Concat(fa.fieldName, str.Concat("\" on ruleset \"", str.Concat(recvType.name, "\"")))))
+            return unknownType()
+        }
+        return checkCallArgs(c, e, fnType, false)
+    }
+    if recvType.kind == TK_TEMPLATE {
+        return checkTemplateMethodCall(c, e, recvType, fa.fieldName)
+    }
+    if recvType.kind == TK_INTERFACE || recvType.kind == TK_ERROR {
+        return checkInterfaceMethodCall(c, e, recvType, fa.fieldName)
+    }
+
+    var structName string
+    var genericArgs []TType
+    if recvType.kind == TK_NAMED {
+        structName = recvType.name
+        genericArgs = recvType.genericArgs
+    } else if recvType.kind == TK_POINTER {
+        inner := typeOptT(recvType.elem)
+        if inner.kind == TK_NAMED {
+            structName = inner.name
+            genericArgs = inner.genericArgs
+        }
+    }
+    fnType := TType{kind: TK_UNKNOWN}
+    if str.Len(structName) > 0 {
+        fnType = resolve(c, str.Concat(str.Concat(structName, "."), fa.fieldName))
+    }
+    if fnType.kind == TK_UNKNOWN {
+        fnType = resolve(c, fa.fieldName)
+    }
+    if fnType.kind == TK_UNKNOWN {
+        report(c, str.Concat("unknown method \"", str.Concat(fa.fieldName, str.Concat("\" on type ", typeString(recvType)))))
+        return unknownType()
+    }
+    if fnType.kind != TK_FUNCTION {
+        reportAt(c, e.line, e.col, str.Concat("cannot call non-function ", typeString(fnType)))
+        return unknownType()
+    }
+    if len(genericArgs) > 0 && mapStringDeclHasKey(c.structs, structName) {
+        decl := c.structs[structName]
+        argTypes := []ast.Type{}
+        for i := 0; i < len(genericArgs); i = i + 1 {
+            argTypes = append(argTypes, ast.Type{kind: ast.TY_NAMED, name: typeString(genericArgs[i])})
+        }
+        mapping := makeGenericMap(c, decl.structGenerics, argTypes)
+        fnType = substituteType(c, fnType, mapping)
+    }
+    isStaticCall := false
+    if recvType.kind == TK_UNKNOWN {
+        isStaticCall = true
+    } else if str.Len(structName) > 0 {
+        hasStruct := mapStringDeclHasKey(c.structs, structName)
+        if hasStruct {
+            root := fa.fieldTarget[0]
+            for root.kind == ast.EX_FIELD && len(root.fieldTarget) > 0 {
+                root = root.fieldTarget[0]
+            }
+            if root.kind == ast.EX_IDENT {
+                hasVar := false
+                for i := c.scopeDepth; i > 0; i = i - 1 {
+                    ok := scopeHasBinding(&c.scopes[i], root.ident)
+                    if ok {
+                        hasVar = true
+                        break
+                    }
+                }
+                if !hasVar {
+                    isStaticCall = true
+                }
+            }
+        }
+    }
+    if isStaticCall {
+        return checkCallArgs(c, e, fnType, false)
+    }
+    return checkCallArgs(c, e, fnType, true)
+}
+
+fn checkServiceMethodCall(c: *Checker, e: ast.Expr, svcType: TType, methodName: string) -> TType {
+    for i := 0; i < len(svcType.methodNames); i = i + 1 {
+        if str.Equal(svcType.methodNames[i], methodName) {
+            return checkCallArgs(c, e, svcType.methodTypes[i], false)
+        }
+    }
+    report(c, str.Concat("unknown method \"", str.Concat(methodName, str.Concat("\" on service \"", str.Concat(svcType.name, "\"")))))
+    return unknownType()
+}
+
+fn checkTemplateMethodCall(c: *Checker, e: ast.Expr, tmplType: TType, methodName: string) -> TType {
+    tmpl := c.templates[tmplType.name]
+    exists := mapStringDeclHasKey(c.templates, tmplType.name)
+    if !exists {
+        report(c, str.Concat("unknown template type ", typeString(tmplType)))
+        return unknownType()
+    }
+    for i := 0; i < len(tmpl.templateMethods); i = i + 1 {
+        if str.Equal(tmpl.templateMethods[i].fnName, methodName) {
+            ft := fnTypeFromDecl(c, tmpl.templateMethods[i])
+            return checkCallArgs(c, e, ft, true)
+        }
+    }
+    report(c, str.Concat("template ", str.Concat(typeString(tmplType), str.Concat(" has no method \"", str.Concat(methodName, "\"")))))
+    return unknownType()
+}
+
+fn checkInterfaceMethodCall(c: *Checker, e: ast.Expr, ifaceType: TType, methodName: string) -> TType {
+    for i := 0; i < len(ifaceType.methodNames); i = i + 1 {
+        if str.Equal(ifaceType.methodNames[i], methodName) {
+            return checkCallArgs(c, e, ifaceType.methodTypes[i], true)
+        }
+    }
+    report(c, str.Concat("interface has no method \"", str.Concat(methodName, "\"")))
+    return unknownType()
+}
+
+fn checkCallArgs(c: *Checker, e: ast.Expr, fnType: TType, skipReceiver: bool) -> TType {
+    paramStart := 0
+    if skipReceiver {
+        paramStart = 1
+    }
+    numParams := len(fnType.params) - paramStart
+    minArgs := numParams
+    if fnType.variadic {
+        minArgs = minArgs - 1
+    }
+    if len(e.callArgs) < minArgs {
+        if fnType.variadic {
+            reportAt(c, e.line, e.col, str.Concat("wrong number of arguments for ", str.Concat(fnType.name, str.Concat(": expected at least ", str.Concat(itoa(minArgs), str.Concat(", got ", itoa(len(e.callArgs))))))))
+        } else {
+            reportAt(c, e.line, e.col, str.Concat("wrong number of arguments for ", str.Concat(fnType.name, str.Concat(": expected ", str.Concat(itoa(numParams), str.Concat(", got ", itoa(len(e.callArgs))))))))
+        }
+        return unknownType()
+    }
+    if !fnType.variadic && len(e.callArgs) > numParams {
+        reportAt(c, e.line, e.col, str.Concat("wrong number of arguments for ", str.Concat(fnType.name, str.Concat(": expected ", str.Concat(itoa(numParams), str.Concat(", got ", itoa(len(e.callArgs))))))))
+        return unknownType()
+    }
+    for i := 0; i < len(e.callArgs); i = i + 1 {
+        argType := checkExpr(c, e.callArgs[i])
+        paramIdx := paramStart + i
+        if paramIdx < len(fnType.params) {
+            if !checkerIsAssignable(c, fnType.params[paramIdx], argType) {
+                report(c, str.Concat("argument ", str.Concat(itoa(i + 1), str.Concat(" type mismatch: expected ", str.Concat(typeString(fnType.params[paramIdx]), str.Concat(", got ", typeString(argType)))))))
+            }
+        }
+    }
+    if len(fnType.retTypes) == 1 {
+        return fnType.retTypes[0]
+    }
+    return tupleType(fnType.retTypes)
+}
+
+fn checkIndexExpr(c: *Checker, e: ast.Expr) -> TType {
+    leftType := checkExpr(c, e.indexTarget[0])
+    indexType := checkExpr(c, e.indexExpr[0])
+    if leftType.kind == TK_UNKNOWN {
+        return unknownType()
+    }
+    if leftType.kind == TK_ARRAY {
+        if indexType.kind != TK_UNKNOWN && !isInteger(indexType) {
+            report(c, str.Concat("array index must be integer, got ", typeString(indexType)))
+        }
+        return typeOptT(leftType.elem)
+    }
+    if leftType.kind == TK_MAP {
+        keyType := typeOptT(leftType.keyType)
+        if indexType.kind != TK_UNKNOWN && !typeEquals(keyType, indexType) && !checkerIsAssignable(c, keyType, indexType) {
+            report(c, str.Concat("map key type mismatch: expected ", str.Concat(typeString(keyType), str.Concat(", got ", typeString(indexType)))))
+        }
+        return typeOptT(leftType.elem)
+    }
+    if leftType.kind == TK_POINTER {
+        if indexType.kind != TK_UNKNOWN && !isInteger(indexType) {
+            report(c, str.Concat("pointer index must be integer, got ", typeString(indexType)))
+        }
+        return typeOptT(leftType.elem)
+    }
+    if leftType.kind == TK_BUILTIN && str.Equal(leftType.name, "string") {
+        if indexType.kind != TK_UNKNOWN && !isInteger(indexType) {
+            report(c, str.Concat("string index must be integer, got ", typeString(indexType)))
+        }
+        return builtinType("int")
+    }
+    report(c, str.Concat("cannot index type ", typeString(leftType)))
+    return unknownType()
+}
+
+fn checkSliceExpr(c: *Checker, e: ast.Expr) -> TType {
+    leftType := checkExpr(c, e.sliceTarget[0])
+    if len(e.sliceLow) > 0 {
+        startType := checkExpr(c, e.sliceLow[0])
+        if startType.kind != TK_UNKNOWN && !isInteger(startType) {
+            report(c, str.Concat("slice start must be integer, got ", typeString(startType)))
+        }
+    }
+    if len(e.sliceHigh) > 0 {
+        endType := checkExpr(c, e.sliceHigh[0])
+        if endType.kind != TK_UNKNOWN && !isInteger(endType) {
+            report(c, str.Concat("slice end must be integer, got ", typeString(endType)))
+        }
+    }
+    if leftType.kind == TK_ARRAY {
+        return leftType
+    }
+    if leftType.kind == TK_BUILTIN && str.Equal(leftType.name, "string") {
+        return builtinType("string")
+    }
+    if leftType.kind == TK_UNKNOWN {
+        return unknownType()
+    }
+    report(c, str.Concat("cannot slice type ", typeString(leftType)))
+    return unknownType()
+}
+
+fn checkRangeExpr(c: *Checker, e: ast.Expr) -> TType {
+    startType := checkExpr(c, e.rangeLow[0])
+    endType := checkExpr(c, e.rangeHigh[0])
+    if startType.kind != TK_UNKNOWN && !isInteger(startType) {
+        report(c, str.Concat("range start must be integer, got ", typeString(startType)))
+    }
+    if endType.kind != TK_UNKNOWN && !isInteger(endType) {
+        report(c, str.Concat("range end must be integer, got ", typeString(endType)))
+    }
+    return arrayType(builtinType("int"))
+}
+
+fn checkArrayLit(c: *Checker, e: ast.Expr) -> TType {
+    if len(e.arrayElems) == 0 {
+        if len(e.arrayType) > 0 {
+            return arrayType(astTypeToType(c, e.arrayType[0]))
+        }
+        return arrayType(anyType())
+    }
+    var firstType TType
+    for i := 0; i < len(e.arrayElems); i = i + 1 {
+        elem := e.arrayElems[i]
+        if elem.kind == ast.EX_SPREAD {
+            spreadType := checkExpr(c, elem.spreadExpr[0])
+            if spreadType.kind != TK_ARRAY {
+                report(c, str.Concat("spread operand must be an array, got ", typeString(spreadType)))
+                if firstType.kind == 0 {
+                    firstType = anyType()
+                }
+                continue
+            }
+            arrElem := typeOptT(spreadType.elem)
+            if firstType.kind == 0 {
+                firstType = arrElem
+            } else if !typeEquals(firstType, arrElem) {
+                report(c, str.Concat("spread element type mismatch: expected ", str.Concat(typeString(firstType), str.Concat(", got ", typeString(arrElem)))))
+            }
+            continue
+        }
+        elemType := checkExpr(c, elem)
+        if firstType.kind == 0 {
+            firstType = elemType
+        } else if !typeEquals(firstType, elemType) {
+            report(c, str.Concat("array element ", str.Concat(itoa(i + 1), str.Concat(" type mismatch: expected ", str.Concat(typeString(firstType), str.Concat(", got ", typeString(elemType)))))))
+        }
+    }
+    if firstType.kind == 0 {
+        firstType = anyType()
+    }
+    return arrayType(firstType)
+}
+
+fn checkMapLit(c: *Checker, e: ast.Expr) -> TType {
+    if len(e.mapKeys) == 0 {
+        return mapType(anyType(), anyType())
+    }
+    firstKeyType := checkExpr(c, e.mapKeys[0])
+    firstValType := checkExpr(c, e.mapVals[0])
+    for i := 1; i < len(e.mapKeys); i = i + 1 {
+        keyType := checkExpr(c, e.mapKeys[i])
+        valType := checkExpr(c, e.mapVals[i])
+        if !typeEquals(firstKeyType, keyType) {
+            report(c, str.Concat("map key ", str.Concat(itoa(i + 1), str.Concat(" type mismatch: expected ", str.Concat(typeString(firstKeyType), str.Concat(", got ", typeString(keyType)))))))
+        }
+        if !typeEquals(firstValType, valType) {
+            report(c, str.Concat("map value ", str.Concat(itoa(i + 1), str.Concat(" type mismatch: expected ", str.Concat(typeString(firstValType), str.Concat(", got ", typeString(valType)))))))
+        }
+    }
+    return mapType(firstKeyType, firstValType)
+}
+
+fn checkSetLit(c: *Checker, e: ast.Expr) -> TType {
+    if len(e.setElems) == 0 {
+        return setType(anyType())
+    }
+    firstType := checkExpr(c, e.setElems[0])
+    for i := 1; i < len(e.setElems); i = i + 1 {
+        elemType := checkExpr(c, e.setElems[i])
+        if !typeEquals(firstType, elemType) {
+            report(c, str.Concat("set element ", str.Concat(itoa(i + 1), str.Concat(" type mismatch: expected ", str.Concat(typeString(firstType), str.Concat(", got ", typeString(elemType)))))))
+        }
+    }
+    return setType(firstType)
+}
+
+fn checkStructLit(c: *Checker, e: ast.Expr) -> TType {
+    structName := e.structLitName
+    // Mark module import as used for qualified struct literals (e.g. streams.LimitReader).
+    if str.Contains(structName, ".") {
+        dot := str.IndexOf(structName, ".")
+        if dot > 0 {
+            prefix := str.Substr(structName, 0, dot)
+            markImportUsed(c, prefix)
+        }
+    }
+    if str.Len(c.currentModule) > 0 && !str.Equal(c.currentModule, "main") && !str.Contains(structName, ".") {
+        qualified := str.Concat(str.Concat(c.currentModule, "."), structName)
+        exists := mapStringDeclHasKey(c.structs, qualified)
+        if exists {
+            structName = qualified
+        }
+    }
+    if str.Len(c.currentModule) > 0 && !str.Contains(structName, ".") {
+        cm := c.currentModule
+        imps := c.imports[cm]
+        exists := mapStringStringSliceHasKey(c.imports, cm)
+        if exists {
+            for impName in imps {
+                qualified := str.Concat(str.Concat(impName, "."), structName)
+                existsStruct := mapStringDeclHasKey(c.structs, qualified)
+                if existsStruct {
+                    structName = qualified
+                    break
+                }
+            }
+        }
+    }
+    decl := c.structs[structName]
+    ok := mapStringDeclHasKey(c.structs, structName)
+    if !ok {
+        return namedType(structName)
+    }
+    mapping := makeGenericMap(c, decl.structGenerics, e.genericArgs)
+    for i := 0; i < len(e.structLitFields); i = i + 1 {
+        fieldName := e.structLitFields[i].name
+        found := false
+        for j := 0; j < len(decl.structFields); j = j + 1 {
+            if str.Equal(decl.structFields[j].name, fieldName) {
+                found = true
+                if len(e.structLitFields[i].value) > 0 && len(decl.structFields[j].typ) > 0 {
+                    ft := substituteType(c, astTypeToType(c, decl.structFields[j].typ[0]), mapping)
+                    vt := checkExpr(c, e.structLitFields[i].value[0])
+                    if ft.kind != TK_UNKNOWN && vt.kind != TK_UNKNOWN && !checkerIsAssignable(c, ft, vt) {
+                        report(c, str.Concat("field \"", str.Concat(fieldName, str.Concat("\" type mismatch: expected ", str.Concat(typeString(ft), str.Concat(", got ", typeString(vt)))))))
+                    }
+                }
+                break
+            }
+        }
+        if !found {
+            report(c, str.Concat("unknown field \"", str.Concat(fieldName, str.Concat("\" in struct init for \"", str.Concat(structName, "\"")))))
+        }
+    }
+    result := namedType(structName)
+    if len(decl.structGenerics) > 0 {
+        genericArgs := []TType{}
+        for i := 0; i < len(e.genericArgs); i = i + 1 {
+            genericArgs = append(genericArgs, astTypeToType(c, e.genericArgs[i]))
+        }
+        result.genericArgs = genericArgs
+    }
+    return result
+}
+
+fn checkFieldAccessExpr(c: *Checker, e: ast.Expr) -> TType {
+    if e.fieldTarget[0].kind == ast.EX_IDENT {
+        ident := e.fieldTarget[0]
+        moduleName := resolveImportAlias(c, ident.ident)
+        isModuleName := false
+        if str.Len(c.currentModule) > 0 {
+            cm := c.currentModule
+        imps := c.imports[cm]
+        exists := mapStringStringSliceHasKey(c.imports, cm)
+            if exists {
+                for imp in imps {
+                    if str.Equal(imp, ident.ident) {
+                        isModuleName = true
+                        break
+                    }
+                }
+            }
+        }
+        if !isModuleName {
+            fqName := str.Concat(str.Concat(moduleName, "."), e.fieldName)
+            exactType := resolveWithKey(c, fqName)
+            if exactType.kind != TK_UNKNOWN {
+                isModuleName = true
+            }
+        }
+        if isModuleName {
+            markImportUsed(c, ident.ident)
+            fqName := str.Concat(str.Concat(moduleName, "."), e.fieldName)
+            typ := resolve(c, fqName)
+            if typ.kind != TK_UNKNOWN {
+                return typ
+            }
+            typ = resolve(c, e.fieldName)
+            if typ.kind != TK_UNKNOWN {
+                return typ
+            }
+            report(c, str.Concat("module \"", str.Concat(moduleName, str.Concat("\" has no exported symbol \"", str.Concat(e.fieldName, "\"")))))
+            return unknownType()
+        }
+    }
+
+    leftType := checkExpr(c, e.fieldTarget[0])
+    if leftType.kind == TK_UNKNOWN {
+        return unknownType()
+    }
+    if leftType.kind == TK_ERROR {
+        for i := 0; i < len(leftType.methodNames); i = i + 1 {
+            if str.Equal(leftType.methodNames[i], e.fieldName) {
+                return leftType.methodTypes[i]
+            }
+        }
+        report(c, str.Concat("error interface has no method \"", str.Concat(e.fieldName, "\"")))
+        return unknownType()
+    }
+    if leftType.kind == TK_TENSOR {
+        if str.Equal(e.fieldName, "T") {
+            return leftType
+        }
+        report(c, str.Concat("tensor type has no property \"", str.Concat(e.fieldName, "\"")))
+        return unknownType()
+    }
+    if leftType.kind == TK_SERVICE {
+        for i := 0; i < len(leftType.methodNames); i = i + 1 {
+            if str.Equal(leftType.methodNames[i], e.fieldName) {
+                return leftType.methodTypes[i]
+            }
+        }
+        report(c, str.Concat("service \"", str.Concat(leftType.name, str.Concat("\" has no method \"", str.Concat(e.fieldName, "\"")))))
+        return unknownType()
+    }
+    if leftType.kind == TK_RULESET {
+        fnType := resolve(c, str.Concat(str.Concat(leftType.name, "."), e.fieldName))
+        if fnType.kind != TK_UNKNOWN {
+            return fnType
+        }
+        report(c, str.Concat("ruleset \"", str.Concat(leftType.name, str.Concat("\" has no method \"", str.Concat(e.fieldName, "\"")))))
+        return unknownType()
+    }
+    if leftType.kind == TK_TEMPLATE {
+        tmpl := c.templates[leftType.name]
+        exists := mapStringDeclHasKey(c.templates, leftType.name)
+        if !exists {
+            report(c, str.Concat("unknown template type ", typeString(leftType)))
+            return unknownType()
+        }
+        for i := 0; i < len(tmpl.templateMethods); i = i + 1 {
+            if str.Equal(tmpl.templateMethods[i].fnName, e.fieldName) {
+                return fnTypeFromDecl(c, tmpl.templateMethods[i])
+            }
+        }
+        report(c, str.Concat("template ", str.Concat(typeString(leftType), str.Concat(" has no method \"", str.Concat(e.fieldName, "\"")))))
+        return unknownType()
+    }
+
+    var structName string
+    var genericArgs []TType
+    if leftType.kind == TK_NAMED {
+        structName = leftType.name
+        genericArgs = leftType.genericArgs
+    } else if leftType.kind == TK_POINTER {
+        inner := typeOptT(leftType.elem)
+        if inner.kind == TK_NAMED {
+            structName = inner.name
+            genericArgs = inner.genericArgs
+        }
+    }
+    if str.Len(structName) == 0 {
+        report(c, str.Concat("cannot access field on non-struct type ", typeString(leftType)))
+        return unknownType()
+    }
+    decl := c.structs[structName]
+    ok := mapStringDeclHasKey(c.structs, structName)
+    if !ok {
+        report(c, str.Concat("unknown struct type \"", str.Concat(structName, "\"")))
+        return unknownType()
+    }
+    argTypes := []ast.Type{}
+    for i := 0; i < len(genericArgs); i = i + 1 {
+        // Reconstruct a named type from the generic arg; only simple cases needed.
+        argTypes = append(argTypes, ast.Type{kind: ast.TY_NAMED, name: typeString(genericArgs[i])})
+    }
+    mapping := makeGenericMap(c, decl.structGenerics, argTypes)
+    for i := 0; i < len(decl.structFields); i = i + 1 {
+        if str.Equal(decl.structFields[i].name, e.fieldName) {
+            if len(decl.structFields[i].typ) > 0 {
+                return substituteType(c, astTypeToType(c, decl.structFields[i].typ[0]), mapping)
+            }
+            return unknownType()
+        }
+    }
+    for i := 0; i < len(decl.structMethods); i = i + 1 {
+        if str.Equal(decl.structMethods[i].fnName, e.fieldName) || str.EndsWith(decl.structMethods[i].fnName, str.Concat(".", e.fieldName)) {
+            return substituteType(c, fnTypeFromDecl(c, decl.structMethods[i]), mapping)
+        }
+    }
+    report(c, str.Concat("struct \"", str.Concat(structName, str.Concat("\" has no field \"", str.Concat(e.fieldName, "\"")))))
+    return unknownType()
+}
+
+fn checkFnLit(c: *Checker, e: ast.Expr) -> TType {
+    params := make([]TType, 0)
+    for i := 0; i < len(e.fnLitParams); i = i + 1 {
+        pt := unknownType()
+        if len(e.fnLitParams[i].typ) > 0 {
+            pt = astTypeToType(c, e.fnLitParams[i].typ[0])
+        }
+        params = append(params, pt)
+    }
+    var ret TType
+    ret = voidType()
+    if len(e.fnLitRetTypes) > 0 {
+        ret = astTypeToType(c, e.fnLitRetTypes[0])
+    }
+    fnType := functionType(params, []TType{ret})
+    oldFn := c.currentFn
+    c.currentFn = singleTType(fnType)
+    pushScope(c)
+    for i := 0; i < len(e.fnLitParams); i = i + 1 {
+        pt := unknownType()
+        if len(e.fnLitParams[i].typ) > 0 {
+            pt = astTypeToType(c, e.fnLitParams[i].typ[0])
+        }
+        declareParam(c, e.fnLitParams[i].name, pt)
+    }
+    checkBlockStmt(c, e.fnLitBody)
+    popScope(c)
+    c.currentFn = oldFn
+    return fnType
+}
+
+fn checkIfExpr(c: *Checker, e: ast.Expr) -> TType {
+    if len(e.ifCond) > 0 {
+        condType := checkExpr(c, e.ifCond[0])
+        if condType.kind != TK_UNKNOWN && !typeEquals(condType, builtinType("bool")) {
+            report(c, str.Concat("if condition must be bool, got ", typeString(condType)))
+        }
+    }
+    trueType := checkExpr(c, e.ifThen[0])
+    if len(e.ifElse) > 0 {
+        falseType := checkExpr(c, e.ifElse[0])
+        if trueType.kind == TK_UNKNOWN {
+            return falseType
+        }
+        if falseType.kind == TK_UNKNOWN {
+            return trueType
+        }
+        if !typeEquals(trueType, falseType) {
+            report(c, str.Concat("if expression branches have different types: ", str.Concat(typeString(trueType), str.Concat(" and ", typeString(falseType)))))
+        }
+        return trueType
+    }
+    return trueType
+}
+
+fn checkMatchExpr(c: *Checker, e: ast.Expr) -> TType {
+    var subjectType TType
+    if len(e.matchExprSubject) > 0 {
+        subjectType = checkExpr(c, e.matchExprSubject[0])
+    }
+    var resultType TType
+    hasWildcard := false
+    for i := 0; i < len(e.matchExprArms); i = i + 1 {
+        arm := e.matchExprArms[i]
+        if arm.isWildcard {
+            hasWildcard = true
+        }
+        if arm.pattern.kind == ast.PK_VARIANT && subjectType.kind == TK_TAGGED_UNION {
+            variant := findVariant(subjectType, arm.pattern.variantName)
+            if variant.name == "" {
+                report(c, str.Concat("match variant \"", str.Concat(arm.pattern.variantName, str.Concat("\" does not exist in enum \"", str.Concat(subjectType.name, "\"")))))
+            } else {
+                if len(variant.payloadType) > 0 && len(arm.pattern.bindings) > 0 {
+                    pushScope(c)
+                    for j := 0; j < len(arm.pattern.bindings); j = j + 1 {
+                        declare(c, arm.pattern.bindings[j], typeOptT(variant.payloadType))
+                    }
+                }
+            }
+        }
+        if len(arm.guard) > 0 {
+            guardType := checkExpr(c, arm.guard[0])
+            if guardType.kind != TK_UNKNOWN && !typeEquals(guardType, builtinType("bool")) {
+                report(c, str.Concat("match guard must be bool, got ", typeString(guardType)))
+            }
+        }
+        armType := blockLastExprType(c, arm.body)
+        if arm.pattern.kind == ast.PK_VARIANT && subjectType.kind == TK_TAGGED_UNION {
+            variant := findVariant(subjectType, arm.pattern.variantName)
+            if variant.name != "" && len(variant.payloadType) > 0 && len(arm.pattern.bindings) > 0 {
+                popScope(c)
+            }
+        }
+        if i == 0 {
+            resultType = armType
+        } else if resultType.kind != TK_UNKNOWN && armType.kind != TK_UNKNOWN && !typeEquals(resultType, armType) {
+            if !typeEquals(resultType, voidType()) && !typeEquals(armType, voidType()) {
+                report(c, str.Concat("match arm ", str.Concat(itoa(i + 1), str.Concat(" has different type ", str.Concat(typeString(armType), str.Concat(" (expected ", str.Concat(typeString(resultType), ")")))))))
+            }
+        }
+    }
+    if !hasWildcard && subjectType.kind == TK_TAGGED_UNION {
+        covered := make(map[string]bool)
+        for i := 0; i < len(e.matchExprArms); i = i + 1 {
+            if e.matchExprArms[i].pattern.kind == ast.PK_VARIANT {
+                covered[e.matchExprArms[i].pattern.variantName] = true
+            }
+        }
+        allCovered := true
+        for i := 0; i < len(subjectType.variants); i = i + 1 {
+            if !covered[subjectType.variants[i].name] {
+                allCovered = false
+                break
+            }
+        }
+        if !allCovered {
+            report(c, str.Concat("match expression on enum \"", str.Concat(subjectType.name, "\" must have a wildcard (_) arm or cover all variants")))
+        }
+    } else if !hasWildcard {
+        report(c, "match expression must have a wildcard (_) arm")
+    }
+    return resultType
+}
+
+fn blockLastExprType(c: *Checker, stmts: []ast.Stmt) -> TType {
+    if len(stmts) == 0 {
+        return voidType()
+    }
+    for i := 0; i < len(stmts) - 1; i = i + 1 {
+        checkStatement(c, stmts[i])
+    }
+    last := stmts[len(stmts) - 1]
+    if last.kind == ast.ST_EXPR && len(last.expr) > 0 {
+        return checkExpr(c, last.expr[0])
+    }
+    checkStatement(c, last)
+    return voidType()
+}
+
+fn checkMakeExpr(c: *Checker, e: ast.Expr) -> TType {
+    if len(e.makeType) > 0 {
+        return astTypeToType(c, e.makeType[0])
+    }
+    return unknownType()
+}
+
+fn checkErrorProp(c: *Checker, e: ast.Expr) -> TType {
+    if e.postfixTarget[0].kind != ast.EX_CALL {
+        report(c, "? can only be applied to function calls")
+        return unknownType()
+    }
+    if len(c.currentFn) == 0 {
+        report(c, "? can only be used inside a function that returns an error")
+        return unknownType()
+    }
+    fnType := typeOptT(c.currentFn)
+    if len(fnType.retTypes) == 0 {
+        report(c, "? can only be used inside a function that returns an error")
+        return unknownType()
+    }
+    lastRet := fnType.retTypes[len(fnType.retTypes) - 1]
+    if !typeEquals(lastRet, errorType()) {
+        report(c, "? requires the enclosing function to return an error as its last value")
+        return unknownType()
+    }
+    call := e.postfixTarget[0]
+    calleeFnType := checkExpr(c, call.callFunc[0])
+    if calleeFnType.kind == TK_UNKNOWN {
+        return unknownType()
+    }
+    if calleeFnType.kind != TK_FUNCTION {
+        report(c, "? can only be applied to function calls")
+        return unknownType()
+    }
+    if len(calleeFnType.retTypes) < 2 {
+        report(c, "? requires a function that returns multiple values with error as the last")
+        return unknownType()
+    }
+    lastCalleeRet := calleeFnType.retTypes[len(calleeFnType.retTypes) - 1]
+    if !typeEquals(lastCalleeRet, errorType()) {
+        report(c, str.Concat("? requires the callee to return an error as the last value, got ", typeString(lastCalleeRet)))
+        return unknownType()
+    }
+    if len(calleeFnType.retTypes) == 2 {
+        return calleeFnType.retTypes[0]
+    }
+    var rest []TType
+    for i := 0; i < len(calleeFnType.retTypes) - 1; i = i + 1 {
+        rest = append(rest, calleeFnType.retTypes[i])
+    }
+    return tupleType(rest)
+}
+
+fn checkNonNullAssert(c: *Checker, e: ast.Expr) -> TType {
+    innerType := checkExpr(c, e.postfixTarget[0])
+    if innerType.kind == TK_UNKNOWN {
+        return unknownType()
+    }
+    if innerType.kind != TK_POINTER {
+        report(c, str.Concat("! can only be applied to pointer types, got ", typeString(innerType)))
+        return unknownType()
+    }
+    return typeOptT(innerType.elem)
+}
+
+fn checkTupleExpr(c: *Checker, e: ast.Expr) -> TType {
+    types := []TType{}
+    for i := 0; i < len(e.tupleElems); i = i + 1 {
+        types = append(types, checkExpr(c, e.tupleElems[i]))
+    }
+    return tupleType(types)
+}
+
+// === Flow Analysis ===
+
+fn stmtAlwaysReturnsBlock(c: *Checker, stmts: []ast.Stmt) -> bool {
+    for i := 0; i < len(stmts); i = i + 1 {
+        if stmtAlwaysReturns(c, stmts[i]) {
+            return true
+        }
+    }
+    return false
+}
+
+fn stmtAlwaysReturns(c: *Checker, stmt: ast.Stmt) -> bool {
+    if stmt.kind == ast.ST_RETURN || stmt.kind == ast.ST_BREAK || stmt.kind == ast.ST_CONTINUE {
+        return true
+    }
+    if stmt.kind == ast.ST_BLOCK {
+        return stmtAlwaysReturnsBlock(c, stmt.thenBody)
+    }
+    if stmt.kind == ast.ST_IF {
+        if len(stmt.elseBody) == 0 {
+            return false
+        }
+        if !stmtAlwaysReturnsBlock(c, stmt.thenBody) {
+            return false
+        }
+        for i := 0; i < len(stmt.elseBody); i = i + 1 {
+            if !stmtAlwaysReturns(c, stmt.elseBody[i]) {
+                return false
+            }
+        }
+        return true
+    }
+    if stmt.kind == ast.ST_SWITCH {
+        hasDefault := false
+        for i := 0; i < len(stmt.selectCases); i = i + 1 {
+            if stmt.selectCases[i].isDefault {
+                hasDefault = true
+            }
+            if !stmtAlwaysReturnsBlock(c, stmt.selectCases[i].body) {
+                return false
+            }
+        }
+        return hasDefault
+    }
+    if stmt.kind == ast.ST_FOR {
+        // Infinite for loop (no condition, no iterator) always transfers control
+        if len(stmt.cond) == 0 && len(stmt.forIterExpr) == 0 {
+            return true
+        }
+        return false
+    }
+    if stmt.kind == ast.ST_WHILE {
+        // while true is an infinite loop
+        if len(stmt.cond) > 0 && stmt.cond[0].kind == ast.EX_BOOL && stmt.cond[0].boolVal {
+            return true
+        }
+        return false
+    }
+    if stmt.kind == ast.ST_MATCH {
+        hasWildcard := false
+        for i := 0; i < len(stmt.matchArms); i = i + 1 {
+            arm := stmt.matchArms[i]
+            if arm.isWildcard {
+                hasWildcard = true
+            }
+            producesValue := len(arm.body) > 0 && arm.body[len(arm.body) - 1].kind == ast.ST_EXPR
+            if !stmtAlwaysReturnsBlock(c, arm.body) && !producesValue {
+                return false
+            }
+        }
+        return hasWildcard
+    }
+    if stmt.kind == ast.ST_EXPR && len(stmt.expr) > 0 {
+        // panic() call transfers control
+        if stmt.expr[0].kind == ast.EX_CALL && stmt.expr[0].callFunc[0].kind == ast.EX_IDENT {
+            name := stmt.expr[0].callFunc[0].ident
+            if str.Equal(name, "panic") || str.Equal(name, "exit") || str.Equal(name, "abort") {
+                return true
+            }
+        }
+        // match expression in statement context
+        if stmt.expr[0].kind == ast.EX_MATCH_EXPR {
+            return matchExprAlwaysReturns(c, stmt.expr[0])
+        }
+        return false
+    }
+    return false
+}
+
+fn matchExprAlwaysReturns(c: *Checker, e: ast.Expr) -> bool {
+    hasWildcard := false
+    for i := 0; i < len(e.matchExprArms); i = i + 1 {
+        arm := e.matchExprArms[i]
+        if arm.isWildcard {
+            hasWildcard = true
+        }
+        if !stmtAlwaysReturnsBlock(c, arm.body) {
+            return false
+        }
+    }
+    return hasWildcard
+}

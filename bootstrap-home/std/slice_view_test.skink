@@ -1,0 +1,171 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/slice_view_test.skink
+// Purpose: Regression tests for slice-view semantics. s[a:b] with a > 0
+//          produces an interior-pointer view registered with the RC
+//          runtime (kind-3 entry); s[0:len] aliases the source; s[0:k]
+//          with k < len copies (a thin prefix pointer cannot carry its
+//          own length at payload-8 — documented limitation).
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module slice_view_test
+
+import "testing"
+
+// TestViewMutationWritesSource verifies a write through a view lands in
+// the source's backing array — the core shared-storage contract.
+pub fn TestViewMutationWritesSource() {
+    s := []int{10, 20, 30, 40, 50}
+    v := s[1:4]
+    testing.AssertEqualInt(3, len(v), "view length")
+    v[0] = 99
+    v[2] = 77
+    testing.AssertEqualInt(99, s[1], "view[0] aliases s[1]")
+    testing.AssertEqualInt(77, s[3], "view[2] aliases s[3]")
+    testing.AssertEqualInt(10, s[0], "prefix element untouched")
+    testing.AssertEqualInt(50, s[4], "suffix element untouched")
+}
+
+// TestSourceMutationVisibleInView verifies writes to the source are
+// visible through a previously taken view (two-way sharing).
+pub fn TestSourceMutationVisibleInView() {
+    s := []int{1, 2, 3, 4}
+    v := s[1:3]
+    s[1] = 100
+    s[2] = 200
+    testing.AssertEqualInt(100, v[0], "view sees s[1] update")
+    testing.AssertEqualInt(200, v[1], "view sees s[2] update")
+}
+
+// TestViewOfView verifies nested slicing composes: a view of a view is a
+// view of the same base, resolved through the registry's base chain.
+pub fn TestViewOfView() {
+    s := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+    v := s[2:8]
+    w := v[1:4]
+    testing.AssertEqualInt(3, len(w), "nested view length")
+    testing.AssertEqualInt(3, w[0], "w[0] is s[3]")
+    w[0] = 300
+    testing.AssertEqualInt(300, s[3], "nested write reaches base")
+    testing.AssertEqualInt(300, v[1], "nested write visible through v")
+}
+
+// TestViewLengthAndIteration verifies len() and for-in honor the view's
+// registered length, not the base's.
+pub fn TestViewLengthAndIteration() {
+    s := []int{5, 6, 7, 8, 9}
+    v := s[2:5]
+    testing.AssertEqualInt(3, len(v), "len(view)")
+    sum := 0
+    for x in v {
+        sum = sum + x
+    }
+    testing.AssertEqualInt(24, sum, "for-in over view visits 7+8+9")
+    i := 0
+    for i < len(v) {
+        sum = sum + v[i]
+        i = i + 1
+    }
+    testing.AssertEqualInt(48, sum, "index loop over view")
+}
+
+// svMakeView returns a view into a locally-constructed slice. The view
+// must keep the backing array alive after the source binding dies.
+fn svMakeView() -> []int {
+    s := make([]int, 6)
+    s[4] = 44
+    s[5] = 55
+    return s[3:6]
+}
+
+// TestViewKeepsBaseAlive verifies a returned view retains the backing
+// array — v stays valid after the source slice variable is gone.
+pub fn TestViewKeepsBaseAlive() {
+    v := svMakeView()
+    testing.AssertEqualInt(3, len(v), "view length after source freed")
+    testing.AssertEqualInt(44, v[1], "view data survives source release")
+    v[0] = 33
+    testing.AssertEqualInt(33, v[0], "view writable after source release")
+}
+
+// TestFullRangeSliceAliases verifies s[0:len] returns the same backing
+// (retained identity), so writes through it hit the source.
+pub fn TestFullRangeSliceAliases() {
+    s := []int{1, 2, 3}
+    v := s[0:3]
+    testing.AssertEqualInt(3, len(v), "full-range len")
+    v[0] = 42
+    testing.AssertEqualInt(42, s[0], "full-range slice aliases source")
+}
+
+// TestPrefixSliceIsCopy verifies s[0:k] (k < len) does NOT alias: a
+// thin prefix pointer cannot carry its own length at payload-8, so the
+// emitter materialises a copy — a documented limitation of the ABI.
+pub fn TestPrefixSliceIsCopy() {
+    s := []int{1, 2, 3, 4}
+    p := s[0:2]
+    testing.AssertEqualInt(2, len(p), "prefix len")
+    p[0] = 99
+    testing.AssertEqualInt(1, s[0], "prefix copy does not alias source")
+}
+
+// TestAppendToViewDoesNotCorrupt verifies appending a view produces a
+// fresh backing array and never writes past the view into the shared
+// base (the runtime refuses in-place growth on kind-3 entries).
+pub fn TestAppendToViewDoesNotCorrupt() {
+    s := []int{1, 2, 3, 4, 5}
+    v := s[1:3]
+    v = append(v, 9)
+    testing.AssertEqualInt(3, len(v), "appended view len")
+    testing.AssertEqualInt(2, v[0], "v[0] intact")
+    testing.AssertEqualInt(9, v[2], "appended element")
+    testing.AssertEqualInt(4, s[3], "base tail untouched by view append")
+    testing.AssertEqualInt(5, s[4], "base end untouched")
+}
+
+// TestNilSliceExpr verifies slicing a nil slice yields nil-safe results.
+pub fn TestNilSliceExpr() {
+    var s []int
+    v := s[0:0]
+    testing.AssertEqualInt(0, len(v), "nil[0:0] len")
+    n := 0
+    for x in v {
+        n = n + x
+    }
+    testing.AssertEqualInt(0, n, "nil view iterates zero times")
+}
+
+// TestEmptyRangeView verifies s[a:a] yields a zero-length view.
+pub fn TestEmptyRangeView() {
+    s := []int{1, 2, 3}
+    v := s[2:2]
+    testing.AssertEqualInt(0, len(v), "empty view len")
+}
+
+// TestViewOfStrings verifies views of heap-element slices keep element
+// references alive and share element storage.
+pub fn TestViewOfStrings() {
+    s := []string{"aa", "bb", "cc", "dd"}
+    v := s[1:3]
+    testing.AssertEqualInt(2, len(v), "string view len")
+    testing.AssertEqualString("bb", v[0], "string view[0]")
+    v[0] = "zz"
+    testing.AssertEqualString("zz", s[1], "string element write aliases")
+}

@@ -1,0 +1,241 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/compiler_features_test.skink
+// Purpose: Regression tests for newly implemented language features.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module compiler_features_test
+
+import "testing"
+
+// === for i, v in collection ===
+
+// TestForInPairArray verifies for i, v in array iteration.
+pub fn TestForInPairArray() {
+    arr := []int{10, 20, 30}
+    sum := 0
+    for i, v in arr {
+        sum = sum + i * v
+    }
+    // 0*10 + 1*20 + 2*30 = 0 + 20 + 60 = 80
+    testing.AssertEqualInt(80, sum, "for i,v in array")
+}
+
+// TestForInPairMap verifies for k, v in map iteration.
+pub fn TestForInPairMap() {
+    m := make(map[string]int)
+    m["a"] = 1
+    m["b"] = 2
+    count := 0
+    for k, v in m {
+        if k == "a" {
+            count = count + v
+        } else {
+            count = count + v
+        }
+    }
+    testing.AssertEqualInt(3, count, "for k,v in map")
+}
+
+// === delete(map, key) ===
+
+// TestDeleteMapKey verifies delete removes a key from a map.
+pub fn TestDeleteMapKey() {
+    m := make(map[string]int)
+    m["apple"] = 5
+    m["banana"] = 3
+    m["cherry"] = 7
+    testing.AssertEqualInt(3, len(m), "map len before delete")
+    delete(m, "banana")
+    testing.AssertEqualInt(2, len(m), "map len after delete")
+    testing.AssertEqualInt(5, m["apple"], "apple still present")
+    testing.AssertEqualInt(7, m["cherry"], "cherry still present")
+    testing.AssertEqualInt(0, m["banana"], "banana is zero")
+}
+
+// === if-initializer ===
+
+// TestIfInitializer verifies if with initializer statement.
+pub fn TestIfInitializer() {
+    arr := []int{1, 2, 3, 4, 5}
+    if i := len(arr); i > 3 {
+        testing.AssertEqualInt(5, i, "if-init variable")
+    } else {
+        testing.AssertEqualInt(0, 1, "should not reach else")
+    }
+}
+
+// TestIfInitializerElse verifies if-init variable accessible in else.
+pub fn TestIfInitializerElse() {
+    arr := []int{1, 2}
+    if i := len(arr); i > 3 {
+        testing.AssertEqualInt(0, 1, "should not reach then")
+    } else {
+        testing.AssertEqualInt(2, i, "if-init variable in else")
+    }
+}
+
+// === map comma-ok ===
+
+// TestMapCommaOkFound verifies map comma-ok returns found value.
+pub fn TestMapCommaOkFound() {
+    m := make(map[string]int)
+    m["apple"] = 5
+    v, ok := m["apple"]
+    testing.AssertEqualInt(5, v, "map comma-ok value")
+    testing.AssertEqualInt(1, int(ok), "map comma-ok found")
+}
+
+// TestMapCommaOkNotFound verifies map comma-ok returns zero on miss.
+pub fn TestMapCommaOkNotFound() {
+    m := make(map[string]int)
+    m["apple"] = 5
+    v, ok := m["cherry"]
+    testing.AssertEqualInt(0, v, "map comma-ok missing value")
+    testing.AssertEqualInt(0, int(ok), "map comma-ok not found")
+}
+
+// === channel receive comma-ok ===
+
+// TestChanCommaOk verifies channel receive with comma-ok.
+pub fn TestChanCommaOk() {
+    ch := make(chan<int>, 2)
+    ch <- 42
+    v, ok := <-ch
+    testing.AssertEqualInt(42, v, "chan comma-ok value")
+    testing.AssertEqualInt(1, int(ok), "chan comma-ok found")
+}
+
+// === named returns ===
+
+fn computeNamed(x: int) -> (result: int, ok: bool) {
+    if x > 0 {
+        result = x * 2
+        ok = true
+    }
+    return
+}
+
+// TestNamedReturnsPositive verifies named return values on success.
+pub fn TestNamedReturnsPositive() {
+    r, ok := computeNamed(5)
+    testing.AssertEqualInt(10, r, "named return result")
+    testing.AssertEqualInt(1, int(ok), "named return ok")
+}
+
+// TestNamedReturnsNegative verifies named returns default to zero.
+pub fn TestNamedReturnsNegative() {
+    r, ok := computeNamed(-3)
+    testing.AssertEqualInt(0, r, "named return zero result")
+    testing.AssertEqualInt(0, int(ok), "named return not ok")
+}
+
+// === spread append ===
+
+// TestSpreadAppend verifies spread append with ... syntax.
+pub fn TestSpreadAppend() {
+    a := []int{1, 2, 3}
+    b := []int{4, 5, 6}
+    c := append(a, b...)
+    testing.AssertEqualInt(6, len(c), "spread append len")
+    testing.AssertEqualInt(1, c[0], "spread append c[0]")
+    testing.AssertEqualInt(4, c[3], "spread append c[3]")
+    testing.AssertEqualInt(6, c[5], "spread append c[5]")
+}
+
+// TestSpreadAppendEmpty verifies spread append with empty slice.
+pub fn TestSpreadAppendEmpty() {
+    a := []int{1, 2, 3}
+    b := []int{}
+    c := append(a, b...)
+    testing.AssertEqualInt(3, len(c), "spread append empty len")
+    testing.AssertEqualInt(1, c[0], "spread append empty c[0]")
+}
+
+// === from-end indexing ===
+
+// TestFromEndIndexing verifies from-end indexing with ^ syntax.
+pub fn TestFromEndIndexing() {
+    arr := []int{10, 20, 30, 40, 50}
+    testing.AssertEqualInt(50, arr[^1], "arr[^1]")
+    testing.AssertEqualInt(40, arr[^2], "arr[^2]")
+    testing.AssertEqualInt(10, arr[^5], "arr[^5]")
+}
+
+// TestFromEndIndexingString verifies from-end indexing on strings.
+pub fn TestFromEndIndexingString() {
+    s := "hello"
+    testing.AssertEqualInt(111, s[^1], "s[^1] is 'o'")
+    testing.AssertEqualInt(108, s[^2], "s[^2] is 'l'")
+}
+
+// === set literals ===
+
+// TestSetLiteralInt verifies int set literal deduplicates elements.
+pub fn TestSetLiteralInt() {
+    s := set{1, 2, 3, 2, 1}
+    testing.AssertEqualInt(3, len(s), "int set literal len")
+}
+
+// TestSetLiteralString verifies string set literal deduplicates.
+pub fn TestSetLiteralString() {
+    s := set{"apple", "banana", "apple", "cherry"}
+    testing.AssertEqualInt(3, len(s), "string set literal len")
+}
+
+// TestSetMembership verifies in operator for set membership.
+pub fn TestSetMembership() {
+    s := set{1, 2, 3, 4, 5}
+    if 3 in s {
+        testing.AssertEqualInt(1, 1, "3 in s")
+    } else {
+        testing.AssertEqualInt(0, 1, "3 should be in s")
+    }
+    if 6 in s {
+        testing.AssertEqualInt(0, 1, "6 should not be in s")
+    } else {
+        testing.AssertEqualInt(1, 1, "6 not in s")
+    }
+}
+
+// TestSetIteration verifies for-in iteration over set elements.
+pub fn TestSetIteration() {
+    s := set{10, 20, 30}
+    sum := 0
+    for v in s {
+        sum = sum + v
+    }
+    testing.AssertEqualInt(60, sum, "set iteration sum")
+}
+
+// === parenthesized const blocks ===
+
+const (
+    TestConstA = 10
+    TestConstB = 20
+    TestConstC = 30
+)
+
+// TestParenthesizedConst verifies parenthesized const block declarations.
+pub fn TestParenthesizedConst() {
+    testing.AssertEqualInt(10, TestConstA, "const A")
+    testing.AssertEqualInt(20, TestConstB, "const B")
+    testing.AssertEqualInt(30, TestConstC, "const C")
+}

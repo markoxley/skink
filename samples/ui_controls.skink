@@ -1,0 +1,237 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/ui_controls.skink
+// Purpose: Control-gallery sample for the std/ui toolkit. Organizes the
+//          full widget set into tabs — form inputs bound to observables,
+//          pickers and lists, containers (group/tree), a function-fed
+//          table, and a live channel-fed event log written by a spawned
+//          worker. Also demonstrates the menubar, popups, and the
+//          immediate-mode helpers.
+//
+//          Run headless:
+//            SKINK_HOME=<repo> ./skink -o ui_controls samples/ui_controls.skink
+//            SDL_VIDEODRIVER=dummy SDL_RENDER_DRIVER=software ./ui_controls
+//
+// Author:  Mark Oxley
+// Created: 2026
+
+module main
+
+import "std/io"
+import "std/ui"
+import "std/ui/binding"
+import "std/strconv"
+import "std/time"
+
+// ============================================================================
+// Application state — observables are the "model"; bound widgets stay in
+// sync with them in both directions.
+// ============================================================================
+
+var name     = binding.NewObservable("skink")
+var gain     = binding.NewObservableInt(40)
+var rate     = binding.NewObservableFloat(0.5)
+var enabled  = binding.NewObservableBool(true)
+var quality  = binding.NewObservableInt(1)
+var eventLog = make(chan<string>, 64)
+
+var clickCount = 0
+var logSeq     = 0
+var workerStop = make(chan<int>, 1)
+
+fn onClick() {
+    clickCount = clickCount + 1
+}
+
+fn clicksText() -> string {
+    return "Clicks so far: " + strconv.Itoa(clickCount)
+}
+
+// pushLog feeds the channel-backed log table.
+fn pushLog(msg: string) {
+    logSeq = logSeq + 1
+    eventLog <- "[" + strconv.Itoa(logSeq) + "] " + msg
+}
+
+// logWorker streams heartbeat lines until told to stop — shows a channel
+// data source driving a UI table from another thread.
+fn logWorker() {
+    for {
+        select {
+            case <-workerStop:
+                return
+            default:
+        }
+        pushLog("worker heartbeat")
+        time.SleepMs(1500)
+    }
+}
+
+// widgetOf lets tab pages (typed []ui.Widget slices) hold any control —
+// the call-site parameter conversion does the template boxing.
+fn widgetOf(w: ui.Widget) -> ui.Widget {
+    return w
+}
+
+// taskRows feeds the function-model table.
+var tasks [][]string
+
+fn taskCount() -> int {
+    return len(tasks)
+}
+fn taskCell(r: int, c: int) -> string {
+    return tasks[r][c]
+}
+
+// formPage: text entry, check/slider/property bound to observables.
+fn formPage(win: *ui.Window) -> []ui.Widget {
+    var page []ui.Widget
+    page = append(page, widgetOf(ui.NewLabel("Bound form — widgets and observables stay in sync:")))
+    page = append(page, widgetOf(binding.BindTextBox(win, ui.NewTextBox(), name)))
+    page = append(page, widgetOf(binding.BindCheck(ui.NewCheckBox("Enabled", enabled.GetBool()), enabled)))
+    page = append(page, widgetOf(binding.BindSliderInt(ui.NewSliderInt(0, 100, 1, gain.GetInt()), gain)))
+    page = append(page, widgetOf(binding.BindSliderFloat(ui.NewSliderFloat(0.0, 1.0, 0.05, rate.GetFloat()), rate)))
+    page = append(page, widgetOf(binding.BindProperty(ui.NewPropertyInt("Quality", 0, 10, 1, quality.GetInt()), quality)))
+    page = append(page, widgetOf(binding.BindProgress(gain, 100)))
+    page = append(page, widgetOf(ui.NewButton("Log form values", fn() {
+        pushLog("name=" + name.Get() + " gain=" + strconv.Itoa(gain.GetInt()))
+    })))
+    return page
+}
+
+// pickPage: combo/radio/list/color pickers.
+fn pickPage() -> []ui.Widget {
+    var page []ui.Widget
+    var themes []string
+    themes = append(themes, "Ocean")
+    themes = append(themes, "Forest")
+    themes = append(themes, "Ember")
+    page = append(page, widgetOf(ui.NewLabel("Pickers:")))
+    page = append(page, widgetOf(binding.BindCombo(ui.NewComboBox(themes), quality)))
+
+    var modes []string
+    modes = append(modes, "Balanced")
+    modes = append(modes, "Performance")
+    modes = append(modes, "Quality")
+    page = append(page, widgetOf(binding.BindRadio(ui.NewRadioGroup(modes), quality)))
+
+    var items []string
+    items = append(items, "alpha")
+    items = append(items, "bravo")
+    items = append(items, "charlie")
+    items = append(items, "delta")
+    items = append(items, "echo")
+    page = append(page, widgetOf(ui.NewListBox(items, 110)))
+
+    page = append(page, widgetOf(ui.NewColorPicker(int64(0x3B82F6), true)))
+    return page
+}
+
+// dataPage: a group, a collapsible tree, and a model-driven table.
+fn dataPage() -> []ui.Widget {
+    var page []ui.Widget
+    grp := ui.NewGroup("System info", 90)
+    grp.Add(ui.NewLabel("Toolkit: SDL2 + Nuklear (immediate mode)"))
+    grp.Add(ui.NewLabel("Bindings: two-way via Observable"))
+    grp.Add(ui.NewLabel("Layout: rows; containers self-manage"))
+    page = append(page, widgetOf(grp))
+
+    tree := ui.NewTreeNode("Details (click to expand)")
+    tree.Add(ui.NewLabel("  Window: per-frame redraw"))
+    tree.Add(ui.NewLabel("  State: pooled in C shim"))
+    tree.Add(ui.NewLabel("  Events: polled per frame"))
+    page = append(page, widgetOf(tree))
+
+    var hdrs []string
+    hdrs = append(hdrs, "Task")
+    hdrs = append(hdrs, "Owner")
+    hdrs = append(hdrs, "Status")
+    page = append(page, widgetOf(ui.NewTable(hdrs, binding.FromFunc(taskCount, taskCell), 130)))
+    return page
+}
+
+// livePage: clicks, log pushes, and the channel-fed event log.
+fn livePage() -> []ui.Widget {
+    var page []ui.Widget
+    page = append(page, widgetOf(binding.BindLabel(clicksText)))
+    page = append(page, widgetOf(ui.NewButton("Click me", onClick)))
+    page = append(page, widgetOf(ui.NewButton("Log event", fn() {
+        pushLog("button event")
+    })))
+    var logHdr []string
+    logHdr = append(logHdr, "Event log (channel-fed)")
+    page = append(page, widgetOf(ui.NewTable(logHdr, binding.FromChan(eventLog), 240)))
+    return page
+}
+
+fn main() -> int {
+    win := ui.NewWindow("Skink UI Controls", 720, 780, ui.WIN_RESIZABLE)
+    if !win.IsValid() {
+        io.PrintErrorLine("ui_controls: no video driver — cannot open window")
+        return 1
+    }
+
+    // ---- Menubar: File>Quit, Help>About popup --------------------------
+    about := ui.NewPopup("About", 300, 130)
+    about.Add(ui.NewLabel("Skink UI Controls"))
+    about.Add(ui.NewLabel("SDL2 + Nuklear backend"))
+    about.Add(ui.NewButton("Close", fn() { about.Show = false }))
+    win.Add(about)
+
+    bar := ui.NewMenuBar()
+    var fileItems []ui.MenuItem
+    fileItems = append(fileItems, ui.NewMenuItem("Quit", fn() { win.RequestClose() }))
+    bar.AddMenu("File", fileItems)
+    var helpItems []ui.MenuItem
+    helpItems = append(helpItems, ui.NewMenuItem("About", fn() { about.Show = true }))
+    bar.AddMenu("Help", helpItems)
+    win.SetMenuBar(bar)
+
+    // Seed the task table.
+    var t0 []string
+    t0 = append(t0, "compile")
+    t0 = append(t0, "skink")
+    t0 = append(t0, "running")
+    var t1 []string
+    t1 = append(t1, "render")
+    t1 = append(t1, "nuklear")
+    t1 = append(t1, "60fps")
+    var t2 []string
+    t2 = append(t2, "events")
+    t2 = append(t2, "sdl2")
+    t2 = append(t2, "polling")
+    tasks = append(tasks, t0)
+    tasks = append(tasks, t1)
+    tasks = append(tasks, t2)
+
+    // ---- Tabs ------------------------------------------------------------
+    tabs := ui.NewTabStrip()
+    tabs.AddTab("Form", formPage(&win))
+    tabs.AddTab("Pickers", pickPage())
+    tabs.AddTab("Data", dataPage())
+    tabs.AddTab("Live", livePage())
+    win.Add(tabs)
+
+    // Background writer for the channel-fed log.
+    spawn logWorker()
+
+    // Custom frame loop: retained widgets via Draw(), plus an
+    // immediate-mode status row at the bottom.
+    for win.BeginFrame() {
+        win.Draw()
+        ui.Row(&win, 22, 2)
+        ui.Label(&win, "Ready — " + name.Get())
+        ui.LabelColored(&win, strconv.Itoa(clickCount) + " clicks", 90, 200, 120)
+        win.EndFrame()
+    }
+
+    // Stop the worker cleanly — the channel is buffered so this send
+    // never blocks even while the worker is asleep.
+    workerStop <- 1
+    win.Destroy()
+    return 0
+}

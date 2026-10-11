@@ -1,0 +1,13 @@
+// libmain.skink — fixture for comp_error.md #116: a library module that
+// still carries its own `fn main`. Importing it into a test binary must
+// not emit a second @_skink_main.
+module libmain
+
+pub fn Value() -> int {
+    return 42
+}
+
+fn main() -> int {
+    print("libmain standalone entry")
+    return 0
+}

@@ -1,0 +1,5 @@
+// expect: undefined variable
+module main
+fn main() -> int {
+    return doesNotExist
+}

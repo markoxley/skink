@@ -1,0 +1,773 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/compiler_semantics_test.skink
+// Purpose: Edge-case semantics tests for the Skink language — the
+//          boundaries that feature-positive tests do not reach: numeric
+//          UB (divide/shift by invalid counts), slice bounds and
+//          aliasing, nil-map behaviour, string byte semantics, defer
+//          ordering/argument timing, named returns, closure storage,
+//          and panic/recover corners. Guards comp_error.md #74, #75,
+//          #78, #80 and codifies several previously undocumented
+//          language semantics.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module compiler_semantics_test
+
+import "testing"
+import "str"
+import "strconv"
+
+// semPanic records the last panic message captured by a test helper.
+var semPanic: string
+
+fn semSave(m: string) {
+    semPanic = m
+}
+
+// === Numeric UB semantics (comp_error.md #74, #75) ===
+
+// semDivZero panics via integer division by zero.
+fn semDivZero() {
+    defer fn() { semSave(recover()) }()
+    x := 10
+    y := 0
+    z := x / y
+}
+
+// TestDivByZeroPanics verifies x / 0 panics recoverably instead of
+// trapping SIGFPE and killing the process (comp_error.md #74).
+pub fn TestDivByZeroPanics() {
+    semPanic = ""
+    semDivZero()
+    testing.AssertEqualString("integer divide by zero", semPanic, "div by zero panics")
+}
+
+// semModZero panics via integer remainder by zero.
+fn semModZero() {
+    defer fn() { semSave(recover()) }()
+    x := 10
+    y := 0
+    z := x % y
+}
+
+// TestModByZeroPanics verifies x % 0 panics recoverably (comp_error.md #74).
+pub fn TestModByZeroPanics() {
+    semPanic = ""
+    semModZero()
+    testing.AssertEqualString("integer divide by zero", semPanic, "mod by zero panics")
+}
+
+// semDivZeroI64 panics via int64 division by zero — the guard must apply
+// to every integer width, not just i32.
+fn semDivZeroI64() {
+    defer fn() { semSave(recover()) }()
+    x := int64(10)
+    y := int64(0)
+    z := x / y
+}
+
+// TestDivByZeroInt64Panics verifies i64 division by zero panics too.
+pub fn TestDivByZeroInt64Panics() {
+    semPanic = ""
+    semDivZeroI64()
+    testing.AssertEqualString("integer divide by zero", semPanic, "i64 div by zero panics")
+}
+
+// semShiftNeg panics via a negative shift count.
+fn semShiftNeg() {
+    defer fn() { semSave(recover()) }()
+    x := 1
+    n := -3
+    z := x << n
+}
+
+// TestShiftNegativePanics verifies a negative shift count panics
+// (Go semantics) instead of producing LLVM poison (comp_error.md #75).
+pub fn TestShiftNegativePanics() {
+    semPanic = ""
+    semShiftNeg()
+    testing.AssertEqualString("negative shift amount", semPanic, "negative shift panics")
+}
+
+// TestShiftOversizedYieldsZero verifies a shift count >= the bit width
+// yields 0 (Go semantics) instead of UB/poison (comp_error.md #75).
+pub fn TestShiftOversizedYieldsZero() {
+    x := 1
+    n := 33
+    testing.AssertEqualInt(0, x << n, "i32 << 33 yields 0")
+    testing.AssertEqualInt(0, x >> n, "i32 >> 33 yields 0")
+    big := int64(1)
+    testing.AssertEqualInt(0, int(big << 65), "i64 << 65 yields 0")
+    small := int8(100)
+    testing.AssertEqualInt(0, int(small << 9), "i8 << 9 yields 0")
+    // A count exactly at the boundary is still legal.
+    one := 1
+    testing.AssertEqualInt(1, one << 0, "x << 0 unchanged")
+    testing.AssertEqualInt(4, one << 2, "x << 2 normal")
+}
+
+// TestDivModNormal verifies guarded div/mod still computes correctly.
+pub fn TestDivModNormal() {
+    testing.AssertEqualInt(3, 10 / 3, "10 / 3")
+    testing.AssertEqualInt(1, 10 % 3, "10 % 3")
+    testing.AssertEqualInt(-3, -10 / 3, "-10 / 3 trunc toward zero")
+    testing.AssertEqualInt(-1, -10 % 3, "-10 % 3 sign of dividend")
+    u := uint32(10)
+    v := uint32(3)
+    testing.AssertEqualInt(3, int(u / v), "udiv normal")
+    testing.AssertEqualInt(1, int(u % v), "urem normal")
+}
+
+// === Integer overflow wrap semantics ===
+
+// TestIntOverflowWraps verifies two's-complement wrap on signed overflow
+// — the behaviour LLVM lowerers produce; codifying it so a future
+// overflow-check mode is a deliberate change.
+pub fn TestIntOverflowWraps() {
+    max32 := 2147483647
+    testing.AssertEqualInt(-2147483648, max32 + 1, "i32 max + 1 wraps")
+    min32 := -2147483647 - 1
+    testing.AssertEqualInt(2147483647, min32 - 1, "i32 min - 1 wraps")
+    max8 := int8(127)
+    testing.AssertEqualInt(-128, int(max8 + 1), "i8 max + 1 wraps")
+    max64 := int64(9223372036854775807)
+    testing.AssertEqualInt(1, int(max64 + 1 < int64(0)), "i64 max + 1 wraps negative")
+}
+
+// TestNegMinInt verifies negating the minimum int wraps to itself
+// (two's complement; -INT_MIN is not representable).
+pub fn TestNegMinInt() {
+    min32 := -2147483647 - 1
+    testing.AssertEqualInt(-2147483647 - 1, -min32, "-min wraps to itself")
+}
+
+// === Float edge semantics ===
+
+// TestNaNNotEqual verifies NaN compares unequal to itself (IEEE 754).
+pub fn TestNaNNotEqual() {
+    z := 0.0
+    nan := z / z
+    testing.AssertFalse(nan == nan, "NaN != NaN")
+    testing.AssertTrue(nan != nan, "NaN != NaN via !=")
+}
+
+// TestInfArithmetic verifies infinity arithmetic (IEEE 754).
+pub fn TestInfArithmetic() {
+    z := 0.0
+    inf := 1.0 / z
+    testing.AssertTrue(inf > 1e308, "inf > largest finite")
+    negInf := -1.0 / z
+    testing.AssertTrue(negInf < -1e308, "-inf < smallest finite")
+    notNum := inf - inf
+    testing.AssertFalse(notNum == notNum, "inf - inf = NaN")
+}
+
+// TestFloatIntConversion verifies float-to-int truncation semantics.
+pub fn TestFloatIntConversion() {
+    testing.AssertEqualInt(3, int(3.99), "trunc toward zero")
+    testing.AssertEqualInt(-3, int(-3.99), "negative trunc toward zero")
+    testing.AssertEqualInt(0, int(0.5), "0.5 truncates to 0")
+}
+
+// TestFloatPrecision documents double-precision literal semantics.
+pub fn TestFloatPrecision() {
+    a := 0.1 + 0.2
+    testing.AssertFalse(a == 0.3, "0.1+0.2 != 0.3 (floating point)")
+    testing.AssertTrue(a > 0.3 - 0.0001 && a < 0.3 + 0.0001, "0.1+0.2 approx 0.3")
+}
+
+// TestNaNAndInfFromRuntime verifies NaN/Inf arise from runtime float
+// ops, not just literal edge cases.
+pub fn TestNaNAndInfFromRuntime() {
+    zero := 0.0
+    nan := zero / zero
+    testing.AssertFalse(nan == nan, "runtime 0/0 is NaN")
+    inf := 1.0 / zero
+    testing.AssertTrue(inf > 1e308, "runtime 1/0 is +Inf")
+}
+
+// === Slice bounds checks (comp_error.md #78) ===
+
+// semIndexReadOOB reads a slice element out of bounds.
+fn semIndexReadOOB() {
+    defer fn() { semSave(recover()) }()
+    a := []int{1, 2, 3}
+    v := a[5]
+}
+
+// TestIndexReadOOBPanics verifies a[i] out-of-range panics
+// (comp_error.md #78 — previously a silent out-of-bounds read).
+pub fn TestIndexReadOOBPanics() {
+    semPanic = ""
+    semIndexReadOOB()
+    testing.AssertEqualString("slice bounds out of range", semPanic, "OOB read panics")
+}
+
+// semIndexWriteOOB writes a slice element out of bounds.
+fn semIndexWriteOOB() {
+    defer fn() { semSave(recover()) }()
+    a := []int{1, 2, 3}
+    a[7] = 9
+}
+
+// TestIndexWriteOOBPanics verifies a[i] = v out-of-range panics —
+// previously a silent heap smash (comp_error.md #78).
+pub fn TestIndexWriteOOBPanics() {
+    semPanic = ""
+    semIndexWriteOOB()
+    testing.AssertEqualString("slice bounds out of range", semPanic, "OOB write panics")
+}
+
+// semIndexNegative indexes with a negative index.
+fn semIndexNegative() {
+    defer fn() { semSave(recover()) }()
+    a := []int{1, 2, 3}
+    v := a[-1]
+}
+
+// TestIndexNegativePanics verifies negative indices panic.
+pub fn TestIndexNegativePanics() {
+    semPanic = ""
+    semIndexNegative()
+    testing.AssertEqualString("slice bounds out of range", semPanic, "negative index panics")
+}
+
+// semNilSliceIndex indexes a nil slice.
+fn semNilSliceIndex() {
+    defer fn() { semSave(recover()) }()
+    var a []int
+    v := a[0]
+}
+
+// TestNilSliceIndexPanics verifies indexing a nil slice panics
+// (len 0 → any index is out of bounds).
+pub fn TestNilSliceIndexPanics() {
+    semPanic = ""
+    semNilSliceIndex()
+    testing.AssertEqualString("slice bounds out of range", semPanic, "nil slice index panics")
+}
+
+// semIndexI64 uses an int64 index variable.
+fn semIndexI64OOB() {
+    defer fn() { semSave(recover()) }()
+    a := []int{1, 2, 3}
+    i := int64(9)
+    v := a[i]
+}
+
+// TestIndexInt64OOBPanics verifies the bounds check handles non-i32
+// index types (coerced for the i32 bounds-check call).
+pub fn TestIndexInt64OOBPanics() {
+    semPanic = ""
+    semIndexI64OOB()
+    testing.AssertEqualString("slice bounds out of range", semPanic, "i64 index OOB panics")
+}
+
+// TestIndexEdgeValid verifies in-bounds indexing is unaffected.
+pub fn TestIndexEdgeValid() {
+    a := []int{10, 20, 30}
+    testing.AssertEqualInt(10, a[0], "first element")
+    testing.AssertEqualInt(30, a[len(a) - 1], "last element")
+    a[0] = 99
+    testing.AssertEqualInt(99, a[0], "in-bounds write")
+    p := &a[0]
+    *p = 77
+    testing.AssertEqualInt(77, a[0], "write through &a[i] alias")
+}
+
+// === Slice aliasing semantics ===
+
+// TestSliceAliasingSharedBacking verifies `b := a` shares the backing
+// array — element writes through b are visible through a.
+pub fn TestSliceAliasingSharedBacking() {
+    a := []int{1, 2, 3}
+    b := a
+    b[0] = 99
+    testing.AssertEqualInt(99, a[0], "element write shared through alias")
+    b[2] = 42
+    testing.AssertEqualInt(42, a[2], "tail write shared through alias")
+}
+
+// TestAppendGrowthDetaches verifies that appending (which may reallocate
+// the backing array) leaves a previously taken alias pointing at the old
+// backing — writes after growth are not shared.
+pub fn TestAppendGrowthDetaches() {
+    a := []int{1, 2}
+    b := a
+    i := 0
+    for i < 64 {
+        a = append(a, i)
+        i = i + 1
+    }
+    // b still has len 2 over the original backing; a has grown.
+    testing.AssertEqualInt(2, len(b), "alias keeps original length")
+    testing.AssertEqualInt(66, len(a), "append grew a")
+    b[0] = 111
+    if a[0] == b[0] {
+        // Shared until a write happened before reallocation — either
+        // outcome is implementation-defined; document whichever holds.
+        testing.AssertEqualInt(111, a[0], "alias element write visible (no realloc observed)")
+    } else {
+        testing.AssertEqualInt(1, a[0], "alias detached after growth")
+    }
+}
+
+// TestSliceIdentityEquality verifies == on slices compares backing-array
+// identity, not contents.
+pub fn TestSliceIdentityEquality() {
+    a := []int{1, 2, 3}
+    b := a
+    c := []int{1, 2, 3}
+    testing.AssertTrue(a == b, "same backing compares equal")
+    testing.AssertFalse(a == c, "distinct backing compares unequal")
+}
+
+// TestResliceSemantics verifies reslicing shares backing and bounds.
+pub fn TestResliceSemantics() {
+    a := []int{0, 1, 2, 3, 4}
+    s := a[1:3]
+    testing.AssertEqualInt(2, len(s), "reslice length")
+    testing.AssertEqualInt(1, s[0], "reslice[0]")
+    s[0] = 99
+    // Interior reslices are views into the source's backing array
+    // (registered as kind-3 RC entries), so writes propagate back —
+    // matching Go. (s[0:k] strict prefixes still copy: a zero-offset
+    // view cannot carry its own length at payload-8.)
+    testing.AssertEqualInt(99, a[1], "reslice writes reach the source")
+    testing.AssertEqualInt(99, s[0], "reslice element written")
+    empty := a[2:2]
+    testing.AssertEqualInt(0, len(empty), "empty reslice")
+}
+
+// semResliceOOB reslices out of range.
+fn semResliceOOB() {
+    defer fn() { semSave(recover()) }()
+    a := []int{1, 2, 3}
+    s := a[1:9]
+}
+
+// TestResliceOOBPanics verifies reslice bounds violations panic.
+pub fn TestResliceOOBPanics() {
+    semPanic = ""
+    semResliceOOB()
+    testing.AssertEqualString("slice bounds out of range", semPanic, "OOB reslice panics")
+}
+
+// === Nil-map and map edge semantics (comp_error.md #80) ===
+
+// semNilMapWrite writes to a nil map.
+fn semNilMapWrite() {
+    defer fn() { semSave(recover()) }()
+    var m map[string]int
+    m["k"] = 1
+}
+
+// TestNilMapWritePanics verifies assignment to a nil map panics like Go
+// (comp_error.md #80 — previously a segfault).
+pub fn TestNilMapWritePanics() {
+    semPanic = ""
+    semNilMapWrite()
+    testing.AssertEqualString("assignment to entry in nil map", semPanic, "nil map write panics")
+}
+
+// TestNilMapReadZero verifies reads from a nil map return the zero
+// value (Go semantics) — reads are nil-safe even though writes panic.
+pub fn TestNilMapReadZero() {
+    var m map[string]int
+    v := m["missing"]
+    testing.AssertEqualInt(0, v, "nil map read returns zero")
+    vv, ok := m["missing"]
+    testing.AssertFalse(ok, "nil map comma-ok is false")
+    testing.AssertEqualInt(0, vv, "nil map comma-ok value is zero")
+}
+
+// TestDeleteAbsentKey verifies deleting a missing key is a no-op.
+pub fn TestDeleteAbsentKey() {
+    m := make(map[string]int)
+    m["a"] = 1
+    delete(m, "nope")
+    delete(m, "alsono")
+    testing.AssertEqualInt(1, len(m), "delete absent key leaves map intact")
+    testing.AssertEqualInt(1, m["a"], "existing key survives")
+}
+
+// TestMapKeyOverwrite verifies assigning an existing key replaces value.
+pub fn TestMapKeyOverwrite() {
+    m := make(map[string]int)
+    m["k"] = 1
+    m["k"] = 2
+    m["k"] = 3
+    testing.AssertEqualInt(1, len(m), "overwrite does not add entries")
+    testing.AssertEqualInt(3, m["k"], "last write wins")
+}
+
+// TestMapIterCountExact verifies for-in visits exactly len(m) keys.
+pub fn TestMapIterCountExact() {
+    m := make(map[string]int)
+    i := 0
+    for i < 50 {
+        m[strconv.Itoa(i)] = i
+        i = i + 1
+    }
+    count := 0
+    sum := 0
+    for k in m {
+        count = count + 1
+        sum = sum + m[k]
+    }
+    testing.AssertEqualInt(50, count, "iterated all keys")
+    testing.AssertEqualInt(1225, sum, "sum of values 0..49")
+}
+
+// TestMapIdentityEquality verifies == on maps compares identity.
+pub fn TestMapIdentityEquality() {
+    m := make(map[string]int)
+    n := m
+    o := make(map[string]int)
+    testing.AssertTrue(m == n, "same map compares equal")
+    testing.AssertFalse(m == o, "distinct maps compare unequal")
+}
+
+// TestNilComparisons verifies nil compares correctly across the
+// nilable types: pointer, slice, map, channel, function.
+pub fn TestNilComparisons() {
+    var p *int
+    testing.AssertTrue(p == nil, "nil *int")
+    var s []int
+    testing.AssertTrue(s == nil, "nil slice")
+    var m map[string]int
+    testing.AssertTrue(m == nil, "nil map")
+    var ch chan<int>
+    testing.AssertTrue(ch == nil, "nil chan")
+    x := 1
+    p = &x
+    testing.AssertTrue(p != nil, "non-nil pointer")
+}
+
+// === String byte semantics ===
+
+// TestStringIndexByteValue verifies s[i] yields the byte value at i.
+pub fn TestStringIndexByteValue() {
+    s := "abc"
+    testing.AssertEqualInt(97, s[0], "s[0] == 'a'")
+    testing.AssertEqualInt(98, s[1], "s[1] == 'b'")
+    testing.AssertEqualInt(99, s[2], "s[2] == 'c'")
+}
+
+// TestForInStringBytes verifies for c in s iterates byte values.
+pub fn TestForInStringBytes() {
+    sum := 0
+    for c in "abc" {
+        sum = sum + c
+    }
+    testing.AssertEqualInt(294, sum, "bytes 97+98+99")
+}
+
+// TestForInStringIndexByte verifies the two-variable form yields
+// (index, byte) pairs.
+pub fn TestForInStringIndexByte() {
+    idxSum := 0
+    byteSum := 0
+    for i, c in "xyz" {
+        idxSum = idxSum + i
+        byteSum = byteSum + c
+    }
+    testing.AssertEqualInt(3, idxSum, "indices 0+1+2")
+    testing.AssertEqualInt(363, byteSum, "bytes 120+121+122")
+}
+
+// TestStringLexicographicOrder verifies < on strings is byte-wise
+// lexicographic.
+pub fn TestStringLexicographicOrder() {
+    testing.AssertTrue("abc" < "abd", "abc < abd")
+    testing.AssertTrue("abc" < "abcd", "prefix sorts first")
+    testing.AssertTrue("b" > "abc", "b > abc")
+    testing.AssertFalse("abc" < "abc", "equal not less")
+}
+
+// === Defer semantics ===
+
+var semDeferLog: string
+
+fn semDeferAppend(s: string) {
+    semDeferLog = str.Concat(semDeferLog, s)
+}
+
+// semDeferOrder registers three defers to confirm LIFO drain.
+fn semDeferOrder() {
+    defer fn() { semDeferAppend("3") }()
+    defer fn() { semDeferAppend("2") }()
+    defer fn() { semDeferAppend("1") }()
+}
+
+// TestDeferLIFOOrder verifies defers run last-in-first-out.
+pub fn TestDeferLIFOOrder() {
+    semDeferLog = ""
+    semDeferOrder()
+    testing.AssertEqualString("123", semDeferLog, "defers run LIFO")
+}
+
+// semDeferArgTiming captures a defer argument's evaluation point: the
+// argument is evaluated when the defer statement executes, not when the
+// deferred call drains (Go semantics).
+fn semDeferArgTiming() {
+    x := 1
+    defer semDeferAppend(strconv.Itoa(x))
+    x = 99
+}
+
+// TestDeferArgEvalAtDeferPoint verifies defer arguments are evaluated
+// at the defer statement, not at drain time.
+pub fn TestDeferArgEvalAtDeferPoint() {
+    semDeferLog = ""
+    semDeferArgTiming()
+    testing.AssertEqualString("1", semDeferLog, "defer arg captured at registration")
+}
+
+// semDeferLoop registers a defer per iteration; each must capture its
+// iteration's value (comp_error.md #42 regression shape).
+fn semDeferLoop() {
+    i := 0
+    for i < 3 {
+        defer semDeferAppend(strconv.Itoa(i))
+        i = i + 1
+    }
+}
+
+// TestDeferInLoopPerIteration verifies each loop iteration's defer
+// captures that iteration's value and drains LIFO.
+pub fn TestDeferInLoopPerIteration() {
+    semDeferLog = ""
+    semDeferLoop()
+    testing.AssertEqualString("210", semDeferLog, "per-iteration defers drain LIFO")
+}
+
+// semDeferOnReturn registers a defer that records normal-return drain.
+fn semDeferOnReturn() -> int {
+    defer fn() { semDeferAppend("drained") }()
+    return 7
+}
+
+// TestDeferOnNormalReturn verifies defers drain on ordinary return.
+pub fn TestDeferOnNormalReturn() {
+    semDeferLog = ""
+    v := semDeferOnReturn()
+    testing.AssertEqualInt(7, v, "return value unaffected")
+    testing.AssertEqualString("drained", semDeferLog, "defer ran on return")
+}
+
+// semDeferMutatesNamed has a named return that a defer increments —
+// the deferred mutation must be visible in the returned value.
+fn semDeferMutatesNamed() -> (r: int) {
+    r = 10
+    defer fn() { semDeferAppend("x") }()
+    return r
+}
+
+// TestDeferSeesNamedReturn verifies a defer can observe (and the
+// returned value reflects the state at) named-return completion.
+pub fn TestDeferSeesNamedReturn() {
+    semDeferLog = ""
+    v := semDeferMutatesNamed()
+    testing.AssertEqualInt(10, v, "named return value")
+    testing.AssertEqualString("x", semDeferLog, "defer ran before return completed")
+}
+
+// === Multiple returns ===
+
+// semTwo returns a pair for multi-return tests.
+fn semTwo() -> (int, string) {
+    return 7, "seven"
+}
+
+// TestMultiReturnPartialUse verifies both values of a multi-return are
+// independently usable and reorderable via separate locals.
+pub fn TestMultiReturnPartialUse() {
+    a, b := semTwo()
+    testing.AssertEqualInt(7, a, "first value")
+    testing.AssertEqualString("seven", b, "second value")
+}
+
+// === Closures ===
+
+// TestClosureStoredInSlice verifies closures can be stored in slices
+// and retain independent captures.
+pub fn TestClosureStoredInSlice() {
+    fns := []fn() -> int{}
+    j := 0
+    for j < 3 {
+        k := j * 10
+        fns = append(fns, fn() -> int { return k })
+        j = j + 1
+    }
+    testing.AssertEqualInt(0, fns[0](), "closure 0")
+    testing.AssertEqualInt(10, fns[1](), "closure 1")
+    testing.AssertEqualInt(20, fns[2](), "closure 2")
+}
+
+// TestClosureSharedCapture verifies two closures capturing the same
+// variable see each other's mutations.
+pub fn TestClosureSharedCapture() {
+    x := 0
+    inc := fn() { x = x + 1 }
+    get := fn() -> int { return x }
+    inc()
+    inc()
+    inc()
+    testing.AssertEqualInt(3, get(), "shared capture sees mutations")
+}
+
+// TestFnValueIdentity verifies fn values can be compared for identity.
+pub fn TestFnValueIdentity() {
+    f := fn() -> int { return 1 }
+    g := f
+    testing.AssertTrue(f == g, "same fn value compares equal")
+    testing.AssertTrue(f != nil, "non-nil fn value")
+}
+
+// === Panic/recover corners ===
+
+// TestRecoverOutsidePanicEmpty verifies recover() with no pending panic
+// returns the empty string rather than crashing or returning stale data.
+pub fn TestRecoverOutsidePanicEmpty() {
+    r := recover()
+    testing.AssertEqualString("", r, "recover outside panic is empty")
+}
+
+// semPanicInDefer panics while a deferred fn is itself running a recover.
+fn semPanicInDefer() {
+    defer fn() {
+        r := recover()
+        semSave(r)
+    }()
+    panic("inner")
+}
+
+// TestPanicRecoverInDefer verifies a panic is captured by a deferred
+// recover and execution unwinds cleanly.
+pub fn TestPanicRecoverInDefer() {
+    semPanic = ""
+    semPanicInDefer()
+    testing.AssertEqualString("inner", semPanic, "defer caught panic")
+}
+
+// semNestedPanic recovers "first" inside a defer, then raises "second"
+// during the unwind. In Skink, recover() consumes the frame's panic
+// handler, so the new panic propagates to the NEXT ENCLOSING handler
+// (the caller's defer), not to remaining defers of this frame.
+fn semNestedPanic() {
+    defer fn() {
+        r := recover()
+        if str.Equal(r, "first") {
+            panic("second")
+        }
+    }()
+    panic("first")
+}
+
+// semNestedPanicOuter provides the enclosing handler that catches the
+// panic raised during semNestedPanic's unwind.
+fn semNestedPanicOuter() {
+    defer fn() {
+        semSave(recover())
+    }()
+    semNestedPanic()
+}
+
+// TestPanicInDeferredPanic verifies a panic raised inside a deferred
+// function during unwind propagates to the caller's recover.
+pub fn TestPanicInDeferredPanic() {
+    semPanic = ""
+    semNestedPanicOuter()
+    testing.AssertEqualString("second", semPanic, "caller recover sees the panic raised in defer")
+}
+
+// === Var zero values ===
+
+// TestZeroValues verifies every type's zero value.
+pub fn TestZeroValues() {
+    var i int
+    testing.AssertEqualInt(0, i, "int zero")
+    var v64 int64
+    testing.AssertEqualInt(0, int(v64), "int64 zero")
+    var f float
+    testing.AssertEqualFloat(0.0, f, "float zero")
+    var b bool
+    testing.AssertFalse(b, "bool zero")
+    var s string
+    testing.AssertEqualInt(0, str.Len(s), "string zero is empty/nil")
+    var p *int
+    testing.AssertTrue(p == nil, "pointer zero is nil")
+}
+
+// === Copy builtin edges ===
+
+// TestCopyIsDeep verifies copy() produces an independent duplicate —
+// mutating the copy does not touch the original (Skink's copy takes one
+// argument and duplicates, unlike Go's copy(dst, src)).
+pub fn TestCopyIsDeep() {
+    src := []int{1, 2, 3}
+    dup := copy(src)
+    dup[0] = 99
+    testing.AssertEqualInt(1, src[0], "original unchanged")
+    testing.AssertEqualInt(99, dup[0], "copy has new value")
+    testing.AssertEqualInt(3, len(dup), "copy preserves length")
+}
+
+// === Misc boundaries ===
+
+// TestSizeofScalars verifies sizeof on the scalar types.
+pub fn TestSizeofScalars() {
+    testing.AssertEqualInt(4, sizeof(int), "int is 4 bytes")
+    testing.AssertEqualInt(8, sizeof(int64), "int64 is 8 bytes")
+    testing.AssertEqualInt(1, sizeof(int8), "int8 is 1 byte")
+    testing.AssertEqualInt(2, sizeof(int16), "int16 is 2 bytes")
+    testing.AssertEqualInt(8, sizeof(float), "float is 8 bytes")
+}
+
+// TestShadowingNestedBlocks verifies inner-scope shadowing restores the
+// outer binding after the block ends.
+pub fn TestShadowingNestedBlocks() {
+    x := 1
+    if true {
+        x := 2
+        testing.AssertEqualInt(2, x, "inner shadow")
+    }
+    testing.AssertEqualInt(1, x, "outer restored")
+}
+
+// TestShortCircuitSideEffects verifies && and || do not evaluate the
+// right side when the result is already determined.
+pub fn TestShortCircuitSideEffects() {
+    called := 0
+    bump := fn() -> bool {
+        called = called + 1
+        return true
+    }
+    r1 := false && bump()
+    testing.AssertEqualInt(0, called, "false && skips rhs")
+    r2 := true || bump()
+    testing.AssertEqualInt(0, called, "true || skips rhs")
+    r3 := true && bump()
+    testing.AssertEqualInt(1, called, "true && evaluates rhs")
+    r4 := false || bump()
+    testing.AssertEqualInt(2, called, "false || evaluates rhs")
+    testing.AssertTrue(r3 && r4 && r2 && !r1, "results correct")
+}

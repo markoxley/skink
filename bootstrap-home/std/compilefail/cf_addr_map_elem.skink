@@ -1,0 +1,8 @@
+// expect: cannot take the address of a map element
+module main
+fn main() -> int {
+    m := make(map[string]int)
+    m["a"] = 1
+    p := &m["a"]
+    return 0
+}

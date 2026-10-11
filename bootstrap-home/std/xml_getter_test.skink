@@ -1,0 +1,51 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/xml_getter_test.skink
+// Purpose: Tests for XML getters: GetElement/Tag/Text/Children/Attr.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module xml_getter_test
+
+import "testing"
+import "std/xml"
+
+// TestGetElement verifies XML GetElement finds element by tag name.
+pub fn TestGetElement() {
+    doc, err := xml.Unmarshal("<root><item id=\"1\">hello</item></root>")
+    testing.AssertTrue(err.message == "", "unmarshal ok")
+    item := xml.GetElement(doc, "item")
+    testing.AssertEqualString("item", item.Tag(), "found item tag")
+    testing.AssertEqualString("hello", item.Text(), "item text")
+    testing.AssertEqualString("1", item.Attr("id"), "item attr")
+}
+
+// TestGetElementMissing verifies GetElement returns empty for missing tag.
+pub fn TestGetElementMissing() {
+    doc, _ := xml.Unmarshal("<root></root>")
+    item := xml.GetElement(doc, "nope")
+    testing.AssertEqualString("", item.Tag(), "missing element -> empty tag")
+}
+
+// TestChildren verifies XML Children returns child elements.
+pub fn TestChildren() {
+    doc, _ := xml.Unmarshal("<root><a/><b/></root>")
+    kids := doc.Children()
+    testing.AssertEqualInt(2, len(kids), "two children")
+}

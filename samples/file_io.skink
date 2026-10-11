@@ -1,0 +1,132 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/file_io.skink
+// Purpose: Demonstrates file reading, writing, appending, and metadata.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/fs"
+import "std/io"
+import "std/path"
+import "std/str"
+import "std/strconv"
+import "std/fmt"
+
+pub fn main() {
+    io.PrintLine("=== File I/O Demo ===")
+    io.PrintLine("")
+
+    // --- Write a file ---
+    io.PrintLine("--- Writing a file ---")
+    testFile := "/tmp/skink_demo.txt"
+    content := "Hello from Skink!\nThis is a test file.\nLine 3 of content.\n"
+    wErr := fs.WriteAll(testFile, content)
+    if wErr.message != "" {
+        io.PrintErrorLine("Write error: " + wErr.message)
+        return
+    }
+    io.PrintLine("Wrote " + strconv.Itoa(str.Len(content)) + " bytes to " + testFile)
+    io.PrintLine("")
+
+    // --- Read the file back ---
+    io.PrintLine("--- Reading the file ---")
+    data, rErr := fs.ReadAll(testFile)
+    if rErr.message != "" {
+        io.PrintErrorLine("Read error: " + rErr.message)
+        return
+    }
+    io.PrintLine("File contents:")
+    io.PrintLine(data)
+    io.PrintLine("")
+
+    // --- Append to the file ---
+    io.PrintLine("--- Appending to the file ---")
+    appendContent := "Appended line.\n"
+    aErr := fs.AppendAll(testFile, appendContent)
+    if aErr.message != "" {
+        io.PrintErrorLine("Append error: " + aErr.message)
+        return
+    }
+    io.PrintLine("Appended " + strconv.Itoa(str.Len(appendContent)) + " bytes")
+    io.PrintLine("")
+
+    // --- File metadata ---
+    io.PrintLine("--- File Metadata ---")
+    info, sErr := fs.Stat(testFile)
+    if sErr.message != "" {
+        io.PrintErrorLine("Stat error: " + sErr.message)
+        return
+    }
+    io.PrintLine("Name: " + info.Name)
+    io.PrintLine("Size: " + strconv.Itoa64(info.Size) + " bytes")
+    io.PrintLine("Is directory: " + fmt.Btoa(info.IsDir))
+    io.PrintLine("")
+
+    // --- Check existence and remove ---
+    io.PrintLine("--- Cleanup ---")
+    exists := fs.Exists(testFile)
+    io.PrintLine("File exists: " + fmt.Btoa(exists))
+
+    rmErr := fs.Remove(testFile)
+    if rmErr.message != "" {
+        io.PrintErrorLine("Remove error: " + rmErr.message)
+        return
+    }
+    io.PrintLine("File removed")
+
+    exists = fs.Exists(testFile)
+    io.PrintLine("File exists after removal: " + fmt.Btoa(exists))
+    io.PrintLine("")
+
+    // --- Directory operations ---
+    io.PrintLine("--- Directory Operations ---")
+    dirPath := "/tmp/skink_demo_dir"
+    mkErr := fs.Mkdir(dirPath)
+    if mkErr.message != "" {
+        io.PrintErrorLine("Mkdir error: " + mkErr.message)
+    } else {
+        io.PrintLine("Created directory: " + dirPath)
+    }
+
+    // Create files in the directory
+    fs.WriteAll(path.Join([]string{dirPath, "file1.txt"}), "content1")
+    fs.WriteAll(path.Join([]string{dirPath, "file2.txt"}), "content2")
+    fs.WriteAll(path.Join([]string{dirPath, "file3.txt"}), "content3")
+
+    // List directory contents
+    entries, dErr := fs.ReadDir(dirPath)
+    if dErr.message != "" {
+        io.PrintErrorLine("ReadDir error: " + dErr.message)
+    } else {
+        io.PrintLine("Directory contents:")
+        for i := 0; i < len(entries); i = i + 1 {
+            entry := entries[i]
+            io.PrintLine("  " + entry.Name + " (dir=" + fmt.Btoa(entry.IsDir) + ")")
+        }
+    }
+
+    // Cleanup
+    fs.Remove(path.Join([]string{dirPath, "file1.txt"}))
+    fs.Remove(path.Join([]string{dirPath, "file2.txt"}))
+    fs.Remove(path.Join([]string{dirPath, "file3.txt"}))
+    fs.Remove(dirPath)
+    io.PrintLine("Directory cleaned up")
+}

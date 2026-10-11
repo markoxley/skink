@@ -1,0 +1,203 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/logic_test.skink
+// Purpose: Skink module for logic test.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module logic_test
+
+import "std/logic"
+import "std/str"
+import "std/strconv"
+import "testing"
+
+// TestAtom verifies atom creation.
+pub fn TestAtom() {
+    a := logic.Atom("hello")
+    if !a.IsAtom() {
+        Errorf("atom should be an atom")
+    }
+    if a.Name() != "hello" {
+        Errorf("atom name should be hello")
+    }
+}
+
+// TestVar verifies variable creation.
+pub fn TestVar() {
+    v := logic.Var("X")
+    if !v.IsVariable() {
+        Errorf("var should be a variable")
+    }
+    if v.Name() != "X" {
+        Errorf("var name should be X")
+    }
+}
+
+// TestCompound verifies compound term creation.
+pub fn TestCompound() {
+    args := []logic.Term{logic.Atom("a"), logic.Atom("b")}
+    c := logic.Compound("f", args)
+    if !c.IsCompound() {
+        Errorf("compound should be a compound")
+    }
+    if c.Name() != "f" {
+        Errorf("compound functor should be f")
+    }
+    if len(c.Args()) != 2 {
+        Errorf("compound should have 2 args")
+    }
+}
+
+// TestUnifyAtoms verifies that identical atoms unify.
+pub fn TestUnifyAtoms() {
+    binding := make(map[string]logic.Term)
+    if !logic.Unify(logic.Atom("a"), logic.Atom("a"), binding) {
+        Errorf("identical atoms should unify")
+    }
+}
+
+// TestUnifyAtomsFail verifies that different atoms don't unify.
+pub fn TestUnifyAtomsFail() {
+    binding := make(map[string]logic.Term)
+    if logic.Unify(logic.Atom("a"), logic.Atom("b"), binding) {
+        Errorf("different atoms should not unify")
+    }
+}
+
+// TestUnifyVarAtom verifies that a variable unifies with an atom.
+pub fn TestUnifyVarAtom() {
+    binding := make(map[string]logic.Term)
+    if !logic.Unify(logic.Var("X"), logic.Atom("hello"), binding) {
+        Errorf("variable should unify with atom")
+    }
+    val := logic.Lookup(binding, "X")
+    if val.Name() != "hello" {
+        Errorf("X should be bound to hello")
+    }
+}
+
+// TestUnifyCompound verifies compound term unification.
+pub fn TestUnifyCompound() {
+    binding := make(map[string]logic.Term)
+    args1 := []logic.Term{logic.Var("X"), logic.Atom("b")}
+    args2 := []logic.Term{logic.Atom("a"), logic.Var("Y")}
+    if !logic.Unify(logic.Compound("f", args1), logic.Compound("f", args2), binding) {
+        Errorf("compounds with same functor should unify")
+    }
+    xVal := logic.Lookup(binding, "X")
+    yVal := logic.Lookup(binding, "Y")
+    if xVal.Name() != "a" {
+        Errorf("X should be bound to a")
+    }
+    if yVal.Name() != "b" {
+        Errorf("Y should be bound to b")
+    }
+}
+
+// TestUnifyCompoundFail verifies that compounds with different functors don't unify.
+pub fn TestUnifyCompoundFail() {
+    binding := make(map[string]logic.Term)
+    args1 := []logic.Term{logic.Atom("a")}
+    args2 := []logic.Term{logic.Atom("a")}
+    if logic.Unify(logic.Compound("f", args1), logic.Compound("g", args2), binding) {
+        Errorf("compounds with different functors should not unify")
+    }
+}
+
+// TestSimpleQuery verifies querying a simple fact.
+pub fn TestSimpleQuery() {
+    db := logic.NewDatabase()
+    db.AddFact(logic.Compound("likes", []logic.Term{logic.Atom("alice"), logic.Atom("bob")}))
+    // Query: likes(alice, bob)
+    goal := logic.Compound("likes", []logic.Term{logic.Atom("alice"), logic.Atom("bob")})
+    // We check QueryAll to verify the fact matches
+    results := db.QueryAll(goal)
+    if len(results) != 1 {
+        Errorf("should find 1 solution, got " + strconv.Itoa(len(results)))
+    }
+}
+
+// TestQueryWithVar verifies querying with a variable.
+pub fn TestQueryWithVar() {
+    db := logic.NewDatabase()
+    db.AddFact(logic.Compound("likes", []logic.Term{logic.Atom("alice"), logic.Atom("bob")}))
+    db.AddFact(logic.Compound("likes", []logic.Term{logic.Atom("alice"), logic.Atom("carol")}))
+    // Query: likes(alice, X)
+    goal := logic.Compound("likes", []logic.Term{logic.Atom("alice"), logic.Var("X")})
+    results := db.QueryAll(goal)
+    if len(results) != 2 {
+        Errorf("should find 2 solutions, got " + strconv.Itoa(len(results)))
+    }
+}
+
+// TestRuleQuery verifies querying with a rule.
+pub fn TestRuleQuery() {
+    db := logic.NewDatabase()
+    // Fact: parent(alice, bob)
+    db.AddFact(logic.Compound("parent", []logic.Term{logic.Atom("alice"), logic.Atom("bob")}))
+    // Fact: parent(bob, carol)
+    db.AddFact(logic.Compound("parent", []logic.Term{logic.Atom("bob"), logic.Atom("carol")}))
+    // Rule: grandparent(X, Z) :- parent(X, Y), parent(Y, Z)
+    db.AddRule(
+        logic.Compound("grandparent", []logic.Term{logic.Var("X"), logic.Var("Z")}),
+        []logic.Term{
+            logic.Compound("parent", []logic.Term{logic.Var("X"), logic.Var("Y")}),
+            logic.Compound("parent", []logic.Term{logic.Var("Y"), logic.Var("Z")}),
+        },
+    )
+    // Query: grandparent(X, carol)
+    goal := logic.Compound("grandparent", []logic.Term{logic.Var("X"), logic.Atom("carol")})
+    results := db.QueryAll(goal)
+    if len(results) != 1 {
+        Errorf("should find 1 grandparent, got " + strconv.Itoa(len(results)))
+    }
+    if len(results) > 0 {
+        xVal := logic.Lookup(results[0], "X")
+        if xVal.Name() != "alice" {
+            Errorf("grandparent should be alice, got " + xVal.Name())
+        }
+    }
+}
+
+// TestTermToString verifies term-to-string conversion.
+pub fn TestTermToString() {
+    a := logic.Atom("hello")
+    if logic.TermToString(a) != "hello" {
+        Errorf("atom string should be hello")
+    }
+    v := logic.Var("X")
+    if logic.TermToString(v) != "?X" {
+        Errorf("var string should be ?X")
+    }
+    c := logic.Compound("f", []logic.Term{logic.Atom("a"), logic.Atom("b")})
+    if logic.TermToString(c) != "f(a, b)" {
+        Errorf("compound string should be f(a, b), got " + logic.TermToString(c))
+    }
+}
+
+// TestEmptyQuery verifies that querying an empty database returns no results.
+pub fn TestEmptyQuery() {
+    db := logic.NewDatabase()
+    goal := logic.Atom("anything")
+    results := db.QueryAll(goal)
+    if len(results) != 0 {
+        Errorf("empty database should return 0 results")
+    }
+}

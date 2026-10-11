@@ -1,0 +1,126 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/graph_compute.skink
+// Purpose: Demonstrates the computational graph (autograd) from std/graph.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/graph"
+import "std/tensor"
+import "std/io"
+import "std/strconv"
+import "std/fmt"
+
+pub fn main() {
+    io.PrintLine("=== Compute Graph Demo ===")
+    io.PrintLine("")
+
+    // --- Build a simple computational graph ---
+    // Compute: y = ReLU(W * x + b)
+    // Where W is a 2x2 weight matrix, x is a 2x1 input, b is a 2x1 bias
+    io.PrintLine("--- Building Graph: y = ReLU(W*x + b) ---")
+    g := graph.NewGraph()
+
+    // Define inputs and parameters
+    xID := graph.Input(&g, "x", []int{2, 1})
+    wID := graph.Param(&g, "W", []int{2, 2})
+    bID := graph.Param(&g, "b", []int{2, 1})
+
+    // Build the computation: W * x + b, then ReLU
+    matmulID, mErr := graph.MatMul(&g, wID, xID)
+    if mErr.message != "" {
+        io.PrintErrorLine("MatMul error: " + mErr.message)
+        return
+    }
+    addID, aErr := graph.Add(&g, matmulID, bID)
+    if aErr.message != "" {
+        io.PrintErrorLine("Add error: " + aErr.message)
+        return
+    }
+    reluID, rErr := graph.ReLU(&g, addID)
+    if rErr.message != "" {
+        io.PrintErrorLine("ReLU error: " + rErr.message)
+        return
+    }
+
+    io.PrintLine("Graph built with " + strconv.Itoa(g.NumNodes()) + " nodes")
+    io.PrintLine("  x (input)   -> node " + strconv.Itoa(xID))
+    io.PrintLine("  W (param)   -> node " + strconv.Itoa(wID))
+    io.PrintLine("  b (param)   -> node " + strconv.Itoa(bID))
+    io.PrintLine("  W*x         -> node " + strconv.Itoa(matmulID))
+    io.PrintLine("  W*x + b     -> node " + strconv.Itoa(addID))
+    io.PrintLine("  ReLU(W*x+b) -> node " + strconv.Itoa(reluID))
+    io.PrintLine("")
+
+    // --- Set input data ---
+    io.PrintLine("--- Setting Input Data ---")
+    xData := tensor.Zeros([]int{2, 1})
+    xData.Set([]int{0, 0}, 1.0)
+    xData.Set([]int{1, 0}, 2.0)
+
+    wData := tensor.Zeros([]int{2, 2})
+    wData.Set([]int{0, 0}, 1.0)
+    wData.Set([]int{1, 1}, 1.0)  // Identity matrix
+
+    bData := tensor.Zeros([]int{2, 1})
+    bData.Set([]int{0, 0}, 0.5)
+    bData.Set([]int{1, 0}, -0.5)
+
+    graph.SetInput(&g, xID, xData)
+    graph.SetParam(&g, wID, wData)
+    graph.SetParam(&g, bID, bData)
+    io.PrintLine("Input x = [1.0, 2.0]")
+    io.PrintLine("Weight W = [[1,0],[0,1]] (identity)")
+    io.PrintLine("Bias b = [0.5, -0.5]")
+    io.PrintLine("")
+
+    // --- Inspect the graph ---
+    io.PrintLine("--- Graph Parameters ---")
+    params := g.Params()
+    io.PrintLine("Parameter nodes: " + strconv.Itoa(len(params)))
+    for i := 0; i < len(params); i = i + 1 {
+        io.PrintLine("  Param " + strconv.Itoa(i) + ": node " + strconv.Itoa(params[i]))
+    }
+    io.PrintLine("")
+
+    // --- Access node data ---
+    io.PrintLine("--- Node Data ---")
+    resultNode, _ := g.GetNode(reluID)
+    io.PrintLine("ReLU node requires grad: " + fmt.Btoa(resultNode.RequiresGrad()))
+    shape := resultNode.Shape()
+    io.Print("ReLU node shape: [")
+    for i := 0; i < len(shape); i = i + 1 {
+        if i > 0 {
+            io.PrintString(", ")
+        }
+        io.PrintString(strconv.Itoa(shape[i]))
+    }
+    io.PrintLine("]")
+    io.PrintLine("")
+
+    // --- Summary ---
+    io.PrintLine("--- Summary ---")
+    io.PrintLine("The compute graph implements: y = ReLU(I * [1,2] + [0.5,-0.5])")
+    io.PrintLine("                       = ReLU([1+0.5, 2-0.5])")
+    io.PrintLine("                       = ReLU([1.5, 1.5])")
+    io.PrintLine("                       = [1.5, 1.5]")
+    io.PrintLine("This is the foundation for neural network training with backpropagation.")
+}

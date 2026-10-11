@@ -1,0 +1,86 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/log_test.skink
+// Purpose: Skink module for log test.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module log_test
+
+import "std/log"
+import "std/str"
+import "testing"
+
+// TestNewLogger verifies logger creation.
+pub fn TestNewLogger() {
+    l := log.NewLogger("[TEST] ")
+    l.Print("hello")
+}
+
+// TestLoggerPrintf verifies formatted logging does not panic.
+pub fn TestLoggerPrintf() {
+    l := log.NewLogger("")
+    l.Printf("value {}", 42)
+}
+
+// TestLogLevels verifies that log levels filter messages correctly.
+pub fn TestLogLevels() {
+    l := log.NewLogger("")
+    l.SetLevel(log.LevelWarn)
+    // Debug and Info should be filtered out (below Warn)
+    l.Debug("debug message")
+    l.Info("info message")
+    // Warn and Error should pass
+    l.Warn("warn message")
+    l.Error("error message")
+}
+
+// TestNewLoggerWithLevel verifies logger creation with a specific level.
+pub fn TestNewLoggerWithLevel() {
+    l := log.NewLoggerWithLevel("[APP] ", log.LevelError)
+    l.Info("this should be filtered")
+    l.Error("this should appear")
+}
+
+// TestFileWriter verifies that FileWriter can be created and opened.
+pub fn TestFileWriter() {
+    fw := log.NewFileWriter("/tmp/skink_test_log.log")
+    if fw.path != "/tmp/skink_test_log.log" {
+        Errorf("FileWriter should store path")
+    }
+}
+
+// TestLevelConstants verifies that log level constants are distinct.
+pub fn TestLevelConstants() {
+    if log.LevelDebug != 0 {
+        Errorf("LevelDebug should be 0")
+    }
+    if log.LevelInfo != 1 {
+        Errorf("LevelInfo should be 1")
+    }
+    if log.LevelWarn != 2 {
+        Errorf("LevelWarn should be 2")
+    }
+    if log.LevelError != 3 {
+        Errorf("LevelError should be 3")
+    }
+    if log.LevelFatal != 4 {
+        Errorf("LevelFatal should be 4")
+    }
+}

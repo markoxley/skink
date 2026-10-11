@@ -1,0 +1,122 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    samples/csv_processing.skink
+// Purpose: Demonstrates CSV reading, writing, and data manipulation.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/csv"
+import "std/io"
+import "std/str"
+import "std/strconv"
+
+// Sample CSV data representing a small employee database.
+const csvData = `name,department,salary
+Alice,Engineering,95000
+Bob,Sales,72000
+Carol,Engineering,88000
+Dave,Marketing,65000
+Eve,Engineering,102000`
+
+pub fn main() {
+    io.PrintLine("=== CSV Processing Demo ===")
+    io.PrintLine("")
+
+    // --- Reading CSV ---
+    io.PrintLine("--- Reading CSV ---")
+    reader := csv.NewReader(csvData)
+
+    // Read and display the header row
+    header, hdrErr := reader.Read()
+    if hdrErr.message != "" && !str.Equal(hdrErr.message, "EOF") {
+        io.PrintErrorLine("Error reading header: " + hdrErr.message)
+        return
+    }
+    io.Print("Columns: ")
+    for i := 0; i < header.Len(); i = i + 1 {
+        col, _ := header.Get(i)
+        if i > 0 {
+            io.PrintString(", ")
+        }
+        io.PrintString(col)
+    }
+    io.PrintLine("")
+    io.PrintLine("")
+
+    // Read all data rows and find the highest-paid engineer
+    io.PrintLine("--- Employee Records ---")
+    highestSalary := 0
+    highestName := ""
+    count := 0
+
+    for {
+        rec, err := reader.Read()
+        if err.message != "" {
+            break
+        }
+        name, _ := rec.Get(0)
+        dept, _ := rec.Get(1)
+        salaryStr, _ := rec.Get(2)
+        salary, _ := strconv.ParseInt(salaryStr)
+
+        io.PrintLine("  " + name + " | " + dept + " | $" + strconv.Itoa(salary))
+        count = count + 1
+
+        // Track highest-paid engineer
+        if str.Equal(dept, "Engineering") && salary > highestSalary {
+            highestSalary = salary
+            highestName = name
+        }
+    }
+
+    io.PrintLine("")
+    io.PrintLine("Total records: " + strconv.Itoa(count))
+    io.PrintLine("Highest-paid engineer: " + highestName + " ($" + strconv.Itoa(highestSalary) + ")")
+    io.PrintLine("")
+
+    // --- Writing CSV ---
+    io.PrintLine("--- Writing CSV ---")
+    writer := csv.NewWriter()
+
+    // Write header
+    var hdrFields []string
+    hdrFields = append(hdrFields, "product")
+    hdrFields = append(hdrFields, "quantity")
+    hdrFields = append(hdrFields, "price")
+    writer.Write(csv.Record{fields: hdrFields})
+
+    // Write data rows
+    writeRow(&writer, "Widget", "100", "9.99")
+    writeRow(&writer, "Gadget", "50", "19.99")
+    writeRow(&writer, "Gizmo, Deluxe", "25", "29.99")  // Tests quoting
+
+    io.PrintLine("Generated CSV output:")
+    io.PrintLine(writer.output)
+}
+
+// writeRow is a helper that builds a Record and writes it to the CSV writer.
+fn writeRow(w: *csv.Writer, product: string, qty: string, price: string) {
+    var fields []string
+    fields = append(fields, product)
+    fields = append(fields, qty)
+    fields = append(fields, price)
+    w.Write(csv.Record{fields: fields})
+}

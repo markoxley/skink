@@ -1,0 +1,145 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/stridx.skink
+// Purpose: Shared string→int open-addressing index used to build
+//          concrete string-keyed hash tables.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// StrIndex maps string keys to integer slots in O(1) average time.
+//
+// The built-in map[string]V is a linear-scan table (O(N) strcmp per
+// lookup), which makes it unusable for large symbol tables — the
+// compiler's type checker was effectively quadratic because of it
+// (comp_error.md #22). Generic containers cannot hold struct values
+// because generic type parameters erase to i8*, so concrete tables are
+// built by pairing a StrIndex with a parallel value slice: Ensure
+// returns a stable slot per key and the table stores its value at
+// vals[slot]. A zero-value StrIndex is ready to use.
+module stridx
+
+import "std/str"
+
+// strIdxEntry is a single key/slot pair in the open-addressed table.
+pub struct StrIdxEntry {
+    key:  string
+    slot: int
+    used: bool
+}
+
+// strHash computes a 31-bit djb2-style hash of s. Masking each step
+// keeps the accumulator non-negative so modulo indexing stays in range
+// even after i32 overflow.
+fn strHash(s: string) -> int {
+    h := 5381
+    for i := 0; i < str.Len(s); i = i + 1 {
+        h = (h * 33 + int(s[i])) & 2147483647
+    }
+    return h
+}
+
+// StrIndex is an open-addressing index from string keys to slot numbers
+// using linear probing. Slots are assigned in insertion order and never
+// change for the life of the index. It grows automatically when the
+// load factor exceeds 70%.
+pub struct StrIndex {
+    entries: []StrIdxEntry
+    count:   int
+    cap:     int
+
+    // slotOf returns the entry index of key, or -1 when absent.
+    // Probing always terminates because the table is never more than
+    // 70% full — an empty slot is always reached.
+    fn slotOf(self: *StrIndex, key: string) -> int {
+        if self.cap == 0 {
+            return -1
+        }
+        idx := strHash(key) % self.cap
+        for self.entries[idx].used {
+            if str.Equal(self.entries[idx].key, key) {
+                return idx
+            }
+            idx = (idx + 1) % self.cap
+        }
+        return -1
+    }
+
+    // Find returns the slot stored for key, or -1 when absent.
+    fn Find(self: *StrIndex, key: string) -> int {
+        idx := self.slotOf(key)
+        if idx < 0 {
+            return -1
+        }
+        return self.entries[idx].slot
+    }
+
+    // Ensure returns the slot stored for key, inserting a fresh slot
+    // when absent. New keys get the next sequential slot number.
+    fn Ensure(self: *StrIndex, key: string) -> int {
+        if self.cap == 0 {
+            self.resize(8)
+        } else if self.count * 10 > self.cap * 7 {
+            self.resize(self.cap * 2)
+        }
+        idx := strHash(key) % self.cap
+        for self.entries[idx].used {
+            if str.Equal(self.entries[idx].key, key) {
+                return self.entries[idx].slot
+            }
+            idx = (idx + 1) % self.cap
+        }
+        slot := self.count
+        self.entries[idx].key = key
+        self.entries[idx].slot = slot
+        self.entries[idx].used = true
+        self.count = self.count + 1
+        return slot
+    }
+
+    // Len returns the number of keys in the index.
+    fn Len(self: *StrIndex) -> int {
+        return self.count
+    }
+
+    // resize reallocates the table to newCap and reinserts all entries
+    // with their existing slot numbers.
+    fn resize(self: *StrIndex, newCap: int) {
+        old := self.entries
+        oldCap := self.cap
+        // NOTE: build the new array with a single make(). append()
+        // reallocates the backing array at exactly len+1 and copies every
+        // element on each call (slices carry no capacity field), so an
+        // append-per-element loop here is O(newCap^2) and drives memory
+        // into the tens of GB when resizing large tables.
+        ents := make([]StrIdxEntry, newCap)
+        self.entries = ents
+        self.cap = newCap
+        for i := 0; i < oldCap; i = i + 1 {
+            if old[i].used {
+                idx := strHash(old[i].key) % self.cap
+                for self.entries[idx].used {
+                    idx = (idx + 1) % self.cap
+                }
+                self.entries[idx].key = old[i].key
+                self.entries[idx].slot = old[i].slot
+                self.entries[idx].used = true
+            }
+        }
+    }
+}

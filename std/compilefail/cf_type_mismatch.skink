@@ -1,0 +1,7 @@
+// expect: mismatch
+module main
+fn main() -> int {
+    x := 5
+    x = "hello"
+    return x
+}

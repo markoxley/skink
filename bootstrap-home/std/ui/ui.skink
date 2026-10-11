@@ -1,0 +1,1142 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/ui/ui.skink
+// Purpose: Cross-platform GUI toolkit. Wraps the SDL2+Nuklear runtime
+//          shim (std/runtime/ui_rt.c) with an idiomatic Skink API:
+//          Window management, per-frame immediate-mode helpers, a
+//          retained `Widget` template interface, and ready-made control
+//          structs (Label, Button, TextBox, CheckBox, RadioGroup,
+//          Slider, ProgressBar, PropertyInt, ComboBox, ListBox, Table,
+//          Group, TreeNode, MenuBar, TabStrip, ColorPicker).
+//
+//          Two usage styles mix freely inside the frame loop:
+//            a) immediate — call ui.Row/ui.Button between BeginFrame and
+//               EndFrame.
+//            b) retained — create controls, win.Add(&w), call win.Draw()
+//               (or ui.Run(win)) each frame.
+//
+//          Requires SDL2 development files (sdl2-devel / libsdl2-dev).
+//          ui_rt.c and -lSDL2 are linked only when this module is
+//          imported, so headless programs carry no GUI dependency.
+//
+// Author:  Mark Oxley
+// Created: 2026
+
+module ui
+
+import "std/str"
+
+// ============================================================================
+// Runtime externs (std/runtime/ui_rt.c)
+// ============================================================================
+
+extern fn Skink_ui_init() -> int64
+extern fn Skink_ui_window_create(title: string, w: int, h: int, flags: int) -> int64
+extern fn Skink_ui_window_destroy(h: int64)
+extern fn Skink_ui_frame_begin(h: int64) -> int64
+extern fn Skink_ui_frame_end(h: int64)
+extern fn Skink_ui_should_close(h: int64) -> int64
+extern fn Skink_ui_request_close(h: int64)
+extern fn Skink_ui_set_title(h: int64, t: string)
+extern fn Skink_ui_window_w(h: int64) -> int64
+extern fn Skink_ui_window_h(h: int64) -> int64
+extern fn Skink_ui_clipboard_set(s: string)
+extern fn Skink_ui_clipboard_get() -> string
+extern fn Skink_ui_clipboard_has() -> int64
+extern fn Skink_ui_row_dynamic(h: int64, height: float, cols: int)
+extern fn Skink_ui_row_static(h: int64, height: float, itemW: int, cols: int)
+extern fn Skink_ui_row_begin(h: int64, dyn: int, height: float, cols: int)
+extern fn Skink_ui_row_push(h: int64, v: float)
+extern fn Skink_ui_row_end(h: int64)
+extern fn Skink_ui_widget_is_hovered(h: int64) -> int64
+extern fn Skink_ui_edit_active(h: int64) -> int64
+extern fn Skink_ui_label(h: int64, s: string, align: int)
+extern fn Skink_ui_label_colored(h: int64, s: string, align: int, r: int, g: int, b: int)
+extern fn Skink_ui_text_wrap(h: int64, s: string)
+extern fn Skink_ui_button(h: int64, s: string) -> int64
+extern fn Skink_ui_button_colored(h: int64, r: int, g: int, b: int) -> int64
+extern fn Skink_ui_checkbox(h: int64, label: string, active: int64) -> int64
+extern fn Skink_ui_radio(h: int64, label: string, active: int64) -> int64
+extern fn Skink_ui_selectable(h: int64, s: string, sel: int64) -> int64
+extern fn Skink_ui_slide_int(h: int64, mn: int64, v: int64, mx: int64, step: int64) -> int64
+extern fn Skink_ui_slide_float(h: int64, mn: float, v: float, mx: float, step: float) -> float
+extern fn Skink_ui_progress(h: int64, cur: int64, max: int64, modifiable: int64) -> int64
+extern fn Skink_ui_property_int(h: int64, name: string, mn: int64, v: int64, mx: int64, step: int64, inc: float) -> int64
+extern fn Skink_ui_edit(h: int64, id: int64, flags: int64) -> int64
+extern fn Skink_ui_edit_text(h: int64, id: int64) -> string
+extern fn Skink_ui_edit_set(h: int64, id: int64, s: string)
+extern fn Skink_ui_combo_begin(h: int64, selected: string, w: float, hh: float) -> int64
+extern fn Skink_ui_combo_item(h: int64, item: string) -> int64
+extern fn Skink_ui_combo_end(h: int64)
+extern fn Skink_ui_group_begin(h: int64, title: string, scroll: int64) -> int64
+extern fn Skink_ui_group_end(h: int64)
+extern fn Skink_ui_list_begin(h: int64, height: float, rowH: int, count: int) -> int64
+extern fn Skink_ui_list_first(h: int64) -> int64
+extern fn Skink_ui_list_last(h: int64) -> int64
+extern fn Skink_ui_list_item(h: int64, s: string, sel: int64) -> int64
+extern fn Skink_ui_list_end(h: int64)
+extern fn Skink_ui_tree_begin(h: int64, id: int64, title: string, node: int64) -> int64
+extern fn Skink_ui_tree_pop(h: int64)
+extern fn Skink_ui_menubar_begin(h: int64)
+extern fn Skink_ui_menubar_end(h: int64)
+extern fn Skink_ui_menu_begin(h: int64, label: string, w: float, hh: float) -> int64
+extern fn Skink_ui_menu_item(h: int64, label: string) -> int64
+extern fn Skink_ui_menu_end(h: int64)
+extern fn Skink_ui_popup_begin(h: int64, title: string, x: float, y: float, w: float, hh: float) -> int64
+extern fn Skink_ui_popup_close(h: int64)
+extern fn Skink_ui_popup_end(h: int64)
+extern fn Skink_ui_tooltip(h: int64, s: string)
+extern fn Skink_ui_color_picker(h: int64, rgba: int64, alpha: int64) -> int64
+extern fn Skink_ui_mouse_x(h: int64) -> int64
+extern fn Skink_ui_mouse_y(h: int64) -> int64
+extern fn Skink_ui_mouse_down(h: int64, btn: int64) -> int64
+extern fn Skink_ui_mouse_clicked(h: int64, btn: int64) -> int64
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+// Window creation flags for NewWindow.
+pub const WIN_RESIZABLE  = 1
+pub const WIN_BORDERLESS = 2
+pub const WIN_FULLSCREEN = 4
+
+// Text alignment for labels.
+pub const ALIGN_LEFT  = 0
+pub const ALIGN_RIGHT = 1
+
+// Mouse buttons for MouseDown/MouseClicked.
+pub const MOUSE_LEFT   = 0
+pub const MOUSE_MIDDLE = 1
+pub const MOUSE_RIGHT  = 2
+
+// Internal widget-id generator for stateful controls (text edits, trees).
+var uiNextID = 1
+
+fn nextID() -> int {
+    id := uiNextID
+    uiNextID = uiNextID + 1
+    return id
+}
+
+// ============================================================================
+// Widget interface
+// ============================================================================
+
+// Widget is the retained-control interface. `Draw` re-declares the
+// control against the immediate-mode backend each frame. `Height`
+// reports the preferred row height; a negative height means the widget
+// lays out its own rows (containers: Group, Table, TabStrip…).
+pub template Widget {
+    fn Draw(self: Widget, h: int64)
+    fn Height(self: Widget) -> int
+}
+
+// ============================================================================
+// Window
+// ============================================================================
+
+// Window wraps an OS window + GPU renderer and the retained widget list
+// drawn by Draw().
+pub struct Window {
+    handle:  int64
+    widgets: []Widget
+    menubar: *MenuBar
+
+    // Width returns the window's pixel width.
+    pub fn Width(self: Window) -> int {
+        return int(Skink_ui_window_w(self.handle))
+    }
+
+    // Height returns the window's pixel height.
+    pub fn Height(self: Window) -> int {
+        return int(Skink_ui_window_h(self.handle))
+    }
+
+    // IsValid reports whether the underlying OS window exists.
+    pub fn IsValid(self: Window) -> bool {
+        return self.handle != 0
+    }
+
+    // SetTitle updates the OS window title.
+    pub fn SetTitle(self: Window, title: string) {
+        Skink_ui_set_title(self.handle, title)
+    }
+
+    // Add registers a widget drawn each frame by Draw(). Pass pointers
+    // (e.g. win.Add(&btn)) so controls keep their state.
+    pub fn Add(self: *Window, w: Widget) {
+        self.widgets = append(self.widgets, w)
+    }
+
+    // SetMenuBar installs the window's menubar. Nuklear requires the
+    // menubar to be the first layout element, so Draw() renders it
+    // before every registered widget regardless of call order.
+    pub fn SetMenuBar(self: *Window, bar: *MenuBar) {
+        self.menubar = bar
+    }
+
+    // ShouldClose reports whether the user (or code) requested a close.
+    pub fn ShouldClose(self: Window) -> bool {
+        return Skink_ui_should_close(self.handle) != 0
+    }
+
+    // RequestClose asks the frame loop to terminate.
+    pub fn RequestClose(self: Window) {
+        Skink_ui_request_close(self.handle)
+    }
+
+    // BeginFrame pumps OS events and opens the root panel; returns true
+    // while the app should keep running. Pair with EndFrame —
+    // conventionally `for win.BeginFrame() { ... }`.
+    pub fn BeginFrame(self: *Window) -> bool {
+        return Skink_ui_frame_begin(self.handle) != 0
+    }
+
+    // EndFrame closes the root panel and presents the rendered frame.
+    pub fn EndFrame(self: *Window) {
+        Skink_ui_frame_end(self.handle)
+    }
+
+    // Draw renders every registered widget. Widgets with a non-negative
+    // Height() get a full-width row; self-managing widgets (Height < 0)
+    // lay out their own rows.
+    pub fn Draw(self: *Window) {
+        // The menubar must come first: Nuklear asserts it occupies the
+        // top of the window layout before any row advances at_y.
+        if self.menubar != nil {
+            self.menubar.Draw(self.handle)
+        }
+        i := 0
+        for i < len(self.widgets) {
+            w := self.widgets[i]
+            ht := w.Height()
+            if ht >= 0 {
+                Skink_ui_row_dynamic(self.handle, float(ht), 1)
+            }
+            w.Draw(self.handle)
+            i = i + 1
+        }
+    }
+
+    // Destroy frees the OS window and renderer resources.
+    pub fn Destroy(self: *Window) {
+        if self.handle != 0 {
+            Skink_ui_window_destroy(self.handle)
+            self.handle = 0
+        }
+    }
+}
+
+// NewWindow creates a visible window. Returns a zero-handle Window when
+// SDL2 is unavailable (e.g. no display driver); check IsValid() first.
+pub fn NewWindow(title: string, w: int, h: int, flags: int) -> Window {
+    if Skink_ui_init() == 0 {
+        return Window{handle: 0}
+    }
+    return Window{handle: Skink_ui_window_create(title, w, h, flags)}
+}
+
+// Run is the standard event loop: pumps frames, draws registered
+// widgets, and exits when the window is asked to close.
+pub fn Run(win: *Window) {
+    for win.BeginFrame() {
+        win.Draw()
+        win.EndFrame()
+    }
+}
+
+// ============================================================================
+// Immediate-mode helpers (callable directly inside BeginFrame/EndFrame)
+// ============================================================================
+
+// Row lays out the next widgets in one row of `cols` equal columns.
+pub fn Row(win: *Window, height: int, cols: int) {
+    Skink_ui_row_dynamic(win.handle, float(height), cols)
+}
+
+// RowStatic lays out `cols` columns each `itemW` pixels wide.
+pub fn RowStatic(win: *Window, height: int, itemW: int, cols: int) {
+    Skink_ui_row_static(win.handle, float(height), itemW, cols)
+}
+
+// Label draws a left-aligned text label in the current layout slot.
+pub fn Label(win: *Window, text: string) {
+    Skink_ui_label(win.handle, text, 0)
+}
+
+// LabelColored draws a label in an RGB color.
+pub fn LabelColored(win: *Window, text: string, r: int, g: int, b: int) {
+    Skink_ui_label_colored(win.handle, text, 0, r, g, b)
+}
+
+// Button draws a push button; returns true on the frame it was clicked.
+pub fn Button(win: *Window, label: string) -> bool {
+    return Skink_ui_button(win.handle, label) != 0
+}
+
+// CheckBox draws a checkbox; returns the (possibly toggled) state.
+pub fn CheckBox(win: *Window, label: string, checked: bool) -> bool {
+    v := int64(0)
+    if checked {
+        v = 1
+    }
+    return Skink_ui_checkbox(win.handle, label, v) != 0
+}
+
+// Slider draws an integer slider; returns the new value.
+pub fn Slider(win: *Window, min: int, value: int, max: int, step: int) -> int {
+    return int(Skink_ui_slide_int(win.handle, int64(min), int64(value), int64(max), int64(step)))
+}
+
+// Progress draws a progress bar for fraction cur/max.
+pub fn Progress(win: *Window, cur: int, max: int) {
+    Skink_ui_progress(win.handle, int64(cur), int64(max), 0)
+}
+
+// Tooltip attaches a hover tooltip to the previously drawn widget.
+pub fn Tooltip(win: *Window, text: string) {
+    Skink_ui_tooltip(win.handle, text)
+}
+
+// Spacer occupies an empty cell in the current row layout.
+pub fn Spacer(win: *Window) {
+    Skink_ui_label(win.handle, "", 0)
+}
+
+// ============================================================================
+// Retained controls — simple widgets (one row each)
+// ============================================================================
+
+// TextLabel is a retained label whose Text may be updated or bound.
+pub struct TextLabel {
+    Text:  string
+    R:     int
+    G:     int
+    B:     int
+    Right: bool
+    Wrap:  bool
+
+    pub fn Draw(self: *TextLabel, h: int64) {
+        if self.Wrap {
+            Skink_ui_text_wrap(h, self.Text)
+        } else {
+            align := 0
+            if self.Right {
+                align = 1
+            }
+            if self.R != 0 || self.G != 0 || self.B != 0 {
+                Skink_ui_label_colored(h, self.Text, align, self.R, self.G, self.B)
+            } else {
+                Skink_ui_label(h, self.Text, align)
+            }
+        }
+    }
+
+    pub fn Height(self: *TextLabel) -> int {
+        return 24
+    }
+}
+
+// NewLabel makes a retained text label.
+pub fn NewLabel(text: string) -> *TextLabel {
+    l := TextLabel{Text: text}
+    return &l
+}
+
+// Btn is a retained push button; OnClick fires on click frames.
+pub struct Btn {
+    Label:   string
+    OnClick: fn()
+
+    pub fn Draw(self: *Btn, h: int64) {
+        if Skink_ui_button(h, self.Label) != 0 {
+            if self.OnClick != nil {
+                self.OnClick()
+            }
+        }
+    }
+
+    pub fn Height(self: *Btn) -> int {
+        return 30
+    }
+}
+
+// NewButton makes a retained button; cb may be a zero fn.
+pub fn NewButton(label: string, cb: fn()) -> *Btn {
+    b := Btn{Label: label, OnClick: cb}
+    return &b
+}
+
+// CheckBoxC is a retained checkbox; Checked updates on toggle.
+pub struct CheckBoxC {
+    Label:    string
+    Checked:  bool
+    OnChange: fn(bool)
+
+    pub fn Draw(self: *CheckBoxC, h: int64) {
+        before := int64(0)
+        if self.Checked {
+            before = 1
+        }
+        after := Skink_ui_checkbox(h, self.Label, before)
+        if after != before {
+            self.Checked = after != 0
+            if self.OnChange != nil {
+                self.OnChange(self.Checked)
+            }
+        }
+    }
+
+    pub fn Height(self: *CheckBoxC) -> int {
+        return 24
+    }
+}
+
+// NewCheckBox makes a retained checkbox.
+pub fn NewCheckBox(label: string, checked: bool) -> *CheckBoxC {
+    c := CheckBoxC{Label: label, Checked: checked}
+    return &c
+}
+
+// TextBox is a retained single-line text editor. The edit buffer lives
+// in the runtime shim keyed by a widget id; read it with Text().
+pub struct TextBox {
+    id:          int
+    Placeholder: string
+    OnChange:    fn(string)
+    OnEnter:     fn(string)
+
+    pub fn Draw(self: *TextBox, h: int64) {
+        r := Skink_ui_edit(h, int64(self.id), 1)
+        // NK_EDIT_COMMITTED (0x4)/DEACTIVATED-with-commit (0x8) → OnEnter;
+        // NK_EDIT_ACTIVE-with-edit (0x20... the shim ORs SIG_ENTER) — we
+        // surface plain edits through OnChange.
+        if (r & 4) != 0 || (r & 8) != 0 {
+            if self.OnEnter != nil {
+                self.OnEnter(Skink_ui_edit_text(h, int64(self.id)))
+            }
+        }
+        if (r & 0x20) != 0 {
+            if self.OnChange != nil {
+                self.OnChange(Skink_ui_edit_text(h, int64(self.id)))
+            }
+        }
+    }
+
+    pub fn Height(self: *TextBox) -> int {
+        return 30
+    }
+
+    // Text reads the edit buffer (needs the owning window handle).
+    pub fn Text(self: *TextBox, win: *Window) -> string {
+        return Skink_ui_edit_text(win.handle, int64(self.id))
+    }
+
+    // SetText writes the edit buffer.
+    pub fn SetText(self: *TextBox, win: *Window, text: string) {
+        Skink_ui_edit_set(win.handle, int64(self.id), text)
+    }
+}
+
+// NewTextBox makes a retained single-line editor.
+pub fn NewTextBox() -> *TextBox {
+    t := TextBox{id: nextID()}
+    return &t
+}
+
+// SliderInt is a retained integer slider; Value updates on drag.
+pub struct SliderInt {
+    Min:      int
+    Max:      int
+    Step:     int
+    Value:    int
+    OnChange: fn(int)
+
+    pub fn Draw(self: *SliderInt, h: int64) {
+        nv := int(Skink_ui_slide_int(h, int64(self.Min), int64(self.Value), int64(self.Max), int64(self.Step)))
+        if nv != self.Value {
+            self.Value = nv
+            if self.OnChange != nil {
+                self.OnChange(nv)
+            }
+        }
+    }
+
+    pub fn Height(self: *SliderInt) -> int {
+        return 26
+    }
+}
+
+// NewSliderInt makes a retained integer slider.
+pub fn NewSliderInt(min: int, max: int, step: int, value: int) -> *SliderInt {
+    s := SliderInt{Min: min, Max: max, Step: step, Value: value}
+    return &s
+}
+
+// SliderFloat is a retained float slider; Value updates on drag.
+pub struct SliderFloat {
+    Min:      float
+    Max:      float
+    Step:     float
+    Value:    float
+    OnChange: fn(float)
+
+    pub fn Draw(self: *SliderFloat, h: int64) {
+        nv := Skink_ui_slide_float(h, self.Min, self.Value, self.Max, self.Step)
+        if nv != self.Value {
+            self.Value = nv
+            if self.OnChange != nil {
+                self.OnChange(nv)
+            }
+        }
+    }
+
+    pub fn Height(self: *SliderFloat) -> int {
+        return 26
+    }
+}
+
+// NewSliderFloat makes a retained float slider.
+pub fn NewSliderFloat(min: float, max: float, step: float, value: float) -> *SliderFloat {
+    s := SliderFloat{Min: min, Max: max, Step: step, Value: value}
+    return &s
+}
+
+// ProgressBar is a retained progress bar; set Value per frame.
+pub struct ProgressBar {
+    Value: int
+    Max:   int
+
+    pub fn Draw(self: *ProgressBar, h: int64) {
+        Skink_ui_progress(h, int64(self.Value), int64(self.Max), 0)
+    }
+
+    pub fn Height(self: *ProgressBar) -> int {
+        return 22
+    }
+}
+
+// NewProgressBar makes a retained progress bar.
+pub fn NewProgressBar(max: int) -> *ProgressBar {
+    p := ProgressBar{Max: max}
+    return &p
+}
+
+// PropertyInt is a spinbox (number entry with +/- nudge).
+pub struct PropertyInt {
+    Name:     string
+    Min:      int
+    Max:      int
+    Step:     int
+    Value:    int
+    OnChange: fn(int)
+
+    pub fn Draw(self: *PropertyInt, h: int64) {
+        nv := int(Skink_ui_property_int(h, self.Name, int64(self.Min), int64(self.Value), int64(self.Max), int64(self.Step), 1.0))
+        if nv != self.Value {
+            self.Value = nv
+            if self.OnChange != nil {
+                self.OnChange(nv)
+            }
+        }
+    }
+
+    pub fn Height(self: *PropertyInt) -> int {
+        return 26
+    }
+}
+
+// NewPropertyInt makes a retained spinbox.
+pub fn NewPropertyInt(name: string, min: int, max: int, step: int, value: int) -> *PropertyInt {
+    p := PropertyInt{Name: name, Min: min, Max: max, Step: step, Value: value}
+    return &p
+}
+
+// ComboBox is a drop-down single-selection control.
+pub struct ComboBox {
+    Items:    []string
+    selected: int
+    OnPick:   fn(int)
+
+    pub fn Draw(self: *ComboBox, h: int64) {
+        sel := ""
+        if self.selected >= 0 && self.selected < len(self.Items) {
+            sel = self.Items[self.selected]
+        }
+        if Skink_ui_combo_begin(h, sel, 200.0, float(30 * len(self.Items) + 20)) != 0 {
+            Skink_ui_row_dynamic(h, 26.0, 1)
+            i := 0
+            for i < len(self.Items) {
+                if Skink_ui_combo_item(h, self.Items[i]) != 0 {
+                    self.selected = i
+                    if self.OnPick != nil {
+                        self.OnPick(i)
+                    }
+                }
+                i = i + 1
+            }
+            Skink_ui_combo_end(h)
+        }
+    }
+
+    // Selected returns the chosen index.
+    pub fn Selected(self: *ComboBox) -> int {
+        return self.selected
+    }
+
+    // Select picks item i programmatically.
+    pub fn Select(self: *ComboBox, i: int) {
+        self.selected = i
+    }
+
+    pub fn Height(self: *ComboBox) -> int {
+        return 30
+    }
+}
+
+// NewComboBox makes a retained drop-down.
+pub fn NewComboBox(items: []string) -> *ComboBox {
+    cb := ComboBox{Items: items}
+    return &cb
+}
+
+// ============================================================================
+// Container widgets — manage their own internal row layout (Height < 0)
+// ============================================================================
+
+// RadioGroup renders vertical radio options; Selected tracks the pick.
+pub struct RadioGroup {
+    Options:  []string
+    selected: int
+    OnPick:   fn(int)
+
+    pub fn Draw(self: *RadioGroup, h: int64) {
+        i := 0
+        for i < len(self.Options) {
+            Skink_ui_row_dynamic(h, 26.0, 1)
+            cur := int64(0)
+            if self.selected == i {
+                cur = 1
+            }
+            if Skink_ui_radio(h, self.Options[i], cur) != 0 && self.selected != i {
+                self.selected = i
+                if self.OnPick != nil {
+                    self.OnPick(i)
+                }
+            }
+            i = i + 1
+        }
+    }
+
+    pub fn Height(self: *RadioGroup) -> int {
+        return -1  // self-managed rows
+    }
+
+    // Selected returns the current option index.
+    pub fn Selected(self: *RadioGroup) -> int {
+        return self.selected
+    }
+
+    // Select picks option i programmatically.
+    pub fn Select(self: *RadioGroup, i: int) {
+        self.selected = i
+    }
+}
+
+// NewRadioGroup makes a retained radio group.
+pub fn NewRadioGroup(options: []string) -> *RadioGroup {
+    rg := RadioGroup{Options: options}
+    return &rg
+}
+
+// ListBox is a scrollable single-selection list; the backend only draws
+// visible rows (virtualized).
+pub struct ListBox {
+    Items:    []string
+    selected: int
+    RowH:     int
+    MaxH:     int
+    OnPick:   fn(int)
+
+    pub fn Draw(self: *ListBox, h: int64) {
+        rowH := self.RowH
+        if rowH <= 0 {
+            rowH = 24
+        }
+        total := len(self.Items) * rowH
+        if total > self.MaxH {
+            total = self.MaxH
+        }
+        if total <= 0 {
+            total = rowH
+        }
+        Skink_ui_row_dynamic(h, float(total), 1)
+        if Skink_ui_list_begin(h, float(total), rowH, len(self.Items)) != 0 {
+            i := int(Skink_ui_list_first(h))
+            last := int(Skink_ui_list_last(h))
+            for i < last {
+                sel := int64(0)
+                if self.selected == i {
+                    sel = 1
+                }
+                if Skink_ui_list_item(h, self.Items[i], sel) != 0 && self.selected != i {
+                    self.selected = i
+                    if self.OnPick != nil {
+                        self.OnPick(i)
+                    }
+                }
+                i = i + 1
+            }
+            Skink_ui_list_end(h)
+        }
+    }
+
+    pub fn Height(self: *ListBox) -> int {
+        return -1
+    }
+
+    // Selected returns the chosen index.
+    pub fn Selected(self: *ListBox) -> int {
+        return self.selected
+    }
+}
+
+// NewListBox makes a retained list box capped at MaxH pixels tall.
+pub fn NewListBox(items: []string, maxH: int) -> *ListBox {
+    lb := ListBox{Items: items, RowH: 24, MaxH: maxH}
+    return &lb
+}
+
+// RowModel supplies table cells on demand — re-queried every frame so
+// edits to underlying data appear immediately. This is the seam used by
+// the ui/binding adapters (FromSlice, FromFunc).
+pub template RowModel {
+    fn RowCount(self: RowModel) -> int
+    fn CellText(self: RowModel, row: int, col: int) -> string
+}
+
+// Table renders a header row plus a virtualized, selectable body.
+pub struct Table {
+    Headers:  []string
+    Model:    RowModel
+    RowH:     int
+    MaxH:     int
+    OnPick:   fn(int)
+    selected: int
+
+    pub fn Draw(self: *Table, h: int64) {
+        cols := len(self.Headers)
+        if cols == 0 {
+            return
+        }
+        rowH := self.RowH
+        if rowH <= 0 {
+            rowH = 24
+        }
+        // Header row
+        Skink_ui_row_dynamic(h, 26.0, cols)
+        ci := 0
+        for ci < cols {
+            Skink_ui_label(h, self.Headers[ci], 0)
+            ci = ci + 1
+        }
+        // Body — one selectable per cell; the row height sets the list area.
+        total := self.Model.RowCount() * rowH
+        if total > self.MaxH {
+            total = self.MaxH
+        }
+        if total <= 0 {
+            total = rowH
+        }
+        Skink_ui_row_dynamic(h, float(total), 1)
+        if Skink_ui_list_begin(h, float(total), rowH, self.Model.RowCount()) != 0 {
+            i := int(Skink_ui_list_first(h))
+            last := int(Skink_ui_list_last(h))
+            for i < last {
+                Skink_ui_row_dynamic(h, float(rowH), cols)
+                sel := int64(0)
+                if self.selected == i {
+                    sel = 1
+                }
+                ci = 0
+                for ci < cols {
+                    picked := Skink_ui_list_item(h, self.Model.CellText(i, ci), sel)
+                    if picked != 0 && self.selected != i {
+                        self.selected = i
+                        if self.OnPick != nil {
+                            self.OnPick(i)
+                        }
+                    }
+                    ci = ci + 1
+                }
+                i = i + 1
+            }
+            Skink_ui_list_end(h)
+        }
+    }
+
+    pub fn Height(self: *Table) -> int {
+        return -1
+    }
+
+    // Selected returns the last picked row index.
+    pub fn Selected(self: *Table) -> int {
+        return self.selected
+    }
+}
+
+// NewTable builds a bound table over a RowModel.
+pub fn NewTable(headers: []string, model: RowModel, maxH: int) -> *Table {
+    t := Table{Headers: headers, Model: model, RowH: 24, MaxH: maxH}
+    return &t
+}
+
+// Group is a bordered scrollable sub-region containing its own widgets.
+pub struct Group {
+    Title:   string
+    H:       int
+    widgets: []Widget
+
+    pub fn Draw(self: *Group, h: int64) {
+        gh := self.H
+        if gh <= 0 {
+            gh = 160
+        }
+        Skink_ui_row_dynamic(h, float(gh), 1)
+        if Skink_ui_group_begin(h, self.Title, 1) != 0 {
+            i := 0
+            for i < len(self.widgets) {
+                w := self.widgets[i]
+                wh := w.Height()
+                if wh >= 0 {
+                    Skink_ui_row_dynamic(h, float(wh), 1)
+                }
+                w.Draw(h)
+                i = i + 1
+            }
+            Skink_ui_group_end(h)
+        }
+    }
+
+    // Add registers a widget inside the group.
+    pub fn Add(self: *Group, w: Widget) {
+        self.widgets = append(self.widgets, w)
+    }
+
+    pub fn Height(self: *Group) -> int {
+        return -1
+    }
+}
+
+// NewGroup makes a scrollable group of the given pixel height.
+pub fn NewGroup(title: string, height: int) -> *Group {
+    g := Group{Title: title, H: height}
+    return &g
+}
+
+// TreeNode is a collapsible container; children render nested under the
+// node title while it is open.
+pub struct TreeNode {
+    Title:   string
+    id:      int
+    widgets: []Widget
+
+    pub fn Draw(self: *TreeNode, h: int64) {
+        Skink_ui_row_dynamic(h, 24.0, 1)
+        if Skink_ui_tree_begin(h, int64(self.id), self.Title, 1) != 0 {
+            i := 0
+            for i < len(self.widgets) {
+                w := self.widgets[i]
+                wh := w.Height()
+                if wh >= 0 {
+                    Skink_ui_row_dynamic(h, float(wh), 1)
+                }
+                w.Draw(h)
+                i = i + 1
+            }
+            Skink_ui_tree_pop(h)
+        }
+    }
+
+    // Add registers a widget inside the node.
+    pub fn Add(self: *TreeNode, w: Widget) {
+        self.widgets = append(self.widgets, w)
+    }
+
+    pub fn Height(self: *TreeNode) -> int {
+        return -1
+    }
+}
+
+// NewTreeNode makes a collapsible node.
+pub fn NewTreeNode(title: string) -> *TreeNode {
+    t := TreeNode{Title: title, id: nextID()}
+    return &t
+}
+
+// ============================================================================
+// MenuBar
+// ============================================================================
+
+// MenuItem is a leaf entry inside a Menu.
+pub struct MenuItem {
+    Label:   string
+    OnClick: fn()
+}
+
+// Menu is a named drop-down inside a MenuBar.
+pub struct Menu {
+    Title: string
+    Items: []MenuItem
+}
+
+// MenuBar renders menus across the window's top band.
+pub struct MenuBar {
+    menus: []Menu
+
+    pub fn Draw(self: *MenuBar, h: int64) {
+        Skink_ui_menubar_begin(h)
+        i := 0
+        for i < len(self.menus) {
+            m := self.menus[i]
+            Skink_ui_row_begin(h, 0, 0.0, 4)
+            if Skink_ui_menu_begin(h, m.Title, 160.0, float(26 * len(m.Items) + 10)) != 0 {
+                Skink_ui_row_dynamic(h, 24.0, 1)
+                j := 0
+                for j < len(m.Items) {
+                    if Skink_ui_menu_item(h, m.Items[j].Label) != 0 {
+                        if m.Items[j].OnClick != nil {
+                            m.Items[j].OnClick()
+                        }
+                    }
+                    j = j + 1
+                }
+                Skink_ui_menu_end(h)
+            }
+            i = i + 1
+        }
+        Skink_ui_menubar_end(h)
+    }
+
+    // AddMenu registers a drop-down menu.
+    pub fn AddMenu(self: *MenuBar, title: string, items: []MenuItem) {
+        self.menus = append(self.menus, Menu{Title: title, Items: items})
+    }
+
+    pub fn Height(self: *MenuBar) -> int {
+        return -1  // occupies the fixed menubar band, not a row
+    }
+}
+
+// NewMenuBar makes an empty menubar.
+pub fn NewMenuBar() -> *MenuBar {
+    mb := MenuBar{}
+    return &mb
+}
+
+// NewMenuItem makes a menu entry.
+pub fn NewMenuItem(label: string, cb: fn()) -> MenuItem {
+    return MenuItem{Label: label, OnClick: cb}
+}
+
+// ============================================================================
+// TabStrip — tab buttons switching widget pages
+// ============================================================================
+
+// TabPage pairs a caption with a page of widgets.
+pub struct TabPage {
+    Title:   string
+    widgets: []Widget
+}
+
+// TabStrip renders a button row; the selected tab's page draws below.
+pub struct TabStrip {
+    pages:    []TabPage
+    selected: int
+
+    pub fn Draw(self: *TabStrip, h: int64) {
+        n := len(self.pages)
+        if n == 0 {
+            return
+        }
+        Skink_ui_row_dynamic(h, 28.0, n)
+        i := 0
+        for i < n {
+            label := self.pages[i].Title
+            if self.selected == i {
+                label = str.Concat("[", str.Concat(label, "]"))
+            }
+            if Skink_ui_button(h, label) != 0 {
+                self.selected = i
+            }
+            i = i + 1
+        }
+        i = 0
+        for i < len(self.pages[self.selected].widgets) {
+            w := self.pages[self.selected].widgets[i]
+            wh := w.Height()
+            if wh >= 0 {
+                Skink_ui_row_dynamic(h, float(wh), 1)
+            }
+            w.Draw(h)
+            i = i + 1
+        }
+    }
+
+    // AddTab registers a page.
+    pub fn AddTab(self: *TabStrip, title: string, widgets: []Widget) {
+        self.pages = append(self.pages, TabPage{Title: title, widgets: widgets})
+    }
+
+    // Selected returns the active tab index.
+    pub fn Selected(self: *TabStrip) -> int {
+        return self.selected
+    }
+
+    pub fn Height(self: *TabStrip) -> int {
+        return -1
+    }
+}
+
+// NewTabStrip makes an empty tab strip.
+pub fn NewTabStrip() -> *TabStrip {
+    ts := TabStrip{}
+    return &ts
+}
+
+// ============================================================================
+// ColorPicker
+// ============================================================================
+
+// ColorPicker edits a packed 0xRRGGBBAA color; RGBA updates on pick.
+pub struct ColorPicker {
+    RGBA:   int64
+    Alpha:  bool
+    OnPick: fn(int64)
+
+    pub fn Draw(self: *ColorPicker, h: int64) {
+        alphaFlag := int64(0)
+        if self.Alpha {
+            alphaFlag = 1
+        }
+        nv := Skink_ui_color_picker(h, self.RGBA, alphaFlag)
+        if nv != self.RGBA {
+            self.RGBA = nv
+            if self.OnPick != nil {
+                self.OnPick(nv)
+            }
+        }
+    }
+
+    pub fn Height(self: *ColorPicker) -> int {
+        return 260
+    }
+}
+
+// NewColorPicker makes a color picker seeded with 0xRRGGBBAA.
+pub fn NewColorPicker(rgba: int64, withAlpha: bool) -> *ColorPicker {
+    cp := ColorPicker{RGBA: rgba, Alpha: withAlpha}
+    return &cp
+}
+
+// ============================================================================
+// Popup — modal-style overlay; shown while Show is true
+// ============================================================================
+
+// Popup is a titled overlay window drawn when Show is true.
+pub struct Popup {
+    Title:   string
+    Show:    bool
+    W:       int
+    H:       int
+    widgets: []Widget
+
+    pub fn Draw(self: *Popup, h: int64) {
+        if !self.Show {
+            return
+        }
+        pw := float(self.W)
+        ph := float(self.H)
+        if pw <= 0.0 {
+            pw = 320.0
+        }
+        if ph <= 0.0 {
+            ph = 200.0
+        }
+        if Skink_ui_popup_begin(h, self.Title, 40.0, 40.0, pw, ph) != 0 {
+            i := 0
+            for i < len(self.widgets) {
+                w := self.widgets[i]
+                wh := w.Height()
+                if wh >= 0 {
+                    Skink_ui_row_dynamic(h, float(wh), 1)
+                }
+                w.Draw(h)
+                i = i + 1
+            }
+            Skink_ui_popup_end(h)
+        }
+    }
+
+    // Add registers a widget inside the popup.
+    pub fn Add(self: *Popup, w: Widget) {
+        self.widgets = append(self.widgets, w)
+    }
+
+    // Close dismisses the popup.
+    pub fn Close(self: *Popup, h: int64) {
+        self.Show = false
+        Skink_ui_popup_close(h)
+    }
+
+    pub fn Height(self: *Popup) -> int {
+        return -1
+    }
+}
+
+// NewPopup makes a hidden popup of the given size.
+pub fn NewPopup(title: string, w: int, h: int) -> *Popup {
+    p := Popup{Title: title, W: w, H: h}
+    return &p
+}
+
+// ============================================================================
+// Input queries (custom widgets / hit-testing)
+// ============================================================================
+
+// MouseX/Y report the pointer position inside the window this frame.
+pub fn MouseX(win: *Window) -> int {
+    return int(Skink_ui_mouse_x(win.handle))
+}
+pub fn MouseY(win: *Window) -> int {
+    return int(Skink_ui_mouse_y(win.handle))
+}
+
+// MouseDown reports whether a button (MOUSE_*) is currently held.
+pub fn MouseDown(win: *Window, btn: int) -> bool {
+    return Skink_ui_mouse_down(win.handle, int64(btn)) != 0
+}
+
+// MouseClicked reports a click inside the window this frame.
+pub fn MouseClicked(win: *Window, btn: int) -> bool {
+    return Skink_ui_mouse_clicked(win.handle, int64(btn)) != 0
+}
+
+// AnyTextActive reports whether a text-edit widget has focus — handy
+// for suspending global keybindings while typing.
+pub fn AnyTextActive(win: *Window) -> bool {
+    return Skink_ui_edit_active(win.handle) != 0
+}
+
+// ClipboardGet/Set bridge the OS clipboard.
+pub fn ClipboardGet() -> string {
+    return Skink_ui_clipboard_get()
+}
+pub fn ClipboardSet(s: string) {
+    Skink_ui_clipboard_set(s)
+}

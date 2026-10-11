@@ -1,0 +1,117 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/web/static_test.skink
+// Purpose: Tests for std/web/static (FileServer handler).
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Tests for std/web/static. These guard the regression where FileServer's
+// inner function literal captured the enclosing `rootDir` parameter —
+// Skink closures cannot capture locals, so the emitted IR referenced a
+// nonexistent @rootDir global and merely importing the module failed to
+// compile. The handler now reads the module-level fileServerRoot instead.
+
+module static_test
+
+import "std/web/static"
+import "std/web/types"
+import "std/fs"
+import "std/str"
+import "testing"
+
+// staticFixtureRoot is the temp directory populated by the tests.
+const staticFixtureRoot = "/tmp/skink_static_test_root"
+
+// makeStaticFixture writes a small fixture tree under staticFixtureRoot.
+fn makeStaticFixture() {
+    fs.Mkdir(staticFixtureRoot)
+    fs.WriteAll(str.Concat(staticFixtureRoot, "/hello.txt"), "hello static")
+    fs.WriteAll(str.Concat(staticFixtureRoot, "/index.html"), "<h1>home</h1>")
+}
+
+// removeStaticFixture deletes the fixture tree.
+fn removeStaticFixture() {
+    fs.Remove(str.Concat(staticFixtureRoot, "/hello.txt"))
+    fs.Remove(str.Concat(staticFixtureRoot, "/index.html"))
+    fs.Remove(staticFixtureRoot)
+}
+
+// get issues a GET for path against a FileServer rooted at
+// staticFixtureRoot and returns the response writer.
+// NOTE: `h` is declared with an explicit type because calling a local
+// whose function type was inferred via := is not yet supported — the
+// emitter only treats TK_FUNCTION-typed locals as indirect calls.
+fn get(path: string) -> *types.ResponseWriter {
+    var h types.Handler
+    h = static.FileServer(staticFixtureRoot)
+    headers := make(map[string]string)
+    req := types.NewRequest("GET", path, "", headers, "")
+    w := types.NewResponseWriter()
+    h(req, w)
+    return w
+}
+
+// TestFileServerServesFile verifies that an existing file under the root
+// is served with status 200, its contents, and a text/plain Content-Type.
+pub fn TestFileServerServesFile() {
+    makeStaticFixture()
+    defer removeStaticFixture()
+    w := get("/hello.txt")
+    if w.Status() != 200 {
+        Errorf("FileServer should return 200 for an existing file")
+    }
+    if w.ResponseBody() != "hello static" {
+        Errorf("FileServer body mismatch")
+    }
+}
+
+// TestFileServerNotFound verifies that a missing file returns 404.
+pub fn TestFileServerNotFound() {
+    makeStaticFixture()
+    defer removeStaticFixture()
+    w := get("/missing.txt")
+    if w.Status() != 404 {
+        Errorf("FileServer should return 404 for a missing file")
+    }
+}
+
+// TestFileServerIndexFallback verifies that a directory path falls back
+// to index.html.
+pub fn TestFileServerIndexFallback() {
+    makeStaticFixture()
+    defer removeStaticFixture()
+    w := get("/")
+    if w.Status() != 200 {
+        Errorf("FileServer should serve index.html for /")
+    }
+    if w.ResponseBody() != "<h1>home</h1>" {
+        Errorf("FileServer index.html body mismatch")
+    }
+}
+
+// TestFileServerRejectsTraversal verifies that paths containing ".."
+// are rejected with 403.
+pub fn TestFileServerRejectsTraversal() {
+    makeStaticFixture()
+    defer removeStaticFixture()
+    w := get("/../etc/passwd")
+    if w.Status() != 403 {
+        Errorf("FileServer should return 403 for traversal attempts")
+    }
+}
