@@ -2,16 +2,23 @@
 # Usage:
 #   make              - build the self-hosted skink compiler binary
 #   make stage2       - build stage 2 compiler using stage 1 to verify self-hosting
-#   make install      - install the pure compiler and standard library to system
-#   make install-only - install pre-built compiler and standard library
-#   make uninstall    - remove compiler and standard library from system
+#   make install      - build and install the toolset to ~/.local/skink
+#   make install-only - install pre-built binaries and standard library
+#   make uninstall    - remove the toolset and standard library
 #   make clean        - remove build artifacts
 #   make help         - show this help message
 
-# Installation directories (override with make PREFIX=/custom/path)
-PREFIX      ?= /usr/local
-BINDIR      ?= $(PREFIX)/bin
-LIBDIR      ?= $(PREFIX)/lib/skink
+# Installation directories (override with make SKINK_PREFIX=/custom/path).
+# The default matches install.sh's layout so `make install` and the curl
+# installer land in the same place:
+#   $SKINK_PREFIX/bin/{skink, skink-lsp, skinkfmt, skink_test.sh, skink_bench.sh}
+#   $SKINK_PREFIX/std/    (stdlib sources + runtime/ C support, as in the
+#                          release archive — SKINK_HOME points here)
+SKINK_PREFIX ?= $(HOME)/.local/skink
+BINDIR       ?= $(SKINK_PREFIX)/bin
+STDLIB_DIR   ?= $(SKINK_PREFIX)/std
+# Sibling repo that supplies the LSP + formatter binaries
+LSP_DIR      ?= $(abspath ../skink-lsp)
 
 # Compiler and tool settings
 SKINK_BIN   := skink
@@ -30,11 +37,17 @@ SUDO        := $(shell if [ `id -u` -ne 0 ]; then echo sudo; fi)
 
 # Source directories
 BOOTSTRAP_HOME ?= ./bootstrap-home
-STD_DIR        ?= $(BOOTSTRAP_HOME)/std
-RUNTIME_DIR    ?= $(BOOTSTRAP_HOME)/runtime
+# Install the live std/ + std/runtime/ (what release.sh ships) rather than
+# the bootstrap mirrors — the bootstrap copy is only for stage-0 builds.
+STD_DIR        ?= ./std
+RUNTIME_DIR    ?= ./std/runtime
 
-# Standard library and runtime files to install
-STD_FILES     := $(shell find $(STD_DIR) -maxdepth 2 -name '*.skink' ! -path '$(STD_DIR)/runtime/*')
+# Standard library files to install (test files and test fixtures are
+# excluded, matching release.sh)
+STD_FILES     := $(shell find $(STD_DIR) -maxdepth 2 -name '*.skink' \
+    ! -name '*_test.skink' ! -name 'regress_helper.skink' \
+    ! -path '$(STD_DIR)/runtime/*' ! -path '$(STD_DIR)/compilefail/*' \
+    ! -path '$(STD_DIR)/diamond/*' ! -path '$(STD_DIR)/fixture_libmain/*')
 RUNTIME_FILES := $(wildcard $(RUNTIME_DIR)/*.c)
 RUNTIME_HEADERS := $(wildcard $(RUNTIME_DIR)/*.h)
 RUNTIME_LL    := $(wildcard $(RUNTIME_DIR)/*.ll)
@@ -82,7 +95,7 @@ $(VERSION_SKINK): $(VERSION_FILE)
 bump-version: $(VERSION_FILE)
 	@awk -F. '{print $$1"."$$2"."($$3+1)}' $(VERSION_FILE) > $(VERSION_FILE).tmp && mv $(VERSION_FILE).tmp $(VERSION_FILE)
 
-.PHONY: all build stage1 stage2 install install-only install-deps uninstall clean help release dist check-bootstrap-sync sync-bootstrap
+.PHONY: all build stage1 stage2 lsp-build install install-only install-files install-deps uninstall clean help release dist check-bootstrap-sync sync-bootstrap
 
 # Default target: build stage 1 self-hosted compiler
 all: build
@@ -134,85 +147,82 @@ stage2: bump-version | $(SKINK_BIN)
 	@rm -f $(SKINK_BIN)_stage2
 	@echo "Stage 2 self-hosted compiler verified and updated: $(SKINK_BIN)"
 
-# Install compiler binary, standard library, and C runtime
-install: build
-	@echo "Installing pure skink compiler to $(BINDIR)..."
-	$(SUDO) install -d $(BINDIR)
-	$(SUDO) cp -f $(SKINK_BIN) $(BINDIR)/
-	$(SUDO) chmod 755 $(BINDIR)/$(SKINK_BIN)
-	$(SUDO) cp -f skink_test.sh $(BINDIR)/
-	$(SUDO) chmod 755 $(BINDIR)/skink_test.sh
-	$(SUDO) cp -f skink_bench.sh $(BINDIR)/
-	$(SUDO) chmod 755 $(BINDIR)/skink_bench.sh
-	@echo "Installing standard library to $(LIBDIR)..."
-	$(SUDO) install -d $(LIBDIR)
-	$(SUDO) rm -rf $(LIBDIR)/std $(LIBDIR)/runtime
-	$(SUDO) install -d $(LIBDIR)/std
-	@for f in $(STD_FILES); do \
-	    rel=$$(echo $$f | sed 's|^$(STD_DIR)/||'); \
-	    target=$(LIBDIR)/std/$$rel; \
-	    $(SUDO) install -d $$(dirname $$target); \
-	    $(SUDO) install -m 644 $$f $$target; \
-	done
-	@echo "Installing runtime support to $(LIBDIR)/runtime..."
-	$(SUDO) install -d $(LIBDIR)/runtime
-	$(SUDO) install -m 644 $(RUNTIME_FILES) $(LIBDIR)/runtime/
-ifneq ($(RUNTIME_HEADERS),)
-	$(SUDO) install -m 644 $(RUNTIME_HEADERS) $(LIBDIR)/runtime/
+# Build the LSP and formatter if the sibling skink-lsp repo is present.
+# Built against this repo's stdlib — never an ambient SKINK_HOME.
+lsp-build:
+ifneq ($(wildcard $(LSP_DIR)/Makefile),)
+	@$(MAKE) -C $(LSP_DIR) SKINK_HOME=$(CURDIR)/std build
+else
+	@echo "skink-lsp not found at $(LSP_DIR), skipping LSP build"
 endif
-ifneq ($(RUNTIME_LL),)
-	$(SUDO) install -m 644 $(RUNTIME_LL) $(LIBDIR)/runtime/
-endif
-ifneq ($(RUNTIME_VENDOR),)
-	$(SUDO) install -d $(LIBDIR)/runtime/vendor
-	$(SUDO) install -m 644 $(RUNTIME_VENDOR) $(LIBDIR)/runtime/vendor/
-endif
+
+# Install the whole toolset — compiler, LSP, formatter, harness scripts,
+# stdlib, and C runtime — into the same $SKINK_PREFIX layout install.sh
+# uses, so `skink`, `skink-lsp`, and `skinkfmt` all live in one bin dir.
+install: build lsp-build install-files
 	@echo ""
-	@echo "Installation complete: pure Skink compiler installed at $(BINDIR)/$(SKINK_BIN)."
-	@echo "Standard library & runtime installed at $(LIBDIR)."
+	@echo "Installation complete: toolset in $(BINDIR), stdlib in $(STDLIB_DIR)."
+	@echo "Point SKINK_HOME at $(STDLIB_DIR) (install.sh-style export does this)."
 
-# Install pre-built compiler and stdlib without re-compiling
-install-only:
-	@echo "Installing pre-built skink to $(BINDIR)..."
-	$(SUDO) install -d $(BINDIR)
-	$(SUDO) cp -f $(SKINK_BIN) $(BINDIR)/
-	$(SUDO) chmod 755 $(BINDIR)/$(SKINK_BIN)
-	$(SUDO) cp -f skink_test.sh $(BINDIR)/
-	$(SUDO) chmod 755 $(BINDIR)/skink_test.sh
-	$(SUDO) cp -f skink_bench.sh $(BINDIR)/
-	$(SUDO) chmod 755 $(BINDIR)/skink_bench.sh
-	@echo "Installing standard library to $(LIBDIR)..."
-	$(SUDO) install -d $(LIBDIR)
-	$(SUDO) rm -rf $(LIBDIR)/std $(LIBDIR)/runtime
-	$(SUDO) install -d $(LIBDIR)/std
+# Install pre-built toolset and stdlib without re-compiling
+install-only: install-files
+	@echo ""
+	@echo "Installation complete: toolset in $(BINDIR), stdlib in $(STDLIB_DIR)."
+
+# Shared file-copying step for install / install-only
+install-files:
+	@echo "Installing skink toolset to $(SKINK_PREFIX)..."
+	install -d $(BINDIR)
+	cp -f $(SKINK_BIN) $(BINDIR)/
+	chmod 755 $(BINDIR)/$(SKINK_BIN)
+	@for f in skink_test.sh skink_bench.sh; do \
+	    cp -f $$f $(BINDIR)/ && chmod 755 $(BINDIR)/$$f; \
+	done
+	@if [ -f "$(LSP_DIR)/skink-lsp" ]; then \
+	    cp -f "$(LSP_DIR)/skink-lsp" $(BINDIR)/ && chmod 755 $(BINDIR)/skink-lsp; \
+	    echo "  installed skink-lsp"; \
+	else \
+	    echo "  (skink-lsp binary not found at $(LSP_DIR), skipped)"; \
+	fi
+	@if [ -f "$(LSP_DIR)/skinkfmt" ]; then \
+	    cp -f "$(LSP_DIR)/skinkfmt" $(BINDIR)/ && chmod 755 $(BINDIR)/skinkfmt; \
+	    echo "  installed skinkfmt"; \
+	else \
+	    echo "  (skinkfmt binary not found at $(LSP_DIR), skipped)"; \
+	fi
+	@echo "Installing standard library to $(STDLIB_DIR)..."
+	rm -rf $(STDLIB_DIR)
+	install -d $(STDLIB_DIR)
 	@for f in $(STD_FILES); do \
 	    rel=$$(echo $$f | sed 's|^$(STD_DIR)/||'); \
-	    target=$(LIBDIR)/std/$$rel; \
-	    $(SUDO) install -d $$(dirname $$target); \
-	    $(SUDO) install -m 644 $$f $$target; \
+	    target=$(STDLIB_DIR)/$$rel; \
+	    install -d $$(dirname $$target); \
+	    install -m 644 $$f $$target; \
 	done
-	@echo "Installing runtime support to $(LIBDIR)/runtime..."
-	$(SUDO) install -d $(LIBDIR)/runtime
-	$(SUDO) install -m 644 $(RUNTIME_FILES) $(LIBDIR)/runtime/
+	@echo "Installing runtime support to $(STDLIB_DIR)/runtime..."
+	install -d $(STDLIB_DIR)/runtime
+	install -m 644 $(RUNTIME_FILES) $(STDLIB_DIR)/runtime/
 ifneq ($(RUNTIME_HEADERS),)
-	$(SUDO) install -m 644 $(RUNTIME_HEADERS) $(LIBDIR)/runtime/
+	install -m 644 $(RUNTIME_HEADERS) $(STDLIB_DIR)/runtime/
 endif
 ifneq ($(RUNTIME_LL),)
-	$(SUDO) install -m 644 $(RUNTIME_LL) $(LIBDIR)/runtime/
+	install -m 644 $(RUNTIME_LL) $(STDLIB_DIR)/runtime/
 endif
 ifneq ($(RUNTIME_VENDOR),)
-	$(SUDO) install -d $(LIBDIR)/runtime/vendor
-	$(SUDO) install -m 644 $(RUNTIME_VENDOR) $(LIBDIR)/runtime/vendor/
+	install -d $(STDLIB_DIR)/runtime/vendor
+	install -m 644 $(RUNTIME_VENDOR) $(STDLIB_DIR)/runtime/vendor/
 endif
 
-# Uninstall compiler and stdlib
+# Uninstall compiler, tools, and stdlib
 uninstall:
-	@echo "Removing $(BINDIR)/$(SKINK_BIN)..."
-	$(SUDO) rm -f $(BINDIR)/$(SKINK_BIN)
-	$(SUDO) rm -f $(BINDIR)/skink_test.sh
-	$(SUDO) rm -f $(BINDIR)/skink_bench.sh
-	@echo "Removing $(LIBDIR)..."
-	$(SUDO) rm -rf $(LIBDIR)
+	@echo "Removing toolset from $(BINDIR)..."
+	rm -f $(BINDIR)/$(SKINK_BIN)
+	rm -f $(BINDIR)/skink_test.sh
+	rm -f $(BINDIR)/skink_bench.sh
+	rm -f $(BINDIR)/skink-lsp
+	rm -f $(BINDIR)/skinkfmt
+	@echo "Removing $(STDLIB_DIR)..."
+	rm -rf $(STDLIB_DIR)
 	@echo "Uninstall complete."
 
 # Remove build artifacts
@@ -268,9 +278,9 @@ help:
 	@echo "Targets:"
 	@echo "  make              - Build self-hosted skink binary"
 	@echo "  make stage2       - Self-compile with stage 1 compiler"
-	@echo "  make install      - Install pure compiler, stdlib, and runtime"
+	@echo "  make install      - Build + install toolset to ~/.local/skink (override: SKINK_PREFIX=...)"
 	@echo "  make install-only - Install without rebuilding"
-	@echo "  make uninstall    - Uninstall from system"
+	@echo "  make uninstall    - Remove toolset and stdlib from SKINK_PREFIX"
 	@echo "  make release      - Build distributable archive (dist/)"
 	@echo "  make check-bootstrap-sync - Verify std/ and bootstrap-home/std/ match"
 	@echo "  make sync-bootstrap - Copy std/ to bootstrap-home/std/"

@@ -63,10 +63,15 @@ binary can type-check itself, and replaces the stage-1 binary with stage-2.
 ### Installation from Source
 
 ```bash
-make install        # builds and installs to /usr/local
-make install-only   # installs pre-built binary without rebuilding
-make uninstall      # removes from /usr/local
+make install        # builds and installs the toolset to ~/.local/skink
+make install-only   # installs pre-built binaries without rebuilding
+make uninstall      # removes the toolset and stdlib
 ```
+
+This installs `skink`, `skink-lsp`, `skinkfmt`, `skink_test.sh`, and
+`skink_bench.sh` to `~/.local/skink/bin/`, plus the standard library and
+C runtime to `~/.local/skink/std/` — the same layout `install.sh` uses.
+Override the root with `make SKINK_PREFIX=/opt/skink install`.
 
 ## Creating a Release
 
