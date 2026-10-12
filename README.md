@@ -1,4 +1,4 @@
-# skink-pure
+# skink
 
 The self-hosted Skink compiler, written in Skink itself. This is the canonical
 compiler toolset — no Go or other bootstrapping language is required once the
