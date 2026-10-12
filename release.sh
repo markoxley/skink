@@ -224,9 +224,12 @@ tar -czf "$ARCHIVE_PATH" -C "$STAGING_DIR" .
 info "Created: ${ARCHIVE_PATH}"
 info "  Size: $(du -h "$ARCHIVE_PATH" | cut -f1)"
 info "  Contents:"
-tar -tzf "$ARCHIVE_PATH" | head -5
+# tar|head can SIGPIPE under pipefail when the archive is large —
+# capture the listing first, then display.
+_archive_listing="$(tar -tzf "$ARCHIVE_PATH")"
+echo "$_archive_listing" | head -5
 echo "  ..."
-info "  Total files: $(tar -tzf "$ARCHIVE_PATH" | wc -l | tr -d ' ')"
+info "  Total files: $(echo "$_archive_listing" | wc -l | tr -d ' ')"
 
 # ============================================================================
 # Generate SHA256 checksum
