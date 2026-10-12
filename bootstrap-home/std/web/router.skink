@@ -29,16 +29,16 @@ import "std/web/types"
 
 // Route binds an HTTP method and URL pattern to a handler function.
 pub struct Route {
-    method: string
-    pattern: string
-    handler: types.Handler
+    method: string  // the method
+    pattern: string  // the pattern
+    handler: types.Handler  // the handler
 }
 
 // Router matches incoming requests to registered handlers and manages
 // the middleware chain applied to each request.
 pub struct Router {
-    routes: []Route
-    middlewares: []types.Middleware
+    routes: []Route  // the routes
+    middlewares: []types.Middleware  // the middlewares
 
     // Handle registers a handler for the given HTTP method and URL pattern.
     pub fn Handle(self: *Router, method: string, pattern: string, handler: types.Handler) {

@@ -43,26 +43,29 @@ import "std/checker"
 
 // === Helper Types ===
 
+// ArrayMeta records element-type information the emitter needs for a slice value.
 pub struct ArrayMeta {
-    length:     int
-    elemType:   string
-    heapAlloc:  bool
+    length:     int  // the length
+    elemType:   string  // the element type
+    heapAlloc:  bool  // the heap allocation
 }
 
+// StructLayout maps a struct's field names to their LLVM struct indices and types.
 pub struct StructLayout {
-    llType:      string
-    fields:      []string
-    fieldTypes:  []string
-    isUnsigned:  []bool
-    size:        int
-    alignment:   int
-    offsets:     []int
-    dtorFn:      string
+    llType:      string  // the LLVM type
+    fields:      []string  // the fields
+    fieldTypes:  []string  // the field types
+    isUnsigned:  []bool  // whether unsigned
+    size:        int  // the size
+    alignment:   int  // the alignment
+    offsets:     []int  // the offsets
+    dtorFn:      string  // the destructor function
 }
 
+// LoopLabel holds the LLVM basic-block labels a loop uses for break and continue.
 pub struct LoopLabel {
-    continueLabel: string
-    endLabel:       string
+    continueLabel: string  // the continue label
+    endLabel:       string  // the end label
     // scopeDepth is the scope depth at push time — break must release all
     // scopes deeper than this before branching to endLabel, since the
     // branch bypasses the popScope calls that would otherwise release
@@ -70,15 +73,16 @@ pub struct LoopLabel {
     // continueLabel — for pass-through constructs (switch/select) it is
     // the enclosing loop's depth, not this statement's.
     scopeDepth:     int
-    continueDepth:  int
+    continueDepth:  int  // the continue depth
 }
 
+// ScopeVar records an in-scope variable's LLVM storage pointer, type, and ownership state.
 pub struct ScopeVar {
-    alloca:     string
-    llType:     string
-    isUnsigned: bool
-    synType:    checker.TType
-    borrowed:   bool
+    alloca:     string  // the alloca
+    llType:     string  // the LLVM type
+    isUnsigned: bool  // whether unsigned
+    synType:    checker.TType  // the syn type
+    borrowed:   bool  // the borrowed
     // Escaped variables (whose address is taken via `&` anywhere in the
     // function) are boxed: the value lives in an RC-managed heap block and
     // heapSlot is an alloca holding the block pointer (type llType*). All
@@ -86,14 +90,14 @@ pub struct ScopeVar {
     // boxed variables. Closure capture views set heapSlot with
     // borrowed=true and escaped=false (the env block owns the reference).
     escaped:    bool
-    heapSlot:   string
+    heapSlot:   string  // the heap slot
 }
 
 // ScopeV wraps a map of variable bindings for a single scope.
 // Used because Skink doesn't support []map[string]X directly.
 pub struct ScopeV {
-    vars:  map[string]ScopeVar
-    names: []string
+    vars:  map[string]ScopeVar  // the vars
+    names: []string  // the names
 }
 
 // scopeVMake creates an empty ScopeV with an initialized variable map.
@@ -130,31 +134,32 @@ fn scopeVHas(s: *ScopeV, name: string) -> bool {
 
 // === CodeGen Struct ===
 
+// CodeGen carries the emitter's state while lowering a checked program to LLVM IR.
 pub struct CodeGen {
     // Debug info support (LLVM DWARF metadata emission)
     dbgEnabled:        bool
-    dbgDefaultLoc:     string
+    dbgDefaultLoc:     string  // the dbg default loc
     // Output buffers (using strings, rebuilt on demand)
     moduleHeader:  str.Builder
-    stringGlobals: str.Builder
-    out:           str.Builder
-    spawnThunks:   str.Builder
-    anonFns:       str.Builder
+    stringGlobals: str.Builder  // the string globals
+    out:           str.Builder  // the out
+    spawnThunks:   str.Builder  // the spawn thunks
+    anonFns:       str.Builder  // the anon fns
     // Names of functions that already have a closure-conversion thunk
     // and constant handle block emitted (emitClosureValue).
     closureThunks: map[string]bool
-    arrayDtorFns:  str.Builder
-    metadata:      str.Builder
+    arrayDtorFns:  str.Builder  // the array destructor fns
+    metadata:      str.Builder  // the metadata
     // Alloca buffer: collected per-function, emitted at entry block start
     // to ensure all allocas dominate their uses (LLVM requirement).
     allocaBuffer:  str.Builder
 
     // Counters
     regCounter:        int
-    labelCounter:      int
-    strCounter:        int
-    spawnThunkCounter: int
-    anonFnCounter:     int
+    labelCounter:      int  // the label counter
+    strCounter:        int  // the string counter
+    spawnThunkCounter: int  // the spawn thunk counter
+    anonFnCounter:     int  // the anon function counter
 
     // Scoping
     // scopeVars is a growable stack of scopes; scopeDepth is the index of
@@ -165,54 +170,54 @@ pub struct CodeGen {
     // scopeDepth, and pushScope reuses (by overwriting via index
     // assignment) or grows the backing array as needed.
     scopeVars:          []ScopeV
-    scopeDepth:         int
-    terminated:         bool
-    currentFnRetType:   string
-    currentFnRetTypes:  []string
-    currentFnRetNames:  []string
-    tempBindingTypes:   map[string]string
+    scopeDepth:         int  // the scope depth
+    terminated:         bool  // the terminated
+    currentFnRetType:   string  // the current function return value type
+    currentFnRetTypes:  []string  // the current function return value types
+    currentFnRetNames:  []string  // the current function return value names
+    tempBindingTypes:   map[string]string  // the temp binding types
 
     // Type and function metadata
     fnRetTypes:    map[string][]string
-    fnParamTypes:  map[string][]string
-    arraySizes:    map[string]ArrayMeta
-    structLayouts: map[string]StructLayout
-    structDecls:   map[string]ast.Decl
-    structLLNames: map[string]string
-    structDtors:   map[string]string
-    arrayDtors:    map[string]string
-    enumDtors:     map[string]string
-    fnVariadic:    map[string]bool
-    consts:        map[string]ast.Expr
-    constFiles:    map[string]string
-    globalVarTypes: map[string]string
+    fnParamTypes:  map[string][]string  // the function param types
+    arraySizes:    map[string]ArrayMeta  // the array sizes
+    structLayouts: map[string]StructLayout  // the struct layouts
+    structDecls:   map[string]ast.Decl  // the struct decls
+    structLLNames: map[string]string  // the struct LLVM names
+    structDtors:   map[string]string  // the struct dtors
+    arrayDtors:    map[string]string  // the array dtors
+    enumDtors:     map[string]string  // the enum dtors
+    fnVariadic:    map[string]bool  // the function variadic
+    consts:        map[string]ast.Expr  // the consts
+    constFiles:    map[string]string  // the const files
+    globalVarTypes: map[string]string  // the global var types
 
     // Control flow
     loopLabels:      []LoopLabel
-    loopLabelDepth:  int
-    deferred:        []ast.Stmt
-    errors:          []string
+    loopLabelDepth:  int  // the loop label depth
+    deferred:        []ast.Stmt  // the deferred
+    errors:          []string  // the errors
 
     // Advanced features
     services:           map[string]bool
-    rulesets:           map[string]bool
-    currentFnName:      string
-    hasMainWrapper:     bool
-    mainRetType:        string
-    runtimeHelpersEmitted: bool
-    mapTypes:           map[string]bool
-    setTypes:           map[string]bool
-    rulesetWrappers:    map[string]bool
-    aliases:            map[string]checker.TType
-    taggedUnions:       map[string]ast.Decl
+    rulesets:           map[string]bool  // the rulesets
+    currentFnName:      string  // the current function name
+    hasMainWrapper:     bool  // whether main wrapper
+    mainRetType:        string  // the main return value type
+    runtimeHelpersEmitted: bool  // the runtime helpers emitted
+    mapTypes:           map[string]bool  // the map types
+    setTypes:           map[string]bool  // the set types
+    rulesetWrappers:    map[string]bool  // the ruleset wrappers
+    aliases:            map[string]checker.TType  // the aliases
+    taggedUnions:       map[string]ast.Decl  // the tagged unions
     tuVariantDecl:      map[string]ast.Decl   // variant name -> enum decl
     tuVariantIdx:       map[string]int        // variant name -> variant index
-    fnAliasLLTypes:     map[string]string
-    cudaKernels:        []string
-    importAliases:      map[string]string
-    currentModule:      string
-    importsStdTensor:   bool
-    declaredExterns:    map[string]bool
+    fnAliasLLTypes:     map[string]string  // the function alias LLVM types
+    cudaKernels:        []string  // the cuda kernels
+    importAliases:      map[string]string  // the import aliases
+    currentModule:      string  // the current module
+    importsStdTensor:   bool  // the imports std tensor
+    declaredExterns:    map[string]bool  // the declared externs
     // Names of extern (C ABI) functions, keyed by their emitted symbol
     // name. Used to decide whether a call result is an owned reference:
     // externs return borrowed or aliased pointers (e.g. memcpy returns
@@ -221,9 +226,9 @@ pub struct CodeGen {
 
     // Panic/recover support
     hasDefer:         bool
-    needPanicLanding: bool
-    panicLandingLabel: string
-    normalEntryLabel:  string
+    needPanicLanding: bool  // the need panic landing
+    panicLandingLabel: string  // the panic landing label
+    normalEntryLabel:  string  // the normal entry label
 
     // Runtime defer stack (comp_error.md #41/#42). A defer inside a loop
     // must register once per executed iteration, and its arguments are
@@ -237,8 +242,8 @@ pub struct CodeGen {
     // deferred call arguments evaluated at the defer point;
     // deferNodeTypeEmitted guards the one-time node type header.
     deferQueueAlloca:     string
-    deferTmpCounter:      int
-    deferNodeTypeEmitted: bool
+    deferTmpCounter:      int  // the defer temporary counter
+    deferNodeTypeEmitted: bool  // the defer node type emitted
 
     // String interning: maps string values to their LLVM global names
     // so that identical string literals share the same address. This
@@ -251,20 +256,20 @@ pub struct CodeGen {
 
     // Debug info support (LLVM DWARF metadata emission)
     dbgMetaCounter:      int
-    dbgMetadata:         []string
-    dbgFiles:            map[string]string
-    dbgFilePaths:        []string
-    dbgCompileUnit:      string
-    dbgCurrentFile:      string
-    dbgCurrentSubprogram: string
-    dbgCurrentLoc:       string
-    dbgCurrentLine:      int
-    dbgCurrentCol:       int
-    dbgTypes:            map[string]string
-    dbgStructTypes:      map[string]string
-    currentFilePath:     string
-    currentStmtLine:     int
-    currentStmtCol:      int
+    dbgMetadata:         []string  // the dbg metadata
+    dbgFiles:            map[string]string  // the dbg files
+    dbgFilePaths:        []string  // the dbg file paths
+    dbgCompileUnit:      string  // the dbg compile unit
+    dbgCurrentFile:      string  // the dbg current file
+    dbgCurrentSubprogram: string  // the dbg current subprogram
+    dbgCurrentLoc:       string  // the dbg current loc
+    dbgCurrentLine:      int  // the dbg current line
+    dbgCurrentCol:       int  // the dbg current column
+    dbgTypes:            map[string]string  // the dbg types
+    dbgStructTypes:      map[string]string  // the dbg struct types
+    currentFilePath:     string  // the current file path
+    currentStmtLine:     int  // the current statement line
+    currentStmtCol:      int  // the current statement column
 
     // Global variable initializers: collected during emission and
     // initialized in a _skink_global_init function called before main.
@@ -279,7 +284,7 @@ pub struct CodeGen {
     // exit. fnBodyActive gates this so temporaries are only tracked while
     // emitting a normal function body (not global init or ruleset code).
     tempCounter:         int
-    fnBodyActive:        bool
+    fnBodyActive:        bool  // the function body active
 
     // appendSelfVar holds an lValueKey ("x" or "t.vals") when emitting the
     // RHS of the `x = append(x, ...)` self-assignment idiom. Only that idiom proves the
@@ -313,12 +318,12 @@ pub struct CodeGen {
     // `fn main`; entryMainEmitted records that a lone library `fn main`
     // already claimed the @_skink_main entry symbol (#116).
     hasModuleMainEntry:   bool
-    entryMainEmitted:     bool
+    entryMainEmitted:     bool  // the entry main emitted
 
     // Error propagation support: the current function's return label
     // (for `?` operator early-return) and return value allocas
     fnReturnLabel:       string
-    fnReturnAlloca:      string
+    fnReturnAlloca:      string  // the function return alloca
 }
 
 // === Constructor ===
@@ -1025,8 +1030,8 @@ fn promoteForCapture(cg: *CodeGen, name: string) -> (ScopeVar, bool) {
 // via the seen map; names keeps a deterministic order for the env block
 // layout (packing and unpacking must agree).
 struct CaptureScan {
-    seen:  map[string]bool
-    names: []string
+    seen:  map[string]bool  // the seen
+    names: []string  // the names
 }
 
 // add records a name once, preserving first-use order.
@@ -1191,8 +1196,8 @@ fn captureScanExpr(s: *CaptureScan, e: ast.Expr) {
 // occur inside any function-literal body and may therefore be captured
 // by a closure (comp_error.md #39).
 struct EscapeScan {
-    escaped:  map[string]bool
-    captured: map[string]bool
+    escaped:  map[string]bool  // the escaped
+    captured: map[string]bool  // the captured
 }
 
 fn collectEscapedVars(stmts: []ast.Stmt) -> EscapeScan {

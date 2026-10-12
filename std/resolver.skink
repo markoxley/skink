@@ -38,18 +38,18 @@ extern fn ftell(fp: int64) -> int64
 
 // FileInfo holds the parsed contents of a single resolved source file.
 struct FileInfo {
-    path: string
-    moduleName: string
-    declarations: []ast.Stmt
+    path: string  // the path
+    moduleName: string  // the module name
+    declarations: []ast.Stmt  // the declarations
 }
 
 // Resolver tracks loaded files, their load state (unvisited / in-progress /
 // done), accumulated errors, and the standard-library search root.
 struct Resolver {
-    files: []FileInfo
-    states: map[string]int
-    errors: []string
-    searchRoot: string
+    files: []FileInfo  // the files
+    states: map[string]int  // the states
+    errors: []string  // the errors
+    searchRoot: string  // the search root
 }
 
 // joinPath concatenates two path components, inserting a "/" separator

@@ -31,7 +31,7 @@ import "std/fs"
 
 // Record represents a single CSV row as a slice of field strings.
 pub struct Record {
-    fields: []string
+    fields: []string  // the fields
 
     // Len returns the number of fields in this record.
     pub fn Len(self: Record) -> int {
@@ -61,9 +61,9 @@ pub fn NewRecord(fields: []string) -> Record {
 
 // Reader parses CSV text with configurable separator and quoted-field support.
 pub struct Reader {
-    data: string
-    pos: int
-    separator: int
+    data: string  // the data
+    pos: int  // the position
+    separator: int  // the separator
 
     // Read parses the next CSV row and returns it as a Record.
     // Returns an EOF error when all rows have been consumed.
@@ -135,9 +135,9 @@ pub struct Reader {
 // Writers created by NewFileWriter also carry a destination path so
 // Flush()/Close() persist the accumulated output to that file.
 pub struct Writer {
-    output: string
-    separator: int
-    path: string
+    output: string  // the output
+    separator: int  // the separator
+    path: string  // the path
 
     // Write appends a Record to the writer's output, quoting fields that
     // contain the separator, quotes, or newlines.

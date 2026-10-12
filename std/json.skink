@@ -32,13 +32,13 @@ import "std/strconv"
 // Use the kind field (0=null, 1=bool, 2=number, 3=string, 4=array, 5=object)
 // to determine which fields are valid.
 pub struct Value {
-    kind: int
-    strVal: string
-    numVal: float
-    boolVal: bool
-    arr: []Value
-    objKeys: []string
-    objVals: []Value
+    kind: int  // the kind
+    strVal: string  // the string value
+    numVal: float  // the numeric value
+    boolVal: bool  // the bool value
+    arr: []Value  // the array elements
+    objKeys: []string  // the object keys
+    objVals: []Value  // the object values
 }
 
 // zeroValue returns a JSON Value initialized to the null kind.
@@ -376,11 +376,11 @@ pub fn Unmarshal(s: string) -> (Value, errors.Error) {
 
 // Parser holds the state for JSON parsing: input, position, depth, and error.
 struct Parser {
-    s: string
-    pos: int
-    len: int
-    depth: int
-    errMsg: string
+    s: string  // the input string
+    pos: int  // the position
+    len: int  // the length
+    depth: int  // the depth
+    errMsg: string  // the error message
 
     fn peek(self: *Parser) -> int {
         self.skipWhitespace()
@@ -675,8 +675,8 @@ fn parseInt(s: string) -> int {
 
 // Entry is a simple key-value pair used by the legacy entry-based JSON API.
 pub struct Entry {
-    key: string
-    value: string
+    key: string  // the key
+    value: string  // the value
 
     // Key returns the entry's key string.
     pub fn Key(self: Entry) -> string {

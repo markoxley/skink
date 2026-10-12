@@ -42,8 +42,8 @@ extern fn Skink_set_socket_timeout(fd: int, timeoutMs: int) -> int
 
 // Response holds an HTTP response.
 pub struct Response {
-    status: int
-    body: string
+    status: int  // the status
+    body: string  // the body
 
     // Status returns the HTTP status code of the response.
     pub fn Status(self: Response) -> int {
@@ -100,8 +100,8 @@ fn parseURL(url: string) -> (string, string, int, bool) {
 // insecureSkipVerify disables TLS certificate verification — intended
 // for tests against self-signed servers; leave false in production.
 pub struct Client {
-    timeoutMs: int
-    insecureSkipVerify: bool
+    timeoutMs: int  // the timeout in milliseconds
+    insecureSkipVerify: bool  // whether to skip TLS certificate verification
 
     // Get performs an HTTP GET request.
     pub fn Get(self: Client, url: string) -> (Response, errors.Error) {

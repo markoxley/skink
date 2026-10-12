@@ -42,15 +42,15 @@ extern fn mosquitto_loop(mosq: int64, timeout: int, max_packets: int) -> int
 
 // Message represents a received MQTT message with its topic and payload.
 pub struct Message {
-    topic: string
-    payload: string
+    topic: string  // the topic
+    payload: string  // the payload
 }
 
 // Client wraps a libmosquitto handle for MQTT communication.
 pub struct Client {
-    handle: int64
-    host: string
-    port: int
+    handle: int64  // the handle
+    host: string  // the host
+    port: int  // the port
 
     // Connect establishes a connection to the MQTT broker with a 60s keepalive.
     pub fn Connect(self: *Client) -> errors.Error {

@@ -33,10 +33,10 @@ import "std/str"
 // B holds benchmark state including the name, start/elapsed timestamps,
 // and iteration count for a benchmark run.
 pub struct B {
-    name:    string
-    start:   int64
-    elapsed: int64
-    n:       int
+    name:    string  // the name
+    start:   int64  // the start
+    elapsed: int64  // the elapsed
+    n:       int  // the number of
 
     // StartTimer records the current time as the benchmark start.
     pub fn StartTimer(self: *B) {

@@ -28,17 +28,20 @@ import "std/strconv"
 
 // Token represents a single word or punctuation mark in a text.
 pub struct Token {
-    text: string
+    text: string  // the text
     tag:  string  // POS tag (empty if not tagged)
 
+    // Text returns the token's surface text.
     pub fn Text(self: Token) -> string {
         return self.text
     }
 
+    // Tag returns the token's part-of-speech tag.
     pub fn Tag(self: Token) -> string {
         return self.tag
     }
 
+    // IsPunct reports whether the token is punctuation.
     pub fn IsPunct(self: Token) -> bool {
         if str.Len(self.text) == 0 {
             return false
@@ -61,6 +64,7 @@ pub struct Token {
         return false
     }
 
+    // IsWord reports whether the token is a word.
     pub fn IsWord(self: Token) -> bool {
         return !self.IsPunct() && str.Len(self.text) > 0
     }

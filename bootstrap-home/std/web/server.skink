@@ -56,17 +56,17 @@ extern fn Skink_mem_realloc(ptr: string, size: int64) -> string
 
 // TLSConfig holds certificate and private key file paths for HTTPS.
 pub struct TLSConfig {
-    certFile: string
-    keyFile:  string
+    certFile: string  // the certificate file
+    keyFile:  string  // the key file
 }
 
 // SniCert binds an extra certificate to a hostname for SNI-based
 // selection — the server picks this cert when the client's TLS
 // ClientHello carries the matching servername (comp_error.md #67).
 pub struct SniCert {
-    hostname: string
-    certFile: string
-    keyFile:  string
+    hostname: string  // the hostname
+    certFile: string  // the certificate file
+    keyFile:  string  // the key file
 }
 
 // Server wraps a TCP listener and a router to serve HTTP requests,
@@ -77,22 +77,22 @@ pub struct SniCert {
 // 512 (#61). Shutdown() stops the accept loop and drains in-flight
 // handlers (#63).
 pub struct Server {
-    port:            int
-    handler:         *router.Router
-    tls:             *TLSConfig
-    maxRequestBytes: int
-    readTimeoutMs:   int
-    writeTimeoutMs:  int
-    maxConns:        int
-    listenFd:        int
-    shuttingDown:    int
-    trackConns:      int
-    slotMu:          *sync.Mutex
-    slotCond:        sync.Cond
-    activeConns:     int
-    maxConnsEff:     int
-    wg:              *waitgroup.WaitGroup
-    sniCerts:        []SniCert
+    port:            int  // the port
+    handler:         *router.Router  // the handler
+    tls:             *TLSConfig  // the TLS
+    maxRequestBytes: int  // the maximum request bytes
+    readTimeoutMs:   int  // the read timeout in milliseconds
+    writeTimeoutMs:  int  // the write timeout in milliseconds
+    maxConns:        int  // the maximum connections
+    listenFd:        int  // the listen file descriptor
+    shuttingDown:    int  // the shutting down
+    trackConns:      int  // the track conns
+    slotMu:          *sync.Mutex  // the slot mutex
+    slotCond:        sync.Cond  // the slot cond
+    activeConns:     int  // the active conns
+    maxConnsEff:     int  // the maximum conns eff
+    wg:              *waitgroup.WaitGroup  // the wait group
+    sniCerts:        []SniCert  // the sni certs
 
     // initConcurrency prepares the connection-limit semaphore (a
     // mutex+condvar counter — Skink channels are unbounded queues, not
@@ -479,13 +479,13 @@ pub struct Server {
 // loop can read several requests and carry leftover (pipelined) bytes
 // between them. When ssl is non-zero, reads and writes go through TLS.
 struct connReader {
-    conn:   net.Connection
-    ssl:    int64
-    buf:    string
-    bufCap: int
-    len:    int
-    head:   int
-    max:    int
+    conn:   net.Connection  // the connection
+    ssl:    int64  // the ssl
+    buf:    string  // the buffer
+    bufCap: int  // the buffer capacity
+    len:    int  // the length
+    head:   int  // the head
+    max:    int  // the maximum
 
     // fill reads more bytes into the buffer, compacting consumed bytes
     // and growing up to the max request size. Returns bytes read, 0 on

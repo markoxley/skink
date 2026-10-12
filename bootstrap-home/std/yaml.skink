@@ -30,13 +30,13 @@ import "std/errors"
 // Value is a dynamic YAML value that can represent scalar, sequence,
 // or mapping types. Use the kind field to determine the active type.
 pub struct Value {
-    kind: int
-    strVal: string
-    numVal: float
-    boolVal: bool
-    arr: []Value
-    objKeys: []string
-    objVals: []Value
+    kind: int  // the kind
+    strVal: string  // the string value
+    numVal: float  // the number of value
+    boolVal: bool  // the bool value
+    arr: []Value  // the arr
+    objKeys: []string  // the obj keys
+    objVals: []Value  // the obj vals
 }
 
 // zeroValue returns a YAML Value initialized to the null kind.
@@ -539,8 +539,8 @@ fn parseObjectLines(lines: []string, start: int, end: int, baseIndent: int) -> V
 
 // Entry is a simple key-value pair used by the legacy entry-based YAML API.
 pub struct Entry {
-    key: string
-    value: string
+    key: string  // the key
+    value: string  // the value
 
     // Key returns the entry's key string.
     pub fn Key(self: Entry) -> string {

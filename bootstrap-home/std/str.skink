@@ -34,9 +34,9 @@ fn managedAlloc(size: int) -> string {
 
 // Builder is a growable byte buffer for efficiently constructing strings.
 pub struct Builder {
-    buf: string
-    len: int
-    cap: int
+    buf: string  // the buffer
+    len: int  // the length
+    cap: int  // the capacity
 }
 
 // NewBuilder creates a new Builder with at least cap bytes of capacity.

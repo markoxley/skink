@@ -56,8 +56,8 @@ fn levelString(l: int) -> string {
 
 // Logger writes log messages with a configurable prefix and level filter.
 pub struct Logger {
-    prefix: string
-    minLevel: int
+    prefix: string  // the prefix
+    minLevel: int  // the minimum level
 
     // Print writes a message line with the logger's prefix.
     pub fn Print(self: Logger, message: string) {
@@ -130,8 +130,8 @@ pub fn NewLoggerWithLevel(prefix: string, level: int) -> Logger {
 
 // FileWriter writes log messages to a file.
 pub struct FileWriter {
-    path: string
-    handle: string
+    path: string  // the path
+    handle: string  // the handle
 
     // Open opens the file for appending.
     pub fn Open(self: *FileWriter) -> bool {

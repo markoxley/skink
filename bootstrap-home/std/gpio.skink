@@ -32,9 +32,9 @@ import "std/errors"
 //   - mode:   the current pin direction (INPUT or OUTPUT).
 //   - value:  the last level written to (or read from) the pin.
 pub struct Pin {
-    number: int
-    mode: int
-    value: int
+    number: int  // the number
+    mode: int  // the mode
+    value: int  // the value
 
     // SetOutput configures the pin as a digital output.
     //
@@ -153,8 +153,8 @@ pub fn PinFactory(bcmNumber: int) -> Pin {
 
 // Pin direction constants used by SetInput/SetOutput and Mode.
 pub const INPUT = 0
-pub const OUTPUT = 1
-pub const PWM_MODE = 2
+pub const OUTPUT = 1  // the output
+pub const PWM_MODE = 2  // the pwm mode
 
 // Cleanup releases GPIO resources. The stub backend is a no-op; on
 // wiringPi/pigpio it unexports pins and releases the backend.
@@ -164,10 +164,10 @@ pub fn Cleanup() {
 
 // Pin level constants used by Write/Read.
 pub const LOW = 0
-pub const HIGH = 1
+pub const HIGH = 1  // the high
 
 // Pull resistor constants for future SetPull support.
 // On wiringPi these map to PUD_OFF/PUD_DOWN/PUD_UP via pullUpDnControl.
 pub const PULL_OFF = 0
-pub const PULL_DOWN = 1
-pub const PULL_UP = 2
+pub const PULL_DOWN = 1  // the pull down
+pub const PULL_UP = 2  // the pull up

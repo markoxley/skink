@@ -38,9 +38,9 @@ import "std/str"
 
 // strIdxEntry is a single key/slot pair in the open-addressed table.
 pub struct StrIdxEntry {
-    key:  string
-    slot: int
-    used: bool
+    key:  string  // the key
+    slot: int  // the slot
+    used: bool  // the used
 }
 
 // strHash computes a 31-bit djb2-style hash of s. Masking each step
@@ -59,9 +59,9 @@ fn strHash(s: string) -> int {
 // change for the life of the index. It grows automatically when the
 // load factor exceeds 70%.
 pub struct StrIndex {
-    entries: []StrIdxEntry
-    count:   int
-    cap:     int
+    entries: []StrIdxEntry  // the entries
+    count:   int  // the count
+    cap:     int  // the capacity
 
     // slotOf returns the entry index of key, or -1 when absent.
     // Probing always terminates because the table is never more than

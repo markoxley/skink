@@ -260,8 +260,8 @@ pub fn NewCond(mu: *Mutex) -> Cond {
 // Once is an object that will perform exactly one action.  It is safe
 // for concurrent use by multiple goroutines.
 pub struct Once {
-    mu: *Mutex
-    done: bool
+    mu: *Mutex  // the mutex
+    done: bool  // the done
 
     // Do calls the function f if and only if Do has not been called for this
     // instance of Once before.  f must not take arguments and must not return

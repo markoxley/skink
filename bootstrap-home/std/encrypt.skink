@@ -74,8 +74,8 @@ pub const EVP_CTRL_GCM_SET_TAG = 17
 // The data field is a raw byte buffer (may contain null bytes); use length
 // to determine how many bytes are valid.
 pub struct CipherResult {
-    data: string
-    length: int
+    data: string  // the data
+    length: int  // the length
 
     // Data returns the encrypted/decrypted bytes (may contain NULs).
     pub fn Data(self: CipherResult) -> string {
@@ -91,8 +91,8 @@ pub struct CipherResult {
 // AESCipher provides AES-GCM authenticated encryption.
 // The key must be 16, 24, or 32 bytes (128, 192, or 256 bits).
 pub struct AESCipher {
-    key: string
-    keyLen: int
+    key: string  // the key
+    keyLen: int  // the length
 
     // Encrypt encrypts plaintext using AES-GCM with a random nonce.
     // The result format is: nonce (12 bytes) || tag (16 bytes) || ciphertext.
@@ -275,8 +275,8 @@ pub struct AESCipher {
 
 // RSACipher provides RSA encryption and decryption using PEM-encoded keys.
 pub struct RSACipher {
-    pubKey: string
-    privKey: string
+    pubKey: string  // the pub key
+    privKey: string  // the priv key
 
     // Encrypt encrypts plaintext using the RSA public key (PKCS1 padding).
     pub fn Encrypt(self: RSACipher, plaintext: string, ptLen: int) -> (CipherResult, errors.Error) {

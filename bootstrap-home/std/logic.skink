@@ -30,8 +30,8 @@ import "std/libc"
 // Term represents a Prolog term: either an atom, a variable, or a compound term.
 pub struct Term {
     kind:   int    // 0=atom, 1=variable, 2=compound
-    name:   string
-    args:   []Term
+    name:   string  // the name
+    args:   []Term  // the arguments
 
     // Name returns the term's name (atom value, variable name, or functor).
     pub fn Name(self: Term) -> string {
@@ -82,7 +82,7 @@ pub fn Compound(functor: string, args: []Term) -> Term {
 // Clause represents a fact or rule. A fact is a clause with an empty body.
 // A rule has a head and a body (list of goals).
 pub struct Clause {
-    head: Term
+    head: Term  // the head
     body: []Term  // empty for facts
 }
 
@@ -98,7 +98,7 @@ pub fn Rule(head: Term, body: []Term) -> Clause {
 
 // Database holds a collection of clauses.
 pub struct Database {
-    clauses: []Clause
+    clauses: []Clause  // the clauses
 
     // Add adds a clause to the database.
     pub fn Add(self: *Database, clause: Clause) {

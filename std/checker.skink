@@ -43,46 +43,48 @@ import "std/io"
 
 // === Type Kind Constants ===
 
-pub const TK_BUILTIN      = 1
-pub const TK_POINTER      = 2
-pub const TK_ARRAY        = 3
-pub const TK_SET          = 4
-pub const TK_MAP          = 5
-pub const TK_CHAN         = 6
-pub const TK_TENSOR       = 7
-pub const TK_NAMED        = 8
-pub const TK_FUNCTION     = 9
-pub const TK_TUPLE        = 10
-pub const TK_NIL          = 11
-pub const TK_INTERFACE    = 12
-pub const TK_ERROR        = 13
-pub const TK_ANY          = 14
-pub const TK_UNKNOWN      = 15
-pub const TK_SERVICE      = 16
-pub const TK_RULESET      = 17
-pub const TK_TEMPLATE     = 18
-pub const TK_TAGGED_UNION = 19
+pub const TK_BUILTIN      = 1  // builtin type kind
+pub const TK_POINTER      = 2  // pointer type kind
+pub const TK_ARRAY        = 3  // array type kind
+pub const TK_SET          = 4  // set type kind
+pub const TK_MAP          = 5  // map type kind
+pub const TK_CHAN         = 6  // chan type kind
+pub const TK_TENSOR       = 7  // tensor type kind
+pub const TK_NAMED        = 8  // named type kind
+pub const TK_FUNCTION     = 9  // function type kind
+pub const TK_TUPLE        = 10  // tuple type kind
+pub const TK_NIL          = 11  // nil type kind
+pub const TK_INTERFACE    = 12  // interface type kind
+pub const TK_ERROR        = 13  // error type kind
+pub const TK_ANY          = 14  // any type kind
+pub const TK_UNKNOWN      = 15  // unknown type kind
+pub const TK_SERVICE      = 16  // service type kind
+pub const TK_RULESET      = 17  // ruleset type kind
+pub const TK_TEMPLATE     = 18  // template type kind
+pub const TK_TAGGED_UNION = 19  // tagged union type kind
 
 // === Type Representation ===
 
+// TType is the checker's internal representation of a Skink type: kind tag, name, and composite element/field/parameter data.
 pub struct TType {
-    kind: int
-    name: string
-    elem: []TType
-    keyType: []TType
-    params:   []TType
-    retTypes: []TType
-    variadic: bool
-    tupleTypes: []TType
-    variants: []TaggedVariant
-    methodNames: []string
-    methodTypes: []TType
-    genericArgs: []TType
+    kind: int  // the kind
+    name: string  // the name
+    elem: []TType  // the element
+    keyType: []TType  // the key type
+    params:   []TType  // the params
+    retTypes: []TType  // the return value types
+    variadic: bool  // the variadic
+    tupleTypes: []TType  // the tuple types
+    variants: []TaggedVariant  // the variants
+    methodNames: []string  // the method names
+    methodTypes: []TType  // the method types
+    genericArgs: []TType  // the generic arguments
 }
 
+// TaggedVariant describes one variant of an enum declaration: its name and payload field types.
 pub struct TaggedVariant {
-    name:        string
-    payloadType: []TType
+    name:        string  // the name
+    payloadType: []TType  // the payload type
 }
 
 // === Type Constructors ===
@@ -723,8 +725,8 @@ fn checkIntLitFits(c: *Checker, e: ast.Expr, target: TType) {
 
 // bindingTable is a string→Binding hash table.
 struct bindingTable {
-    idx:  stridx.StrIndex
-    vals: []Binding
+    idx:  stridx.StrIndex  // the index
+    vals: []Binding  // the values
 
     fn Get(self: *bindingTable, key: string) -> Binding {
         var zero Binding
@@ -764,8 +766,8 @@ struct bindingTable {
 
 // ttypeTable is a string→TType hash table.
 struct ttypeTable {
-    idx:  stridx.StrIndex
-    vals: []TType
+    idx:  stridx.StrIndex  // the index
+    vals: []TType  // the values
 
     fn Get(self: *ttypeTable, key: string) -> TType {
         var zero TType
@@ -801,8 +803,8 @@ struct ttypeTable {
 
 // declTable is a string→ast.Decl hash table.
 struct declTable {
-    idx:  stridx.StrIndex
-    vals: []ast.Decl
+    idx:  stridx.StrIndex  // the index
+    vals: []ast.Decl  // the values
 
     fn Get(self: *declTable, key: string) -> ast.Decl {
         var zero ast.Decl
@@ -838,8 +840,8 @@ struct declTable {
 
 // symInfoTable is a string→SymbolInfo hash table.
 struct symInfoTable {
-    idx:  stridx.StrIndex
-    vals: []SymbolInfo
+    idx:  stridx.StrIndex  // the index
+    vals: []SymbolInfo  // the values
 
     fn Get(self: *symInfoTable, key: string) -> SymbolInfo {
         var zero SymbolInfo
@@ -875,8 +877,8 @@ struct symInfoTable {
 
 // exprTable is a string→ast.Expr hash table.
 struct exprTable {
-    idx:  stridx.StrIndex
-    vals: []ast.Expr
+    idx:  stridx.StrIndex  // the index
+    vals: []ast.Expr  // the values
 
     fn Get(self: *exprTable, key: string) -> ast.Expr {
         var zero ast.Expr
@@ -912,8 +914,8 @@ struct exprTable {
 
 // strSliceTable is a string→[]string hash table.
 struct strSliceTable {
-    idx:  stridx.StrIndex
-    vals: [][]string
+    idx:  stridx.StrIndex  // the index
+    vals: [][]string  // the values
 
     fn Get(self: *strSliceTable, key: string) -> []string {
         var zero []string
@@ -949,8 +951,8 @@ struct strSliceTable {
 
 // strStrTable is a string→string hash table.
 struct strStrTable {
-    idx:  stridx.StrIndex
-    vals: []string
+    idx:  stridx.StrIndex  // the index
+    vals: []string  // the values
 
     fn Get(self: *strStrTable, key: string) -> string {
         var zero string
@@ -986,8 +988,8 @@ struct strStrTable {
 
 // strBoolTable is a string→bool hash table.
 struct strBoolTable {
-    idx:  stridx.StrIndex
-    vals: []bool
+    idx:  stridx.StrIndex  // the index
+    vals: []bool  // the values
 
     fn Get(self: *strBoolTable, key: string) -> bool {
         i := self.idx.Find(key)
@@ -1024,16 +1026,16 @@ struct strBoolTable {
 
 // Binding holds a variable's type and usage metadata in a scope.
 struct Binding {
-    typ:     TType
-    used:    bool
-    isParam: bool
-    isBlank: bool
+    typ:     TType  // the typ
+    used:    bool  // the used
+    isParam: bool  // whether param
+    isBlank: bool  // whether blank
 }
 
 // Scope is a lexical scope with ordered names for iteration.
 struct Scope {
-    bindings: bindingTable
-    names:    []string
+    bindings: bindingTable  // the bindings
+    names:    []string  // the names
 }
 
 // scopeMake creates an empty Scope.
@@ -1058,38 +1060,40 @@ fn scopeSet(s: *Scope, name: string, b: Binding) {
     s.bindings.Set(name, b)
 }
 
+// SymbolInfo records a resolved symbol's type, mutability, kind, and declaring module.
 pub struct SymbolInfo {
-    moduleName: string
-    isPub:  bool
+    moduleName: string  // the module name
+    isPub:  bool  // whether pub
 }
 
 // === Checker ===
 
+// Checker carries the type checker's state while validating a resolved program.
 pub struct Checker {
-    errors:        []string
-    scopes:        []Scope
-    scopeDepth:    int
-    loopDepth:     int
-    breakDepth:    int
-    currentFn:     []TType
-    currentFnRetNames: []string
-    structs:       declTable
-    fnDecls:       declTable
-    services:      ttypeTable
-    rulesets:      ttypeTable
-    templates:     declTable
-    templateNamesList: []string
-    aliases:       ttypeTable
-    taggedUnions:  declTable
-    symbolInfo:    symInfoTable
-    currentModule: string
-    imports:       strSliceTable
-    importModules: []string
-    importAliases: strStrTable
-    usedImports:   strBoolTable
-    currentFile:   string
-    currentLine:   int
-    currentCol:    int
+    errors:        []string  // the errors
+    scopes:        []Scope  // the scopes
+    scopeDepth:    int  // the scope depth
+    loopDepth:     int  // the loop depth
+    breakDepth:    int  // the break depth
+    currentFn:     []TType  // the current function
+    currentFnRetNames: []string  // the current function return value names
+    structs:       declTable  // the structs
+    fnDecls:       declTable  // the function decls
+    services:      ttypeTable  // the services
+    rulesets:      ttypeTable  // the rulesets
+    templates:     declTable  // the templates
+    templateNamesList: []string  // the template names list
+    aliases:       ttypeTable  // the aliases
+    taggedUnions:  declTable  // the tagged unions
+    symbolInfo:    symInfoTable  // the symbol info
+    currentModule: string  // the current module
+    imports:       strSliceTable  // the imports
+    importModules: []string  // the import modules
+    importAliases: strStrTable  // the import aliases
+    usedImports:   strBoolTable  // the used imports
+    currentFile:   string  // the current file
+    currentLine:   int  // the current line
+    currentCol:    int  // the current column
     // chanElemTypes maps "line:col" of <-ch expressions to the channel's
     // element type, for use by the emitter.
     chanElemTypes: ttypeTable

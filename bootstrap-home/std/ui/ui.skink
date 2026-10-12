@@ -102,17 +102,17 @@ extern fn Skink_ui_mouse_clicked(h: int64, btn: int64) -> int64
 
 // Window creation flags for NewWindow.
 pub const WIN_RESIZABLE  = 1
-pub const WIN_BORDERLESS = 2
-pub const WIN_FULLSCREEN = 4
+pub const WIN_BORDERLESS = 2  // borderless window flag
+pub const WIN_FULLSCREEN = 4  // fullscreen window flag
 
 // Text alignment for labels.
 pub const ALIGN_LEFT  = 0
-pub const ALIGN_RIGHT = 1
+pub const ALIGN_RIGHT = 1  // right alignment
 
 // Mouse buttons for MouseDown/MouseClicked.
 pub const MOUSE_LEFT   = 0
-pub const MOUSE_MIDDLE = 1
-pub const MOUSE_RIGHT  = 2
+pub const MOUSE_MIDDLE = 1  // middle mouse button
+pub const MOUSE_RIGHT  = 2  // right mouse button
 
 // Internal widget-id generator for stateful controls (text edits, trees).
 var uiNextID = 1
@@ -143,9 +143,9 @@ pub template Widget {
 // Window wraps an OS window + GPU renderer and the retained widget list
 // drawn by Draw().
 pub struct Window {
-    handle:  int64
-    widgets: []Widget
-    menubar: *MenuBar
+    handle:  int64  // the handle
+    widgets: []Widget  // the widgets
+    menubar: *MenuBar  // the menubar
 
     // Width returns the window's pixel width.
     pub fn Width(self: Window) -> int {
@@ -314,13 +314,14 @@ pub fn Spacer(win: *Window) {
 
 // TextLabel is a retained label whose Text may be updated or bound.
 pub struct TextLabel {
-    Text:  string
-    R:     int
-    G:     int
-    B:     int
-    Right: bool
-    Wrap:  bool
+    Text:  string  // the text
+    R:     int  // the red channel
+    G:     int  // the green channel
+    B:     int  // the blue channel
+    Right: bool  // the right
+    Wrap:  bool  // the wrap
 
+    // Draw renders the widget.
     pub fn Draw(self: *TextLabel, h: int64) {
         if self.Wrap {
             Skink_ui_text_wrap(h, self.Text)
@@ -337,6 +338,7 @@ pub struct TextLabel {
         }
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *TextLabel) -> int {
         return 24
     }
@@ -350,9 +352,10 @@ pub fn NewLabel(text: string) -> *TextLabel {
 
 // Btn is a retained push button; OnClick fires on click frames.
 pub struct Btn {
-    Label:   string
-    OnClick: fn()
+    Label:   string  // the label
+    OnClick: fn()  // the click callback
 
+    // Draw renders the widget.
     pub fn Draw(self: *Btn, h: int64) {
         if Skink_ui_button(h, self.Label) != 0 {
             if self.OnClick != nil {
@@ -361,6 +364,7 @@ pub struct Btn {
         }
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *Btn) -> int {
         return 30
     }
@@ -374,10 +378,11 @@ pub fn NewButton(label: string, cb: fn()) -> *Btn {
 
 // CheckBoxC is a retained checkbox; Checked updates on toggle.
 pub struct CheckBoxC {
-    Label:    string
-    Checked:  bool
-    OnChange: fn(bool)
+    Label:    string  // the label
+    Checked:  bool  // the checked
+    OnChange: fn(bool)  // the change callback
 
+    // Draw renders the widget.
     pub fn Draw(self: *CheckBoxC, h: int64) {
         before := int64(0)
         if self.Checked {
@@ -392,6 +397,7 @@ pub struct CheckBoxC {
         }
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *CheckBoxC) -> int {
         return 24
     }
@@ -406,11 +412,12 @@ pub fn NewCheckBox(label: string, checked: bool) -> *CheckBoxC {
 // TextBox is a retained single-line text editor. The edit buffer lives
 // in the runtime shim keyed by a widget id; read it with Text().
 pub struct TextBox {
-    id:          int
-    Placeholder: string
-    OnChange:    fn(string)
-    OnEnter:     fn(string)
+    id:          int  // the widget ID
+    Placeholder: string  // the placeholder
+    OnChange:    fn(string)  // the change callback
+    OnEnter:     fn(string)  // the enter callback
 
+    // Draw renders the widget.
     pub fn Draw(self: *TextBox, h: int64) {
         r := Skink_ui_edit(h, int64(self.id), 1)
         // NK_EDIT_COMMITTED (0x4)/DEACTIVATED-with-commit (0x8) → OnEnter;
@@ -428,6 +435,7 @@ pub struct TextBox {
         }
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *TextBox) -> int {
         return 30
     }
@@ -451,12 +459,13 @@ pub fn NewTextBox() -> *TextBox {
 
 // SliderInt is a retained integer slider; Value updates on drag.
 pub struct SliderInt {
-    Min:      int
-    Max:      int
-    Step:     int
-    Value:    int
-    OnChange: fn(int)
+    Min:      int  // the minimum
+    Max:      int  // the maximum
+    Step:     int  // the step
+    Value:    int  // the value
+    OnChange: fn(int)  // the change callback
 
+    // Draw renders the widget.
     pub fn Draw(self: *SliderInt, h: int64) {
         nv := int(Skink_ui_slide_int(h, int64(self.Min), int64(self.Value), int64(self.Max), int64(self.Step)))
         if nv != self.Value {
@@ -467,6 +476,7 @@ pub struct SliderInt {
         }
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *SliderInt) -> int {
         return 26
     }
@@ -480,12 +490,13 @@ pub fn NewSliderInt(min: int, max: int, step: int, value: int) -> *SliderInt {
 
 // SliderFloat is a retained float slider; Value updates on drag.
 pub struct SliderFloat {
-    Min:      float
-    Max:      float
-    Step:     float
-    Value:    float
-    OnChange: fn(float)
+    Min:      float  // the minimum
+    Max:      float  // the maximum
+    Step:     float  // the step
+    Value:    float  // the value
+    OnChange: fn(float)  // the change callback
 
+    // Draw renders the widget.
     pub fn Draw(self: *SliderFloat, h: int64) {
         nv := Skink_ui_slide_float(h, self.Min, self.Value, self.Max, self.Step)
         if nv != self.Value {
@@ -496,6 +507,7 @@ pub struct SliderFloat {
         }
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *SliderFloat) -> int {
         return 26
     }
@@ -509,13 +521,15 @@ pub fn NewSliderFloat(min: float, max: float, step: float, value: float) -> *Sli
 
 // ProgressBar is a retained progress bar; set Value per frame.
 pub struct ProgressBar {
-    Value: int
-    Max:   int
+    Value: int  // the value
+    Max:   int  // the maximum
 
+    // Draw renders the widget.
     pub fn Draw(self: *ProgressBar, h: int64) {
         Skink_ui_progress(h, int64(self.Value), int64(self.Max), 0)
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *ProgressBar) -> int {
         return 22
     }
@@ -529,13 +543,14 @@ pub fn NewProgressBar(max: int) -> *ProgressBar {
 
 // PropertyInt is a spinbox (number entry with +/- nudge).
 pub struct PropertyInt {
-    Name:     string
-    Min:      int
-    Max:      int
-    Step:     int
-    Value:    int
-    OnChange: fn(int)
+    Name:     string  // the name
+    Min:      int  // the minimum
+    Max:      int  // the maximum
+    Step:     int  // the step
+    Value:    int  // the value
+    OnChange: fn(int)  // the change callback
 
+    // Draw renders the widget.
     pub fn Draw(self: *PropertyInt, h: int64) {
         nv := int(Skink_ui_property_int(h, self.Name, int64(self.Min), int64(self.Value), int64(self.Max), int64(self.Step), 1.0))
         if nv != self.Value {
@@ -546,6 +561,7 @@ pub struct PropertyInt {
         }
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *PropertyInt) -> int {
         return 26
     }
@@ -559,10 +575,11 @@ pub fn NewPropertyInt(name: string, min: int, max: int, step: int, value: int) -
 
 // ComboBox is a drop-down single-selection control.
 pub struct ComboBox {
-    Items:    []string
-    selected: int
-    OnPick:   fn(int)
+    Items:    []string  // the items
+    selected: int  // the selected
+    OnPick:   fn(int)  // the pick callback
 
+    // Draw renders the widget.
     pub fn Draw(self: *ComboBox, h: int64) {
         sel := ""
         if self.selected >= 0 && self.selected < len(self.Items) {
@@ -594,6 +611,7 @@ pub struct ComboBox {
         self.selected = i
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *ComboBox) -> int {
         return 30
     }
@@ -611,10 +629,11 @@ pub fn NewComboBox(items: []string) -> *ComboBox {
 
 // RadioGroup renders vertical radio options; Selected tracks the pick.
 pub struct RadioGroup {
-    Options:  []string
-    selected: int
-    OnPick:   fn(int)
+    Options:  []string  // the options
+    selected: int  // the selected
+    OnPick:   fn(int)  // the pick callback
 
+    // Draw renders the widget.
     pub fn Draw(self: *RadioGroup, h: int64) {
         i := 0
         for i < len(self.Options) {
@@ -633,6 +652,7 @@ pub struct RadioGroup {
         }
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *RadioGroup) -> int {
         return -1  // self-managed rows
     }
@@ -657,12 +677,13 @@ pub fn NewRadioGroup(options: []string) -> *RadioGroup {
 // ListBox is a scrollable single-selection list; the backend only draws
 // visible rows (virtualized).
 pub struct ListBox {
-    Items:    []string
-    selected: int
-    RowH:     int
-    MaxH:     int
-    OnPick:   fn(int)
+    Items:    []string  // the items
+    selected: int  // the selected
+    RowH:     int  // the row height
+    MaxH:     int  // the maximum height
+    OnPick:   fn(int)  // the pick callback
 
+    // Draw renders the widget.
     pub fn Draw(self: *ListBox, h: int64) {
         rowH := self.RowH
         if rowH <= 0 {
@@ -696,6 +717,7 @@ pub struct ListBox {
         }
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *ListBox) -> int {
         return -1
     }
@@ -722,13 +744,14 @@ pub template RowModel {
 
 // Table renders a header row plus a virtualized, selectable body.
 pub struct Table {
-    Headers:  []string
-    Model:    RowModel
-    RowH:     int
-    MaxH:     int
-    OnPick:   fn(int)
-    selected: int
+    Headers:  []string  // the headers
+    Model:    RowModel  // the model
+    RowH:     int  // the row height
+    MaxH:     int  // the maximum height
+    OnPick:   fn(int)  // the pick callback
+    selected: int  // the selected
 
+    // Draw renders the widget.
     pub fn Draw(self: *Table, h: int64) {
         cols := len(self.Headers)
         if cols == 0 {
@@ -780,6 +803,7 @@ pub struct Table {
         }
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *Table) -> int {
         return -1
     }
@@ -798,10 +822,11 @@ pub fn NewTable(headers: []string, model: RowModel, maxH: int) -> *Table {
 
 // Group is a bordered scrollable sub-region containing its own widgets.
 pub struct Group {
-    Title:   string
-    H:       int
-    widgets: []Widget
+    Title:   string  // the title
+    H:       int  // the height
+    widgets: []Widget  // the widgets
 
+    // Draw renders the widget.
     pub fn Draw(self: *Group, h: int64) {
         gh := self.H
         if gh <= 0 {
@@ -828,6 +853,7 @@ pub struct Group {
         self.widgets = append(self.widgets, w)
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *Group) -> int {
         return -1
     }
@@ -842,10 +868,11 @@ pub fn NewGroup(title: string, height: int) -> *Group {
 // TreeNode is a collapsible container; children render nested under the
 // node title while it is open.
 pub struct TreeNode {
-    Title:   string
-    id:      int
-    widgets: []Widget
+    Title:   string  // the title
+    id:      int  // the widget ID
+    widgets: []Widget  // the widgets
 
+    // Draw renders the widget.
     pub fn Draw(self: *TreeNode, h: int64) {
         Skink_ui_row_dynamic(h, 24.0, 1)
         if Skink_ui_tree_begin(h, int64(self.id), self.Title, 1) != 0 {
@@ -868,6 +895,7 @@ pub struct TreeNode {
         self.widgets = append(self.widgets, w)
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *TreeNode) -> int {
         return -1
     }
@@ -885,20 +913,21 @@ pub fn NewTreeNode(title: string) -> *TreeNode {
 
 // MenuItem is a leaf entry inside a Menu.
 pub struct MenuItem {
-    Label:   string
-    OnClick: fn()
+    Label:   string  // the label
+    OnClick: fn()  // the click callback
 }
 
 // Menu is a named drop-down inside a MenuBar.
 pub struct Menu {
-    Title: string
-    Items: []MenuItem
+    Title: string  // the title
+    Items: []MenuItem  // the items
 }
 
 // MenuBar renders menus across the window's top band.
 pub struct MenuBar {
-    menus: []Menu
+    menus: []Menu  // the menus
 
+    // Draw renders the widget.
     pub fn Draw(self: *MenuBar, h: int64) {
         Skink_ui_menubar_begin(h)
         i := 0
@@ -928,6 +957,7 @@ pub struct MenuBar {
         self.menus = append(self.menus, Menu{Title: title, Items: items})
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *MenuBar) -> int {
         return -1  // occupies the fixed menubar band, not a row
     }
@@ -950,15 +980,16 @@ pub fn NewMenuItem(label: string, cb: fn()) -> MenuItem {
 
 // TabPage pairs a caption with a page of widgets.
 pub struct TabPage {
-    Title:   string
-    widgets: []Widget
+    Title:   string  // the title
+    widgets: []Widget  // the widgets
 }
 
 // TabStrip renders a button row; the selected tab's page draws below.
 pub struct TabStrip {
-    pages:    []TabPage
-    selected: int
+    pages:    []TabPage  // the pages
+    selected: int  // the selected
 
+    // Draw renders the widget.
     pub fn Draw(self: *TabStrip, h: int64) {
         n := len(self.pages)
         if n == 0 {
@@ -998,6 +1029,7 @@ pub struct TabStrip {
         return self.selected
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *TabStrip) -> int {
         return -1
     }
@@ -1015,10 +1047,11 @@ pub fn NewTabStrip() -> *TabStrip {
 
 // ColorPicker edits a packed 0xRRGGBBAA color; RGBA updates on pick.
 pub struct ColorPicker {
-    RGBA:   int64
-    Alpha:  bool
-    OnPick: fn(int64)
+    RGBA:   int64  // the rgba
+    Alpha:  bool  // the alpha
+    OnPick: fn(int64)  // the pick callback
 
+    // Draw renders the widget.
     pub fn Draw(self: *ColorPicker, h: int64) {
         alphaFlag := int64(0)
         if self.Alpha {
@@ -1033,6 +1066,7 @@ pub struct ColorPicker {
         }
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *ColorPicker) -> int {
         return 260
     }
@@ -1050,12 +1084,13 @@ pub fn NewColorPicker(rgba: int64, withAlpha: bool) -> *ColorPicker {
 
 // Popup is a titled overlay window drawn when Show is true.
 pub struct Popup {
-    Title:   string
-    Show:    bool
-    W:       int
-    H:       int
-    widgets: []Widget
+    Title:   string  // the title
+    Show:    bool  // whether the popup is visible
+    W:       int  // the popup width in pixels
+    H:       int  // the popup height in pixels
+    widgets: []Widget  // the widgets
 
+    // Draw renders the widget.
     pub fn Draw(self: *Popup, h: int64) {
         if !self.Show {
             return
@@ -1094,6 +1129,7 @@ pub struct Popup {
         Skink_ui_popup_close(h)
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *Popup) -> int {
         return -1
     }
@@ -1113,6 +1149,7 @@ pub fn NewPopup(title: string, w: int, h: int) -> *Popup {
 pub fn MouseX(win: *Window) -> int {
     return int(Skink_ui_mouse_x(win.handle))
 }
+// MouseY returns the mouse cursor's Y position within win.
 pub fn MouseY(win: *Window) -> int {
     return int(Skink_ui_mouse_y(win.handle))
 }
@@ -1137,6 +1174,7 @@ pub fn AnyTextActive(win: *Window) -> bool {
 pub fn ClipboardGet() -> string {
     return Skink_ui_clipboard_get()
 }
+// ClipboardSet copies s to the system clipboard.
 pub fn ClipboardSet(s: string) {
     Skink_ui_clipboard_set(s)
 }

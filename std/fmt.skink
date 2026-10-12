@@ -186,19 +186,19 @@ pub fn Sprintf2(fmtStr: string, a1: int, a2: int) -> string {
 
 // ArgKind identifies the type of a format argument.
 enum ArgKind {
-    ArgString
-    ArgInt
-    ArgFloat
-    ArgBool
+    ArgString  // an Arg holding a string value
+    ArgInt  // an Arg holding an int value
+    ArgFloat  // an Arg holding a float value
+    ArgBool  // an Arg holding a bool value
 }
 
 // Arg holds a single format argument of any supported type.
 pub struct Arg {
     kind: int    // ArgKind value
-    sval: string
-    ival: int
-    fval: float
-    bval: bool
+    sval: string  // the string value
+    ival: int  // the int value
+    fval: float  // the float value
+    bval: bool  // the bool value
 }
 
 // SArg creates a string format argument.

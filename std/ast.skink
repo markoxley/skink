@@ -39,91 +39,91 @@ import "std/str"
 
 // Statements
 pub const ST_VAR        = 1
-pub const ST_ASSIGN     = 2
-pub const ST_TUPLEASSIGN = 3
-pub const ST_RETURN     = 4
-pub const ST_BREAK      = 5
-pub const ST_CONTINUE   = 6
-pub const ST_IF         = 7
-pub const ST_FOR        = 8
-pub const ST_WHILE      = 9
-pub const ST_UNTIL      = 10
-pub const ST_EXPR       = 11
-pub const ST_BLOCK      = 12
-pub const ST_DEFER      = 13
-pub const ST_MATCH      = 14
+pub const ST_ASSIGN     = 2  // assign statement kind
+pub const ST_TUPLEASSIGN = 3  // tuple-assign statement kind
+pub const ST_RETURN     = 4  // return statement kind
+pub const ST_BREAK      = 5  // break statement kind
+pub const ST_CONTINUE   = 6  // continue statement kind
+pub const ST_IF         = 7  // if statement kind
+pub const ST_FOR        = 8  // for statement kind
+pub const ST_WHILE      = 9  // while statement kind
+pub const ST_UNTIL      = 10  // until statement kind
+pub const ST_EXPR       = 11  // expression statement kind
+pub const ST_BLOCK      = 12  // block statement kind
+pub const ST_DEFER      = 13  // defer statement kind
+pub const ST_MATCH      = 14  // match statement kind
 
 // Declarations
 pub const ST_FN         = 20
-pub const ST_STRUCT     = 21
-pub const ST_ENUM       = 22
-pub const ST_CONST      = 23
-pub const ST_VARDECL    = 24
-pub const ST_TYPEALIAS  = 25
-pub const ST_IMPORT     = 26
-pub const ST_MODULE     = 27
-pub const ST_EXTERN     = 28
-pub const ST_TEMPLATE   = 29
-pub const ST_SPAWN      = 30
-pub const ST_SELECT     = 31
-pub const ST_SWITCH     = 32
-pub const ST_RULESET    = 33
-pub const ST_SERVICE    = 34
+pub const ST_STRUCT     = 21  // struct statement kind
+pub const ST_ENUM       = 22  // enum statement kind
+pub const ST_CONST      = 23  // const statement kind
+pub const ST_VARDECL    = 24  // var-declaration statement kind
+pub const ST_TYPEALIAS  = 25  // type-alias statement kind
+pub const ST_IMPORT     = 26  // import statement kind
+pub const ST_MODULE     = 27  // module statement kind
+pub const ST_EXTERN     = 28  // extern statement kind
+pub const ST_TEMPLATE   = 29  // template statement kind
+pub const ST_SPAWN      = 30  // spawn statement kind
+pub const ST_SELECT     = 31  // select statement kind
+pub const ST_SWITCH     = 32  // switch statement kind
+pub const ST_RULESET    = 33  // ruleset statement kind
+pub const ST_SERVICE    = 34  // service statement kind
 
 // Expressions
 pub const EX_IDENT      = 100
-pub const EX_INT        = 101
-pub const EX_FLOAT      = 102
-pub const EX_STRING     = 103
-pub const EX_BOOL       = 104
-pub const EX_NIL        = 105
-pub const EX_PREFIX     = 106
-pub const EX_INFIX      = 107
-pub const EX_CALL       = 108
-pub const EX_INDEX      = 109
-pub const EX_FIELD      = 110
-pub const EX_ARRAY_LIT  = 111
-pub const EX_MAP_LIT    = 112
-pub const EX_SET_LIT    = 113
-pub const EX_STRUCT_LIT = 114
-pub const EX_PAREN      = 115
-pub const EX_SLICE      = 116
-pub const EX_FN_LIT     = 117
-pub const EX_IF_EXPR    = 118
-pub const EX_MATCH_EXPR = 119
-pub const EX_MAKE       = 120
-pub const EX_SIZEOF     = 121
-pub const EX_ALIGNOF    = 122
-pub const EX_RANGE      = 123
-pub const EX_SPREAD     = 124
-pub const EX_ERROR_PROP = 125
-pub const EX_NONNULL    = 126
-pub const EX_AWAIT      = 127
-pub const EX_ASYNC      = 128
-pub const EX_FROM_END   = 129
-pub const EX_TUPLE      = 130
-pub const EX_INTERP     = 131
+pub const EX_INT        = 101  // int expression kind
+pub const EX_FLOAT      = 102  // float expression kind
+pub const EX_STRING     = 103  // string expression kind
+pub const EX_BOOL       = 104  // bool expression kind
+pub const EX_NIL        = 105  // nil expression kind
+pub const EX_PREFIX     = 106  // prefix expression kind
+pub const EX_INFIX      = 107  // infix expression kind
+pub const EX_CALL       = 108  // call expression kind
+pub const EX_INDEX      = 109  // index expression kind
+pub const EX_FIELD      = 110  // field expression kind
+pub const EX_ARRAY_LIT  = 111  // array literal expression kind
+pub const EX_MAP_LIT    = 112  // map literal expression kind
+pub const EX_SET_LIT    = 113  // set literal expression kind
+pub const EX_STRUCT_LIT = 114  // struct literal expression kind
+pub const EX_PAREN      = 115  // paren expression kind
+pub const EX_SLICE      = 116  // slice expression kind
+pub const EX_FN_LIT     = 117  // function literal expression kind
+pub const EX_IF_EXPR    = 118  // if expression kind
+pub const EX_MATCH_EXPR = 119  // match expression kind
+pub const EX_MAKE       = 120  // make expression kind
+pub const EX_SIZEOF     = 121  // size of expression kind
+pub const EX_ALIGNOF    = 122  // alignment of expression kind
+pub const EX_RANGE      = 123  // range expression kind
+pub const EX_SPREAD     = 124  // spread expression kind
+pub const EX_ERROR_PROP = 125  // error propagation expression kind
+pub const EX_NONNULL    = 126  // non-null expression kind
+pub const EX_AWAIT      = 127  // await expression kind
+pub const EX_ASYNC      = 128  // async expression kind
+pub const EX_FROM_END   = 129  // from end expression kind
+pub const EX_TUPLE      = 130  // tuple expression kind
+pub const EX_INTERP     = 131  // interpolated expression kind
 
 // Type kinds
 pub const TY_NAMED    = 200
-pub const TY_POINTER  = 201
-pub const TY_ARRAY    = 202
-pub const TY_MAP      = 203
-pub const TY_SET      = 204
-pub const TY_CHAN     = 205
-pub const TY_TENSOR   = 206
-pub const TY_FUNC     = 207
-pub const TY_TUPLE    = 208
+pub const TY_POINTER  = 201  // pointer type code
+pub const TY_ARRAY    = 202  // array type code
+pub const TY_MAP      = 203  // map type code
+pub const TY_SET      = 204  // set type code
+pub const TY_CHAN     = 205  // chan type code
+pub const TY_TENSOR   = 206  // tensor type code
+pub const TY_FUNC     = 207  // func type code
+pub const TY_TUPLE    = 208  // tuple type code
 
 // Pattern kinds
 pub const PK_WILDCARD = 0
-pub const PK_VARIANT  = 1
-pub const PK_IDENT    = 2
-pub const PK_INT      = 3
-pub const PK_STRING   = 4
-pub const PK_BOOL     = 5
-pub const PK_NIL      = 6
-pub const PK_RANGE    = 7
+pub const PK_VARIANT  = 1  // the pattern kind: variant
+pub const PK_IDENT    = 2  // the pattern kind: identifier
+pub const PK_INT      = 3  // the pattern kind: int
+pub const PK_STRING   = 4  // the pattern kind: string
+pub const PK_BOOL     = 5  // the pattern kind: bool
+pub const PK_NIL      = 6  // the pattern kind: nil
+pub const PK_RANGE    = 7  // the pattern kind: range
 
 // === AST Node Structures ===
 //
@@ -135,20 +135,20 @@ pub const PK_RANGE    = 7
 // Stmt is the tagged union for all statement kinds. The `kind` field
 // determines which subset of the remaining fields are populated.
 struct Stmt {
-    kind: int
-    line: int
-    col:  int
-    filePath: string
+    kind: int  // the kind
+    line: int  // the line
+    col:  int  // the column
+    filePath: string  // the file path
 
     // Variable declaration (ST_VAR, ST_VARDECL)
     varName:  string
     varType:  []Type   // len 0 or 1
     varValue: []Expr   // len 0 or 1
-    varNames: []string
+    varNames: []string  // the var names
 
     // Assignment (ST_ASSIGN)
     assignTarget: []Expr  // len 1
-    assignOp:     string
+    assignOp:     string  // the assign operator
     assignValue:  []Expr  // len 1
 
     // Tuple assignment (ST_TUPLEASSIGN)
@@ -159,20 +159,20 @@ struct Stmt {
 
     // If/For/While/Until/Block (ST_IF, ST_FOR, ST_WHILE, ST_UNTIL, ST_BLOCK)
     cond:    []Expr   // len 0 or 1
-    thenBody:  []Stmt
-    elseBody:  []Stmt
+    thenBody:  []Stmt  // the then body
+    elseBody:  []Stmt  // the else body
     ifInit:   []Stmt   // len 0 or 1 (for if-init: if x := expr; cond { })
 
     // For loop specifics
     forInit: []Stmt   // len 0 or 1
     forPost: []Stmt   // len 0 or 1
-    forIterVar: string
+    forIterVar: string  // the for iterator var
     forIterVar2: string  // second variable for "for i, v in collection"
     forIterExpr: []Expr  // len 0 or 1
 
     // Match (ST_MATCH)
     matchSubject: []Expr  // len 0 or 1
-    matchArms:    []MatchArm
+    matchArms:    []MatchArm  // the match arms
 
     // Defer (ST_DEFER)
     deferStmt: []Stmt  // len 1
@@ -192,10 +192,10 @@ struct Stmt {
 
 // SelectCase represents a single case in a select or switch statement.
 struct SelectCase {
-    isDefault: bool
+    isDefault: bool  // whether default
     cond:      []Expr  // len 0 or 1
-    body:      []Stmt
-    recvVar:   string
+    body:      []Stmt  // the body
+    recvVar:   string  // the receive var
 }
 
 // Decl is the tagged union for all top-level and nested declarations
@@ -203,38 +203,38 @@ struct SelectCase {
 // templates, rulesets, and services). The `kind` field selects which
 // group of fields is relevant.
 struct Decl {
-    kind: int
+    kind: int  // the kind
 
     // Function (ST_FN)
     fnName:       string
-    fnParams:     []Param
-    fnRetTypes:   []Type
+    fnParams:     []Param  // the function params
+    fnRetTypes:   []Type  // the function return value types
     fnRetNames:   []string  // named return values (empty if unnamed)
-    fnBody:       []Stmt
-    fnGenerics:   []TypeParam
-    fnIsPub:      bool
-    fnIsExtern:   bool
-    fnAttrs:      []string
+    fnBody:       []Stmt  // the function body
+    fnGenerics:   []TypeParam  // the function generics
+    fnIsPub:      bool  // the function is pub
+    fnIsExtern:   bool  // the function is extern
+    fnAttrs:      []string  // the function attrs
     fnReceiver:   []Type  // len 0 or 1
 
     // Struct (ST_STRUCT)
     structName:    string
-    structFields:  []Field
-    structMethods: []Decl
-    structGenerics: []TypeParam
-    structIsPub:   bool
+    structFields:  []Field  // the struct fields
+    structMethods: []Decl  // the struct methods
+    structGenerics: []TypeParam  // the struct generics
+    structIsPub:   bool  // the struct is pub
 
     // Enum (ST_ENUM)
     enumName:     string
-    enumVariants: []Variant
-    enumGenerics: []TypeParam
-    enumIsPub:    bool
+    enumVariants: []Variant  // the enum variants
+    enumGenerics: []TypeParam  // the enum generics
+    enumIsPub:    bool  // the enum is pub
 
     // Const (ST_CONST)
     constName:  string
     constValue: []Expr  // len 0 or 1
-    constBlock: []ConstItem
-    constIsPub: bool
+    constBlock: []ConstItem  // the const block
+    constIsPub: bool  // the const is pub
 
     // Type alias (ST_TYPEALIAS)
     aliasName: string
@@ -242,67 +242,67 @@ struct Decl {
 
     // Import (ST_IMPORT)
     importPath: string
-    importAlias: string
+    importAlias: string  // the import alias
 
     // Module (ST_MODULE)
     moduleName: string
 
     // Template (ST_TEMPLATE)
     templateName:    string
-    templateMethods: []Decl
-    templateIsPub:   bool
-    templateGenerics: []TypeParam
+    templateMethods: []Decl  // the template methods
+    templateIsPub:   bool  // the template is pub
+    templateGenerics: []TypeParam  // the template generics
 
     // Ruleset (ST_RULESET)
     rulesetName: string
-    rulesetRules: []RuleDecl
-    rulesetIsPub: bool
+    rulesetRules: []RuleDecl  // the ruleset rules
+    rulesetIsPub: bool  // the ruleset is pub
 
     // Service (ST_SERVICE)
     serviceName: string
-    serviceForType: string
-    serviceMethods: []Decl
-    serviceIsPub: bool
+    serviceForType: string  // the service for type
+    serviceMethods: []Decl  // the service methods
+    serviceIsPub: bool  // the service is pub
 }
 
 // RuleDecl represents a single rule within a ruleset declaration.
 struct RuleDecl {
-    name:      string
+    name:      string  // the name
     condition: []Expr  // len 1
-    ruleAction:   []Stmt
-    rulePriority: int
+    ruleAction:   []Stmt  // the rule action
+    rulePriority: int  // the rule priority
 }
 
 // ConstItem represents a single name/value pair inside a const block.
 struct ConstItem {
-    name:  string
+    name:  string  // the name
     value: []Expr  // len 1
 }
 
 // Param represents a single function parameter: a name and an optional type.
 struct Param {
-    name: string
+    name: string  // the name
     typ:  []Type  // len 0 or 1
 }
 
 // Field represents a single field in a struct declaration.
 struct Field {
-    name:    string
+    name:    string  // the name
     typ:     []Type  // len 1
-    isPub:   bool
-    doc:     string
+    isPub:   bool  // whether pub
+    doc:     string  // the doc
 }
 
 // Variant represents a single variant in an enum declaration, with
 // optional payload types for tagged-union enums.
 struct Variant {
-    name:     string
-    payloads: []Type
+    name:     string  // the name
+    payloads: []Type  // the payloads
 }
 
 // TypeParam represents a generic type parameter with an optional bound.
 struct TypeParam {
-    name:  string
+    name:  string  // the name
     bound: []Type  // len 0 or 1
 }
 
@@ -310,11 +310,11 @@ struct TypeParam {
 // selects which subset of fields is populated (named, pointer, array,
 // map, set, chan, tensor, func, or tuple).
 struct Type {
-    kind: int
+    kind: int  // the kind
 
     // Named type (TY_NAMED)
     name:      string
-    genericArgs: []Type
+    genericArgs: []Type  // the generic arguments
 
     // Pointer/Array/Map/Set/Chan/Tensor (single inner type)
     elem: []Type  // len 0 or 1
@@ -324,7 +324,7 @@ struct Type {
 
     // Function (TY_FUNC)
     paramTypes: []Type
-    retTypes:   []Type
+    retTypes:   []Type  // the return value types
 
     // Tuple (TY_TUPLE)
     tupleTypes: []Type
@@ -333,19 +333,19 @@ struct Type {
 // Expr is the tagged union for all expression kinds. The `kind` field
 // determines which subset of fields are populated.
 struct Expr {
-    kind: int
-    line: int
-    col:  int
+    kind: int  // the kind
+    line: int  // the line
+    col:  int  // the column
 
     // Identifier (EX_IDENT)
     ident:    string
-    genericArgs: []Type
+    genericArgs: []Type  // the generic arguments
 
     // Literals (EX_INT, EX_FLOAT, EX_STRING, EX_BOOL)
     intVal:   int
-    floatVal: float
-    strVal:   string
-    boolVal:  bool
+    floatVal: float  // the float value
+    strVal:   string  // the string value
+    boolVal:  bool  // the bool value
 
     // Prefix (EX_PREFIX)
     prefixOp: string
@@ -358,16 +358,16 @@ struct Expr {
 
     // Call (EX_CALL)
     callFunc: []Expr  // len 1
-    callArgs: []Expr
+    callArgs: []Expr  // the call arguments
 
     // Index (EX_INDEX, EX_FROM_END)
     indexTarget: []Expr  // len 1
     indexExpr:   []Expr  // len 1
-    indexFromEnd: bool
+    indexFromEnd: bool  // the index from end
 
     // Field access (EX_FIELD)
     fieldTarget: []Expr  // len 1
-    fieldName:   string
+    fieldName:   string  // the field name
 
     // Array literal (EX_ARRAY_LIT)
     arrayElems: []Expr
@@ -375,14 +375,14 @@ struct Expr {
 
     // Map literal (EX_MAP_LIT)
     mapKeys: []Expr
-    mapVals: []Expr
+    mapVals: []Expr  // the map vals
 
     // Set literal (EX_SET_LIT)
     setElems: []Expr
 
     // Struct literal (EX_STRUCT_LIT)
     structLitName:   string
-    structLitFields: []StructLitField
+    structLitFields: []StructLitField  // the struct literal fields
 
     // Paren (EX_PAREN)
     inner: []Expr  // len 1
@@ -394,8 +394,8 @@ struct Expr {
 
     // Function literal (EX_FN_LIT)
     fnLitParams:   []Param
-    fnLitRetTypes: []Type
-    fnLitBody:     []Stmt
+    fnLitRetTypes: []Type  // the function literal return value types
+    fnLitBody:     []Stmt  // the function literal body
 
     // If expression (EX_IF_EXPR)
     ifCond: []Expr  // len 1
@@ -404,7 +404,7 @@ struct Expr {
 
     // Match expression (EX_MATCH_EXPR)
     matchExprSubject: []Expr  // len 1
-    matchExprArms:    []MatchArm
+    matchExprArms:    []MatchArm  // the match expression arms
 
     // Make (EX_MAKE)
     makeType: []Type  // len 1
@@ -438,39 +438,39 @@ struct Expr {
 // When isExpr is true, expr holds a parsed expression to be
 // converted to a string at runtime.
 struct InterpPart {
-    isExpr: bool
-    strVal: string
+    isExpr: bool  // whether expression
+    strVal: string  // the string value
     expr:   []Expr  // len 1 when isExpr is true
 }
 
 // StructLitField represents a single name=value pair in a struct literal.
 struct StructLitField {
-    name:  string
+    name:  string  // the name
     value: []Expr  // len 1
 }
 
 // MatchArm represents one arm of a match expression or statement,
 // consisting of a pattern, optional guard, and body.
 struct MatchArm {
-    pattern:    Pattern
+    pattern:    Pattern  // the pattern
     guard:      []Expr  // len 0 or 1
-    body:       []Stmt
-    isWildcard: bool
+    body:       []Stmt  // the body
+    isWildcard: bool  // whether wildcard
 }
 
 // Pattern is the tagged union for match patterns. The `kind` field
 // determines which subset of fields are populated.
 struct Pattern {
-    kind: int
+    kind: int  // the kind
 
-    variantName: string
-    bindings:    []string
-    identName:   string
-    intVal:      int
-    strVal:      string
-    boolVal:     bool
-    rangeLow:    int
-    rangeHigh:   int
+    variantName: string  // the variant name
+    bindings:    []string  // the bindings
+    identName:   string  // the identifier name
+    intVal:      int  // the int value
+    strVal:      string  // the string value
+    boolVal:     bool  // the bool value
+    rangeLow:    int  // the range low
+    rangeHigh:   int  // the range high
 }
 
 // === Helper constructors ===

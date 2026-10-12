@@ -53,11 +53,11 @@ template RuleSource {
 
 // Engine is a small procedural rules engine.
 pub struct Engine {
-    condNames:  []string
-    conds:      []fn() -> bool
-    actNames:   []string
-    acts:       []fn()
-    running:    bool
+    condNames:  []string  // the cond names
+    conds:      []fn() -> bool  // the conds
+    actNames:   []string  // the act names
+    acts:       []fn()  // the acts
+    running:    bool  // the running
 
     // AddRule registers a named condition. When the condition returns
     // true on a tick, the action with the same name (if any) runs.

@@ -29,10 +29,10 @@ import "std/time"
 // Context carries a cancellation signal and optional key-value pairs
 // through a chain of parent contexts.
 pub struct Context {
-    done:   bool
-    parent: *Context
-    key:    string
-    val:    string
+    done:   bool  // the done
+    parent: *Context  // the parent
+    key:    string  // the key
+    val:    string  // the value
 
     // Done reports whether the context has been cancelled.
     pub fn Done(self: Context) -> bool {
@@ -97,8 +97,8 @@ pub fn WithValue(parent: *Context, key: string, val: string) -> Context {
 // DeadlineContext extends Context with a deadline that auto-cancels
 // when the current time exceeds the specified Unix-nanosecond timestamp.
 pub struct DeadlineContext {
-    ctx:      Context
-    deadline: int64
+    ctx:      Context  // the context
+    deadline: int64  // the deadline
 
     // Done reports whether the context has been cancelled, either
     // explicitly or because the deadline has been exceeded.

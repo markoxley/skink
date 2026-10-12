@@ -39,23 +39,23 @@ extern fn clock_gettime(clk: int, ts: *TimeSpec) -> int
 
 // TimeSpec matches the C struct timespec used by clock_gettime.
 struct TimeSpec {
-    tv_sec: int64
-    tv_nsec: int64
+    tv_sec: int64  // the seconds
+    tv_nsec: int64  // the nanoseconds
 }
 
 // Tm is the C standard struct tm used by localtime/gmtime.
 struct Tm {
-    tm_sec: int
-    tm_min: int
-    tm_hour: int
-    tm_mday: int
-    tm_mon: int
-    tm_year: int
-    tm_wday: int
-    tm_yday: int
-    tm_isdst: int
-    tm_gmtoff: int64
-    tm_zone: string
+    tm_sec: int  // the seconds (0-60)
+    tm_min: int  // the minutes (0-59)
+    tm_hour: int  // the hours (0-23)
+    tm_mday: int  // the day of the month (1-31)
+    tm_mon: int  // the month (0-11)
+    tm_year: int  // the years since 1900
+    tm_wday: int  // the day of the week (0-6)
+    tm_yday: int  // the day of the year (0-365)
+    tm_isdst: int  // the daylight-savings flag
+    tm_gmtoff: int64  // the offset from GMT in seconds
+    tm_zone: string  // the timezone name
 }
 
 // Nanosecond is a Duration constant representing one nanosecond.
@@ -73,7 +73,7 @@ pub const Hour = int64(60) * Minute
 
 // Duration represents a length of time in nanoseconds.
 pub struct Duration {
-    nanoseconds: int64
+    nanoseconds: int64  // the nanoseconds
 
     // Nanoseconds returns the duration as an int64 nanosecond count.
     pub fn Nanoseconds(self: Duration) -> int64 {
@@ -138,16 +138,16 @@ pub fn FromHours(h: int64) -> Duration {
 
 // DateTime represents a calendar date and wall-clock time.
 pub struct DateTime {
-    year: int
-    month: int
-    day: int
-    hour: int
-    minute: int
-    second: int
-    nanosecond: int
-    weekday: int
-    yday: int
-    isUTC: bool
+    year: int  // the year
+    month: int  // the month
+    day: int  // the day
+    hour: int  // the hour
+    minute: int  // the minute
+    second: int  // the second
+    nanosecond: int  // the nanosecond
+    weekday: int  // the weekday
+    yday: int  // the day of the year
+    isUTC: bool  // whether utc
 
     // Year returns the year (e.g. 2026).
     pub fn Year(self: DateTime) -> int {
@@ -694,8 +694,8 @@ fn formatDateTime(dt: DateTime, layout: string) -> string {
 // receives a bool value (true) when the timer fires. Use Stop to release
 // resources early; use Reset to stop and re-arm.
 pub struct Timer {
-    C: chan<bool>
-    stop: chan<bool>
+    C: chan<bool>  // the channel that receives timer events
+    stop: chan<bool>  // the stop
 
     // Stop prevents the Timer from firing. It signals the timer
     // goroutine, which closes the C channel on exit so receivers
@@ -752,8 +752,8 @@ fn timerFire(ch: chan<bool>, stop: chan<bool>, ms: int) {
 // Ticker fires repeatedly at regular intervals, sending a bool value on
 // its C channel each tick. Use Stop to halt the ticker.
 pub struct Ticker {
-    C: chan<bool>
-    stop: chan<bool>
+    C: chan<bool>  // the channel that receives tick events
+    stop: chan<bool>  // the stop
 
     // Stop turns off a ticker. It signals the ticker goroutine, which
     // closes the C channel on exit so receivers observe the close. Only

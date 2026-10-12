@@ -41,8 +41,8 @@ pub const SERIES_BOOL = 3
 
 // Series is a single column of typed data.
 pub struct Series {
-    Name:  string
-    kind:  int
+    Name:  string  // the name
+    kind:  int  // the kind
     fdata: []float    // used when kind == SERIES_FLOAT
     idata: []int       // used when kind == SERIES_INT
     sdata: []string    // used when kind == SERIES_STRING
@@ -225,8 +225,8 @@ pub fn NewBoolSeries(name: string, data: []bool) -> Series {
 
 // DataFrame is a collection of Series (columns) with row alignment.
 pub struct DataFrame {
-    columns: []Series
-    nrows:   int
+    columns: []Series  // the columns
+    nrows:   int  // the number of rows
 
     // NRows returns the number of rows.
     pub fn NRows(self: DataFrame) -> int {
@@ -581,8 +581,8 @@ pub fn WriteCSV(df: DataFrame) -> string {
 
 // Group represents a single group from a GroupBy operation.
 pub struct Group {
-    Key:      string
-    Indices:  []int
+    Key:      string  // the key
+    Indices:  []int  // the indices
 }
 
 // GroupBy groups rows by the values in the named column.
@@ -618,12 +618,12 @@ pub fn GroupBy(df: DataFrame, colName: string) -> ([]Group, errors.Error) {
 
 // AggSummary holds aggregation results for a numeric column.
 pub struct AggSummary {
-    Count: int
-    Sum:   float
-    Mean:  float
-    Min:   float
-    Max:   float
-    Std:   float
+    Count: int  // the count
+    Sum:   float  // the sum
+    Mean:  float  // the mean
+    Min:   float  // the minimum
+    Max:   float  // the maximum
+    Std:   float  // the standard deviation
 }
 
 // Aggregate computes summary statistics for a numeric column over the

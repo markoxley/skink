@@ -31,8 +31,8 @@ import "std/libc"
 //   - fd:         the kernel file descriptor for /dev/i2c-N (0 when closed).
 //   - deviceAddr: the 7-bit slave address selected via I2C_SLAVE.
 pub struct Bus {
-    fd: int
-    deviceAddr: int
+    fd: int  // the file descriptor
+    deviceAddr: int  // the device address
 
     // Write sends len bytes of data to the currently selected slave.
     //
@@ -143,7 +143,7 @@ pub const SPEED_FAST_PLUS = 1000000 // 1 MHz
 
 // I2C_SMBUS ioctl sub-commands for reference (values from <linux/i2c.h>).
 pub const SMBUS_READ_BYTE = 1
-pub const SMBUS_READ_BYTE_DATA = 2
-pub const SMBUS_WRITE_BYTE_DATA = 3
-pub const SMBUS_READ_WORD_DATA = 4
-pub const SMBUS_WRITE_WORD_DATA = 5
+pub const SMBUS_READ_BYTE_DATA = 2  // the smbus read byte data
+pub const SMBUS_WRITE_BYTE_DATA = 3  // the smbus write byte data
+pub const SMBUS_READ_WORD_DATA = 4  // the smbus read word data
+pub const SMBUS_WRITE_WORD_DATA = 5  // the smbus write word data

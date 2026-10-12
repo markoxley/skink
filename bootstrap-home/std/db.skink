@@ -46,18 +46,19 @@ extern fn Skink_db_reset(stmt: int64) -> int
 
 // Row represents a single database row.
 pub struct Row {
-    values: []string
+    values: []string  // the values
 }
 
 // Result holds query results.
 // Use Next to advance through rows and Scan to read column values.
 pub struct Result {
-    rows: []Row
-    columns: []string
-    affected: int64
-    stmt: int64
-    hasRow: bool
+    rows: []Row  // the rows
+    columns: []string  // the columns
+    affected: int64  // the affected
+    stmt: int64  // the statement
+    hasRow: bool  // whether row
 
+    // Next advances the result to the next row and reports whether one exists.
     pub fn Next(self: *Result) -> bool {
         if self.stmt == int64(0) {
             self.hasRow = false
@@ -74,6 +75,7 @@ pub struct Result {
         return false
     }
 
+    // Scan returns column idx's value as a string.
     pub fn Scan(self: Result, idx: int) -> (string, errors.Error) {
         if self.stmt == int64(0) {
             return "", errors.New("no active query")
@@ -153,10 +155,11 @@ pub struct Result {
 
 // Connection is a SQLite database connection.
 pub struct Connection {
-    driver: string
-    dsn: string
-    handle: int64
+    driver: string  // the driver
+    dsn: string  // the dsn
+    handle: int64  // the handle
 
+    // Exec executes a SQL statement that returns no rows.
     pub fn Exec(self: *Connection, sql: string) -> (Result, errors.Error) {
         var emptyRows []Row
         var emptyCols []string
@@ -167,6 +170,7 @@ pub struct Connection {
         return Result{rows: emptyRows, columns: emptyCols, affected: affected, stmt: int64(0), hasRow: false}, errors.New("")
     }
 
+    // Query executes sql and returns the resulting rows.
     pub fn Query(self: *Connection, sql: string) -> (Result, errors.Error) {
         var emptyRows []Row
         var emptyCols []string
@@ -184,6 +188,7 @@ pub struct Connection {
         return Result{rows: emptyRows, columns: emptyCols, affected: int64(0), stmt: stmt, hasRow: false}, errors.New("")
     }
 
+    // Close releases the connection and its resources.
     pub fn Close(self: *Connection) -> errors.Error {
         if self.handle != int64(0) {
             rc := Skink_db_close(self.handle)
@@ -196,6 +201,7 @@ pub struct Connection {
         return errors.New("not connected")
     }
 
+    // LastError returns the most recent error message.
     pub fn LastError(self: Connection) -> string {
         if self.handle == int64(0) {
             return "not connected"

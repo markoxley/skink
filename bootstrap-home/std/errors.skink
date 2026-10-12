@@ -28,7 +28,7 @@ import "std/str"
 // Error represents an error condition with a message.
 // An empty message field signals "no error".
 pub struct Error {
-    message: string
+    message: string  // the message
 
     // String returns the error message text (satisfies the error interface).
     pub fn String(self: Error) -> string {

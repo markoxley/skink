@@ -310,8 +310,8 @@ pub fn VectorMean(a: []float) -> float {
 
 // Matrix is a dense matrix stored in row-major order.
 pub struct Matrix {
-    Rows:   int
-    Cols:   int
+    Rows:   int  // the rows
+    Cols:   int  // the number of columns
     data:   []float  // row-major: element (i,j) at data[i*Cols + j]
 
     // At returns the element at row i, column j.

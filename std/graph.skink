@@ -66,14 +66,14 @@ pub const OP_NEG = 16       // negation
 
 // Node is a node in the computation graph.
 pub struct Node {
-    ID:       int
-    Op:       int
-    Name:     string
-    Value:    tsr.Tensor
-    Grad:     tsr.Tensor
+    ID:       int  // the node ID
+    Op:       int  // the operator
+    Name:     string  // the name
+    Value:    tsr.Tensor  // the value
+    Grad:     tsr.Tensor  // the grad
     inputs:   []int      // IDs of input nodes
-    shape:    []int
-    requiresGrad: bool
+    shape:    []int  // the shape
+    requiresGrad: bool  // the requires grad
 
     // Data returns the tensor value of this node.
     pub fn Data(self: Node) -> tsr.Tensor {
@@ -103,8 +103,8 @@ pub struct Node {
 
 // Graph is a computation graph supporting automatic differentiation.
 pub struct Graph {
-    nodes:    []Node
-    nextID:   int
+    nodes:    []Node  // the nodes
+    nextID:   int  // the next ID
 
     // NumNodes returns the number of nodes in the graph.
     pub fn NumNodes(self: Graph) -> int {
@@ -584,7 +584,7 @@ fn backwardNode(g: *Graph, idx: int) {
 
 // SGD is a stochastic gradient descent optimizer.
 pub struct SGD {
-    lr: float
+    lr: float  // the learning rate
 
     // Step updates all parameters using gradients.
     pub fn Step(self: SGD, g: *Graph) {
@@ -606,11 +606,11 @@ pub fn NewSGD(lr: float) -> SGD {
 
 // Adam is the Adam optimizer with adaptive learning rates.
 pub struct Adam {
-    lr:     float
-    beta1:  float
-    beta2:  float
-    eps:    float
-    t:      int
+    lr:     float  // the learning rate
+    beta1:  float  // the first-moment decay rate
+    beta2:  float  // the second-moment decay rate
+    eps:    float  // the epsilon for numerical stability
+    t:      int  // the timestep counter
     m:      []tsr.Tensor    // first moment per param
     v:      []tsr.Tensor    // second moment per param
     paramIdx: []int         // node positions of parameters
@@ -762,10 +762,10 @@ pub fn TrainStepSGD(g: *Graph, lossNode: int, opt: SGD) -> (float, errors.Error)
 
 // WGraph is a weighted directed graph with named nodes.
 pub struct WGraph {
-    names:  []string
-    edgeA:  []int
-    edgeB:  []int
-    edgeW:  []float
+    names:  []string  // the names
+    edgeA:  []int  // the edge a
+    edgeB:  []int  // the edge b
+    edgeW:  []float  // the edge w
 
     // AddNode adds a named node if it does not already exist.
     pub fn AddNode(self: *WGraph, name: string) {

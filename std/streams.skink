@@ -50,9 +50,10 @@ pub fn Pipe(r: reader.Reader, w: writer.Writer, bufSize: int) -> int64 {
 
 // TeeReader wraps a Reader and copies all read data to a Writer.
 pub struct TeeReader {
-    r: reader.Reader
-    w: writer.Writer
+    r: reader.Reader  // the underlying reader
+    w: writer.Writer  // the writer that receives copies
 
+    // Read reads up to len bytes into buf and returns the count read.
     pub fn Read(self: *TeeReader, buf: string, len: int) -> int {
         n := self.r.Read(buf, len)
         if n > 0 {
@@ -64,9 +65,10 @@ pub struct TeeReader {
 
 // LimitReader wraps a Reader and stops after N bytes.
 pub struct LimitReader {
-    r: reader.Reader
-    n: int64
+    r: reader.Reader  // the reader
+    n: int64  // the number of
 
+    // Read reads up to len bytes into buf and returns the count read.
     pub fn Read(self: *LimitReader, buf: string, len: int) -> int {
         // Once the limit is exhausted, return EOF immediately.
         if self.n <= int64(0) {
@@ -88,8 +90,9 @@ pub struct LimitReader {
 
 // MultiWriter wraps multiple Writers and writes to all of them.
 pub struct MultiWriter {
-    writers: []writer.Writer
+    writers: []writer.Writer  // the writers
 
+    // Write writes buf and returns the count written.
     pub fn Write(self: *MultiWriter, buf: string, length: int) -> int {
         n := 0
         // Write to every wrapped writer in order; return the count from the last.

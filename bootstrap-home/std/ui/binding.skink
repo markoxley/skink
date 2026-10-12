@@ -38,9 +38,9 @@ extern fn Skink_ui_progress(h: int64, cur: int64, max: int64, modifiable: int64)
 
 // Kind tags for the value stored in an Observable.
 pub const OBS_STRING = 0
-pub const OBS_INT    = 1
-pub const OBS_FLOAT  = 2
-pub const OBS_BOOL   = 3
+pub const OBS_INT    = 1  // int observable kind
+pub const OBS_FLOAT  = 2  // float observable kind
+pub const OBS_BOOL   = 3  // bool observable kind
 
 // Observable is a mutable value cell. `Set`/`SetInt`/`SetInt64`/
 // `SetFloat`/`SetBool` write and invoke every subscriber — but only
@@ -49,12 +49,12 @@ pub const OBS_BOOL   = 3
 // Draw frame (per-frame polling keeps widgets and data in sync without
 // an event queue).
 pub struct Observable {
-    kind: int
-    s:    string
-    i:    int64
-    f:    float
-    b:    bool
-    subs: []fn()
+    kind: int  // the value kind (OBS_*)
+    s:    string  // the string value
+    i:    int64  // the int value
+    f:    float  // the float value
+    b:    bool  // the bool value
+    subs: []fn()  // the subscriber callbacks
 
     // Get reads the string value.
     pub fn Get(self: Observable) -> string {
@@ -185,10 +185,11 @@ pub fn NewObservableBool(v: bool) -> *Observable {
 // While the box is being edited, user input wins (push); otherwise
 // observable writes update the box (pull).
 pub struct BoundTextBox {
-    Win:  *ui.Window
-    Box:  *ui.TextBox
-    Obs:  *Observable
+    Win:  *ui.Window  // the bound window
+    Box:  *ui.TextBox  // the bound text box widget
+    Obs:  *Observable  // the bound observable
 
+    // Draw renders the widget.
     pub fn Draw(self: *BoundTextBox, h: int64) {
         cur := self.Box.Text(self.Win)
         obs := self.Obs.Get()
@@ -206,6 +207,7 @@ pub struct BoundTextBox {
         }
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *BoundTextBox) -> int {
         return self.Box.Height()
     }
@@ -224,9 +226,10 @@ pub fn BindTextBox(win: *ui.Window, box: *ui.TextBox, obs: *Observable) -> *Boun
 
 // BoundCheck keeps a checkbox and a bool observable in sync both ways.
 pub struct BoundCheck {
-    Cb:  *ui.CheckBoxC
-    Obs: *Observable
+    Cb:  *ui.CheckBoxC  // the bound checkbox widget
+    Obs: *Observable  // the bound observable
 
+    // Draw renders the widget.
     pub fn Draw(self: *BoundCheck, h: int64) {
         if self.Cb.Checked != self.Obs.GetBool() {
             self.Cb.Checked = self.Obs.GetBool()
@@ -237,6 +240,7 @@ pub struct BoundCheck {
         }
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *BoundCheck) -> int {
         return self.Cb.Height()
     }
@@ -255,9 +259,10 @@ pub fn BindCheck(cb: *ui.CheckBoxC, obs: *Observable) -> *BoundCheck {
 
 // BoundSliderInt keeps an int slider in sync with an int observable.
 pub struct BoundSliderInt {
-    S:   *ui.SliderInt
-    Obs: *Observable
+    S:   *ui.SliderInt  // the bound slider widget
+    Obs: *Observable  // the bound observable
 
+    // Draw renders the widget.
     pub fn Draw(self: *BoundSliderInt, h: int64) {
         if self.S.Value != self.Obs.GetInt() {
             self.S.Value = self.Obs.GetInt()
@@ -268,6 +273,7 @@ pub struct BoundSliderInt {
         }
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *BoundSliderInt) -> int {
         return self.S.Height()
     }
@@ -282,9 +288,10 @@ pub fn BindSliderInt(s: *ui.SliderInt, obs: *Observable) -> *BoundSliderInt {
 
 // BoundSliderFloat keeps a float slider in sync with a float observable.
 pub struct BoundSliderFloat {
-    S:   *ui.SliderFloat
-    Obs: *Observable
+    S:   *ui.SliderFloat  // the bound slider widget
+    Obs: *Observable  // the bound observable
 
+    // Draw renders the widget.
     pub fn Draw(self: *BoundSliderFloat, h: int64) {
         if self.S.Value != self.Obs.GetFloat() {
             self.S.Value = self.Obs.GetFloat()
@@ -295,6 +302,7 @@ pub struct BoundSliderFloat {
         }
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *BoundSliderFloat) -> int {
         return self.S.Height()
     }
@@ -310,9 +318,10 @@ pub fn BindSliderFloat(s: *ui.SliderFloat, obs: *Observable) -> *BoundSliderFloa
 // BoundProperty keeps a PropertyInt spinbox in sync with an int
 // observable.
 pub struct BoundProperty {
-    P:   *ui.PropertyInt
-    Obs: *Observable
+    P:   *ui.PropertyInt  // the bound property widget
+    Obs: *Observable  // the bound observable
 
+    // Draw renders the widget.
     pub fn Draw(self: *BoundProperty, h: int64) {
         if self.P.Value != self.Obs.GetInt() {
             self.P.Value = self.Obs.GetInt()
@@ -323,6 +332,7 @@ pub struct BoundProperty {
         }
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *BoundProperty) -> int {
         return self.P.Height()
     }
@@ -341,9 +351,10 @@ pub fn BindProperty(p: *ui.PropertyInt, obs: *Observable) -> *BoundProperty {
 
 // BoundCombo keeps a ComboBox selection in sync with an int observable.
 pub struct BoundCombo {
-    Cb:  *ui.ComboBox
-    Obs: *Observable
+    Cb:  *ui.ComboBox  // the bound combo box widget
+    Obs: *Observable  // the bound observable
 
+    // Draw renders the widget.
     pub fn Draw(self: *BoundCombo, h: int64) {
         if self.Cb.Selected() != self.Obs.GetInt() {
             self.Cb.Select(self.Obs.GetInt())
@@ -354,6 +365,7 @@ pub struct BoundCombo {
         }
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *BoundCombo) -> int {
         return self.Cb.Height()
     }
@@ -369,9 +381,10 @@ pub fn BindCombo(cb: *ui.ComboBox, obs: *Observable) -> *BoundCombo {
 // BoundRadio keeps a RadioGroup selection in sync with an int
 // observable.
 pub struct BoundRadio {
-    Rg:  *ui.RadioGroup
-    Obs: *Observable
+    Rg:  *ui.RadioGroup  // the bound radio group widget
+    Obs: *Observable  // the bound observable
 
+    // Draw renders the widget.
     pub fn Draw(self: *BoundRadio, h: int64) {
         if self.Rg.Selected() != self.Obs.GetInt() {
             self.Rg.Select(self.Obs.GetInt())
@@ -382,6 +395,7 @@ pub struct BoundRadio {
         }
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *BoundRadio) -> int {
         return self.Rg.Height()
     }
@@ -396,9 +410,10 @@ pub fn BindRadio(rg: *ui.RadioGroup, obs: *Observable) -> *BoundRadio {
 
 // BoundList keeps a ListBox selection in sync with an int observable.
 pub struct BoundList {
-    Lb:  *ui.ListBox
-    Obs: *Observable
+    Lb:  *ui.ListBox  // the bound list box widget
+    Obs: *Observable  // the bound observable
 
+    // Draw renders the widget.
     pub fn Draw(self: *BoundList, h: int64) {
         // Selection observable syncs the highlighted row; Items are
         // already re-read every frame, so mutating Lb.Items is how a
@@ -409,6 +424,7 @@ pub struct BoundList {
         }
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *BoundList) -> int {
         return self.Lb.Height()
     }
@@ -427,12 +443,14 @@ pub fn BindList(lb: *ui.ListBox, obs: *Observable) -> *BoundList {
 // BoundLabel renders a computed string every frame — the cheapest way
 // to surface live state ("counter", status text, formatted values).
 pub struct BoundLabel {
-    Src: fn() -> string
+    Src: fn() -> string  // the source
 
+    // Draw renders the widget.
     pub fn Draw(self: *BoundLabel, h: int64) {
         Skink_ui_label(h, self.Src(), 0)
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *BoundLabel) -> int {
         return 24
     }
@@ -446,9 +464,10 @@ pub fn BindLabel(src: fn() -> string) -> *BoundLabel {
 
 // BoundProgress shows an int observable as a progress bar.
 pub struct BoundProgress {
-    Obs: *Observable
-    Max: int
+    Obs: *Observable  // the bound observable
+    Max: int  // the maximum
 
+    // Draw renders the widget.
     pub fn Draw(self: *BoundProgress, h: int64) {
         mx := self.Max
         if mx <= 0 {
@@ -457,6 +476,7 @@ pub struct BoundProgress {
         Skink_ui_progress(h, int64(self.Obs.GetInt()), int64(mx), 0)
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *BoundProgress) -> int {
         return 22
     }
@@ -470,9 +490,10 @@ pub fn BindProgress(obs: *Observable, max: int) -> *BoundProgress {
 
 // BoundColor keeps a ColorPicker in sync with an int64 RGBA observable.
 pub struct BoundColor {
-    Cp:  *ui.ColorPicker
-    Obs: *Observable
+    Cp:  *ui.ColorPicker  // the bound color picker widget
+    Obs: *Observable  // the bound observable
 
+    // Draw renders the widget.
     pub fn Draw(self: *BoundColor, h: int64) {
         if self.Cp.RGBA != self.Obs.GetInt64() {
             self.Cp.RGBA = self.Obs.GetInt64()
@@ -483,6 +504,7 @@ pub struct BoundColor {
         }
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *BoundColor) -> int {
         return self.Cp.Height()
     }
@@ -502,12 +524,14 @@ pub fn BindColor(cp: *ui.ColorPicker, obs: *Observable) -> *BoundColor {
 // SliceModel backs a Table from a [][]string — the simplest source.
 // Mutate `rows` any time; the table re-queries each frame.
 pub struct SliceModel {
-    Rows: [][]string
+    Rows: [][]string  // the rows
 
+    // RowCount returns the count.
     pub fn RowCount(self: *SliceModel) -> int {
         return len(self.Rows)
     }
 
+    // CellText returns the text.
     pub fn CellText(self: *SliceModel, row: int, col: int) -> string {
         if row < 0 || row >= len(self.Rows) {
             return ""
@@ -529,13 +553,15 @@ pub fn FromSlice(rows: [][]string) -> *SliceModel {
 // FuncModel backs a Table from callbacks — the "any source" adapter:
 // wire db queries, file contents, computed views, remote data.
 pub struct FuncModel {
-    CountFn: fn() -> int
-    CellFn:  fn(int, int) -> string
+    CountFn: fn() -> int  // the count function
+    CellFn:  fn(int, int) -> string  // the cell function
 
+    // RowCount returns the count.
     pub fn RowCount(self: *FuncModel) -> int {
         return self.CountFn()
     }
 
+    // CellText returns the text.
     pub fn CellText(self: *FuncModel, row: int, col: int) -> string {
         return self.CellFn(row, col)
     }
@@ -550,9 +576,9 @@ pub fn FromFunc(count: fn() -> int, cell: fn(int, int) -> string) -> *FuncModel 
 // ChanModel drains a chan<string> into rows — feed a table (or list)
 // from producers without coupling them to the frame loop.
 pub struct ChanModel {
-    ch:   chan<string>
-    col:  int
-    Rows: [][]string
+    ch:   chan<string>  // the channel
+    col:  int  // the column
+    Rows: [][]string  // the rows
 
     // drain moves every pending channel message into Rows. Called by
     // RowCount each frame, so senders never block on the UI.
@@ -568,11 +594,13 @@ pub struct ChanModel {
         }
     }
 
+    // RowCount returns the count.
     pub fn RowCount(self: *ChanModel) -> int {
         self.drain()
         return len(self.Rows)
     }
 
+    // CellText returns the text.
     pub fn CellText(self: *ChanModel, row: int, col: int) -> string {
         if row < 0 || row >= len(self.Rows) {
             return ""
@@ -598,14 +626,16 @@ pub fn FromChan(ch: chan<string>) -> *ChanModel {
 // ItemsOf refreshes a ListBox's Items from a callback every frame —
 // for sources that change identity as well as content.
 pub struct ItemsOf {
-    Src: fn() -> []string
-    Lb:  *ui.ListBox
+    Src: fn() -> []string  // the item-source callback
+    Lb:  *ui.ListBox  // the bound list box widget
 
+    // Draw renders the widget.
     pub fn Draw(self: *ItemsOf, h: int64) {
         self.Lb.Items = self.Src()
         self.Lb.Draw(h)
     }
 
+    // Height returns the widget's height in pixels.
     pub fn Height(self: *ItemsOf) -> int {
         return self.Lb.Height()
     }

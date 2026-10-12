@@ -31,11 +31,11 @@ import "std/libc"
 // Node represents a single XML element with attributes, text content,
 // and a list of child nodes.
 pub struct Node {
-    tag: string
-    attrKeys: []string
-    attrVals: []string
-    text: string
-    children: []Node
+    tag: string  // the tag
+    attrKeys: []string  // the attr keys
+    attrVals: []string  // the attr vals
+    text: string  // the text
+    children: []Node  // the children
 
     // SetAttr adds or appends an attribute key-value pair to this node.
     pub fn SetAttr(self: *Node, key: string, val: string) {
@@ -208,10 +208,10 @@ pub fn Unmarshal(s: string) -> (Node, errors.Error) {
 
 // Parser holds the state for XML parsing: input, position, and depth.
 struct Parser {
-    s: string
-    pos: int
-    len: int
-    depth: int
+    s: string  // the input string
+    pos: int  // the position
+    len: int  // the length
+    depth: int  // the depth
 
     fn skipWhitespace(self: *Parser) {
         // Advance past spaces, tabs, newlines, and carriage returns
@@ -378,8 +378,8 @@ fn trimWhitespace(s: string) -> string {
 
 // Entry is a simple key-value pair used by the legacy entry-based XML API.
 pub struct Entry {
-    key: string
-    value: string
+    key: string  // the key
+    value: string  // the value
 
     // Key returns the entry's key string (the child element tag name).
     pub fn Key(self: Entry) -> string {

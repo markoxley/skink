@@ -47,7 +47,7 @@ extern fn Skink_send_all(fd: int, buf: string, len: int) -> int
 
 // Connection wraps a raw socket file descriptor.
 pub struct Connection {
-    fd: int
+    fd: int  // the file descriptor
 
     // Close releases the underlying socket. Returns an error if the close
     // syscall fails or the connection is already closed.
@@ -134,8 +134,8 @@ pub fn ConnectWithTimeout(address: string, port: int, timeoutMs: int) -> (Connec
 
 // HTTPResponse holds the result of a simple HTTP request.
 pub struct HTTPResponse {
-    status: int
-    body: string
+    status: int  // the status
+    body: string  // the body
 
     // Status returns the HTTP status code.
     pub fn Status(self: HTTPResponse) -> int {

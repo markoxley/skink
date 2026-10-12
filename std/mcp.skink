@@ -35,16 +35,16 @@ extern fn write(fd: int, buf: string, count: int) -> int
 
 // ToolInfo holds the metadata for a registered MCP tool.
 pub struct ToolInfo {
-    name: string
-    description: string
-    inputSchema: json.Value
+    name: string  // the name
+    description: string  // the description
+    inputSchema: json.Value  // the input schema
 }
 
 // Server represents an MCP server instance.
 pub struct Server {
-    name: string
-    version: string
-    tools: []ToolInfo
+    name: string  // the name
+    version: string  // the version
+    tools: []ToolInfo  // the tools
 }
 
 // NewServer creates a new MCP server with the given name and version.
@@ -64,15 +64,15 @@ pub fn RegisterTool(self: *Server, name: string, description: string, inputSchem
 
 // Transport abstracts the underlying I/O mechanism for the MCP server.
 pub struct Transport {
-    kind: string
+    kind: string  // the kind
     // stdio fields
     stdinFd: int
-    stdoutFd: int
+    stdoutFd: int  // the stdout file descriptor
     // network fields
     listener: net.Connection
-    client: net.Connection
-    address: string
-    port: int
+    client: net.Connection  // the client
+    address: string  // the address
+    port: int  // the port
 }
 
 // NewStdioTransport creates a transport that uses stdin/stdout.

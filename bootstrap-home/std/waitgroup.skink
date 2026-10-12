@@ -40,9 +40,9 @@ extern fn Skink_cond_ensure(handle: *int64) -> int64
 // have all completed. It uses a counter that is incremented by Add and
 // decremented by Done; Wait blocks until the counter reaches zero.
 pub struct WaitGroup {
-    count: int
-    muHandle: int64
-    condHandle: int64
+    count: int  // the count
+    muHandle: int64  // the mutex handle
+    condHandle: int64  // the cond handle
 }
 
 // New creates and returns a pointer to a new WaitGroup with a zero counter.

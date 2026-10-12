@@ -61,14 +61,14 @@ const {
 // literal parsing in contexts where '{' should start a block (if/for/while
 // conditions, rule conditions, match subjects).
 pub struct Parser {
-    tokens:  []lexer.Token
-    pos:     int
-    curTok:  lexer.Token
-    peekTok: lexer.Token
-    errors:  []string
-    noStructInit: bool
-    exprDepth: int
-    stmtDepth: int
+    tokens:  []lexer.Token  // the tokens
+    pos:     int  // the position
+    curTok:  lexer.Token  // the current token
+    peekTok: lexer.Token  // the peek token
+    errors:  []string  // the errors
+    noStructInit: bool  // the no struct initial
+    exprDepth: int  // the expression depth
+    stmtDepth: int  // the statement depth
 }
 
 // New creates a parser from a slice of tokens.
@@ -99,10 +99,10 @@ fn isTrivia(kind: int) -> bool {
 
 // ParserState holds the mutable state of a parser for save/restore.
 pub struct ParserState {
-    pos:     int
-    curTok:  lexer.Token
-    peekTok: lexer.Token
-    errCount: int
+    pos:     int  // the position
+    curTok:  lexer.Token  // the current token
+    peekTok: lexer.Token  // the peek token
+    errCount: int  // the error count
 }
 
 // saveState captures the current parser state for backtracking.

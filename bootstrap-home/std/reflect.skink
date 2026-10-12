@@ -30,18 +30,18 @@ import "std/str"
 // Field describes a single field in a struct type, including its name,
 // type name, and byte offset within the struct layout.
 pub struct Field {
-    name: string
-    type_name: string
-    offset: int
+    name: string  // the name
+    type_name: string  // the type name
+    offset: int  // the offset
 }
 
 // Type describes a runtime type, including its name, size in bytes,
 // and (for struct types) the list of named fields.
 pub struct Type {
-    name: string
-    size: int
-    numFields: int
-    fields: []Field
+    name: string  // the name
+    size: int  // the size
+    numFields: int  // the number of fields
+    fields: []Field  // the fields
 }
 
 // TypeOf returns a reflect.Type describing the type of val. The Skink

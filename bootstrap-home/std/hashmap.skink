@@ -29,17 +29,17 @@ import "std/errors"
 // Entry represents a single key-value slot in the hash map. The occupied
 // flag distinguishes empty slots from valid entries.
 pub struct Entry<K, V> {
-    key: K
-    value: V
-    occupied: bool
+    key: K  // the key
+    value: V  // the value
+    occupied: bool  // the occupied
 }
 
 // HashMap is a generic associative array using open addressing with linear
 // probing. It grows automatically when the load factor exceeds 70%.
 pub struct HashMap<K, V> {
-    entries: []Entry<K, V>
-    count: int
-    capacity: int
+    entries: []Entry<K, V>  // the entries
+    count: int  // the count
+    capacity: int  // the capacity
 
     // Put inserts or updates a key-value pair in the map. If the key already
     // exists, its value is replaced. The map resizes when load factor > 0.7.

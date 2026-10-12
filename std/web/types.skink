@@ -38,15 +38,15 @@ extern fn Skink_mem_realloc(ptr: string, size: int64) -> string
 // body; binary payloads may be truncated there — BodyBytes()/BodyLen()
 // expose the raw bytes with an explicit length.
 pub struct Request {
-    method:  string
-    path:    string
-    query:   string
-    proto:   string
-    headers: map[string]string
-    params:  map[string]string
-    body:    string
-    bodyBuf: string
-    bodyLen: int
+    method:  string  // the method
+    path:    string  // the path
+    query:   string  // the query
+    proto:   string  // the proto
+    headers: map[string]string  // the headers
+    params:  map[string]string  // the params
+    body:    string  // the body
+    bodyBuf: string  // the body buffer
+    bodyLen: int  // the body length
 
     // Method returns the HTTP method (GET, POST, etc.) of the request.
     pub fn Method(self: Request) -> string {
@@ -194,12 +194,12 @@ pub fn URLDecode(s: string, plusAsSpace: bool) -> string {
 // hold bytes appended by Write()/WriteBytes() — the wire body is body
 // followed by the buffered bytes.
 pub struct ResponseWriter {
-    status:  int
-    headers: map[string]string
-    body:    string
-    bodyBuf: string
-    bodyLen: int
-    bodyCap: int
+    status:  int  // the status
+    headers: map[string]string  // the headers
+    body:    string  // the body
+    bodyBuf: string  // the body buffer
+    bodyLen: int  // the body length
+    bodyCap: int  // the body capacity
 
     // WriteHeader sets the HTTP status code for the response.
     pub fn WriteHeader(self: *ResponseWriter, status: int) {

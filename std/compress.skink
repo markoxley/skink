@@ -43,11 +43,11 @@ fn writeLE32(buf: string, offset: int, val: int) {
 
 // GzipWriter wraps a writer and applies gzip compression.
 pub struct GzipWriter {
-    level: int
-    buf: string
-    bufLen: int
-    bufCap: int
-    closed: bool
+    level: int  // the level
+    buf: string  // the buffer
+    bufLen: int  // the buffer length
+    bufCap: int  // the buffer capacity
+    closed: bool  // the closed
 
     // Write appends data to the internal buffer, growing it as needed.
     // Returns an error if the writer has already been closed.
@@ -120,8 +120,8 @@ pub struct GzipWriter {
 
 // Deflater performs raw DEFLATE compression.
 pub struct Deflater {
-    windowBits: int
-    memLevel: int
+    windowBits: int  // the window bits
+    memLevel: int  // the memory level
 
     // Compress returns the compressed data and its byte length.
     pub fn Compress(self: *Deflater, data: string, len: int) -> (string, int) {

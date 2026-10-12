@@ -35,10 +35,11 @@ extern fn Skink_llm_last_error() -> string
 
 // Context wraps a llama.cpp context for inference.
 pub struct Context {
-    modelPath: string
-    nCtx: int
-    handle: int64
+    modelPath: string  // the model path
+    nCtx: int  // the number of context
+    handle: int64  // the handle
 
+    // Generate produces a completion for prompt, capped at maxTokens tokens.
     pub fn Generate(self: *Context, prompt: string, maxTokens: int) -> (string, errors.Error) {
         if self.handle == int64(0) {
             return "", errors.New("invalid context")
@@ -46,6 +47,7 @@ pub struct Context {
         return Skink_llm_generate(self.handle, prompt, maxTokens), errors.New("")
     }
 
+    // Embeddings returns the embedding vector for text.
     pub fn Embeddings(self: Context, text: string) -> []float {
         if self.handle == int64(0) {
             var embs []float
@@ -64,6 +66,7 @@ pub struct Context {
         return embs
     }
 
+    // Close releases the context and its resources.
     pub fn Close(self: *Context) {
         if self.handle != int64(0) {
             Skink_llm_free(self.handle)
@@ -71,6 +74,7 @@ pub struct Context {
         }
     }
 
+    // LastError returns the most recent error message.
     pub fn LastError(self: Context) -> string {
         return Skink_llm_last_error()
     }
@@ -87,8 +91,8 @@ pub fn LoadModel(path: string, nCtx: int) -> (Context, errors.Error) {
 
 // ChatMessage represents a single turn in a conversation.
 pub struct ChatMessage {
-    role: string
-    content: string
+    role: string  // the role
+    content: string  // the content
 }
 
 // ChatCompletion runs a multi-turn chat completion.

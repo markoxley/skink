@@ -234,10 +234,10 @@ pub fn Mkdir(path: string) -> errors.Error {
 
 // FileInfo holds metadata about a file, as returned by Stat.
 pub struct FileInfo {
-    Name:    string
-    Size:    int64
-    Mode:    int
-    IsDir:   bool
+    Name:    string  // the name
+    Size:    int64  // the size
+    Mode:    int  // the mode
+    IsDir:   bool  // whether dir
 }
 
 // Stat returns metadata about the file at path.
@@ -290,8 +290,8 @@ pub fn FileSize(path: string) -> int64 {
 
 // DirEntry represents a single entry in a directory listing.
 pub struct DirEntry {
-    Name:   string
-    IsDir:  bool
+    Name:   string  // the name
+    IsDir:  bool  // whether dir
 }
 
 // ReadDir returns a list of entries in the directory at path.

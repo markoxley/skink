@@ -39,22 +39,22 @@ fn sigmoidDerivative(x: float) -> float {
 
 // Network is a single-hidden-layer feedforward neural network.
 pub struct Network {
-    inputSize:   int
-    hiddenSize:  int
-    outputSize:  int
+    inputSize:   int  // the input size
+    hiddenSize:  int  // the hidden size
+    outputSize:  int  // the output size
     // Weights: hiddenWeights[i][j] = weight from input j to hidden i
     hiddenWeights: [][]float
-    hiddenBiases:  []float
+    hiddenBiases:  []float  // the hidden biases
     // Weights: outputWeights[i][j] = weight from hidden j to output i
     outputWeights: [][]float
-    outputBiases:  []float
-    learningRate:  float
+    outputBiases:  []float  // the output biases
+    learningRate:  float  // the learning rate
 
     // Forward stores intermediate values for backprop.
     hiddenInputs:  []float
-    hiddenOutputs: []float
-    outputInputs:  []float
-    outputOutputs: []float
+    hiddenOutputs: []float  // the hidden outputs
+    outputInputs:  []float  // the output inputs
+    outputOutputs: []float  // the output outputs
 
     // Init initializes the network with random weights.
     pub fn Init(self: *Network, input: int, hidden: int, output: int) {

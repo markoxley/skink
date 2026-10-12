@@ -33,10 +33,10 @@ import "std/libc"
 //   - mode:    the SPI mode (MODE_0..MODE_3) requested at Open time.
 //   - bits:    bits per word (typically 8).
 pub struct Device {
-    fd: int
-    speedHz: int
-    mode: int
-    bits: int
+    fd: int  // the file descriptor
+    speedHz: int  // the speed hz
+    mode: int  // the mode
+    bits: int  // the bits
 
     // Transfer performs a full-duplex transfer of len bytes: tx is clocked out
     // while rx is clocked in simultaneously. The returned string is the received
@@ -146,17 +146,17 @@ pub fn Open(bus: int, chipSelect: int, speedHz: int, mode: int) -> (Device, erro
 //   - MODE_2: CPOL=1, CPHA=0 (clock idle high, sample on leading edge).
 //   - MODE_3: CPOL=1, CPHA=1 (clock idle high, sample on trailing edge).
 pub const MODE_0 = 0
-pub const MODE_1 = 1
-pub const MODE_2 = 2
-pub const MODE_3 = 3
+pub const MODE_1 = 1  // 1 mode
+pub const MODE_2 = 2  // 2 mode
+pub const MODE_3 = 3  // 3 mode
 
 // Bit order constants.
 pub const MSB_FIRST = 0
-pub const LSB_FIRST = 1
+pub const LSB_FIRST = 1  // the lsb first
 
 // Common SPI clock speeds (Hz), for convenience.
 pub const SPEED_100KHZ = 100000
-pub const SPEED_1MHZ = 1000000
-pub const SPEED_5MHZ = 5000000
-pub const SPEED_10MHZ = 10000000
-pub const SPEED_20MHZ = 20000000
+pub const SPEED_1MHZ = 1000000  // the speed 1 mhz
+pub const SPEED_5MHZ = 5000000  // the speed 5 mhz
+pub const SPEED_10MHZ = 10000000  // the speed 10 mhz
+pub const SPEED_20MHZ = 20000000  // the speed 20 mhz

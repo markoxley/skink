@@ -30,7 +30,7 @@ import "std/libc"
 
 // Template holds a parsed template and its raw text.
 pub struct Template {
-    text: string
+    text: string  // the text
 }
 
 // Parse creates a Template from raw text.  Validation is deferred to Execute.
