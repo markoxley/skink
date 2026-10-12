@@ -39,7 +39,7 @@ set -euo pipefail
 
 # GitHub repo that hosts releases. Override with SKINK_REPO env var.
 # Format: "owner/repo"
-SKINK_REPO="${SKINK_REPO:-skink-lang/skink}"
+SKINK_REPO="${SKINK_REPO:-markoxley/skink}"
 
 # Install prefix. Override with --prefix or SKINK_PREFIX env var.
 SKINK_PREFIX="${SKINK_PREFIX:-$HOME/.local/skink}"
@@ -92,7 +92,7 @@ Usage:
 Options:
   --version <ver>    Version to install (default: latest)
   --prefix <path>    Install prefix (default: ~/.local/skink)
-  --repo <owner/repo>  GitHub repo hosting releases (default: skink-lang/skink)
+  --repo <owner/repo>  GitHub repo hosting releases (default: markoxley/skink)
   --no-shell-rc      Skip updating shell config files
   --help             Show this help message
 
@@ -168,6 +168,18 @@ info "  ${DOWNLOAD_URL}"
 curl -fsSL -o "$ARCHIVE_PATH" "$DOWNLOAD_URL" \
     || fail "Download failed. Check that release v${SKINK_VERSION} exists for ${OS}/${ARCH}."
 
+# Verify the SHA256 checksum published alongside the archive. A missing
+# checksum file warns rather than fails so ad-hoc releases still install.
+if command -v sha256sum >/dev/null 2>&1; then
+    if curl -fsSL -o "${ARCHIVE_PATH}.sha256" "${DOWNLOAD_URL}.sha256"; then
+        info "Verifying checksum..."
+        (cd "$TMPDIR" && sha256sum -c "${ARCHIVE_NAME}.sha256") \
+            || fail "Checksum verification failed for ${ARCHIVE_NAME}"
+    else
+        warn "No checksum file found for v${SKINK_VERSION}; skipping verification"
+    fi
+fi
+
 # ============================================================================
 # Install
 # ============================================================================
@@ -184,6 +196,9 @@ tar -xzf "$ARCHIVE_PATH" -C "$STAGING"
 # Expected archive layout:
 #   skink              (compiler binary)
 #   skink-lsp          (LSP binary)
+#   skinkfmt           (source formatter binary)
+#   skink_test.sh      (test runner invoked by `skink -t`)
+#   skink_bench.sh     (benchmark runner invoked by `skink -b`)
 #   std/               (standard library .skink files)
 #   runtime/           (C runtime files)
 
@@ -204,6 +219,20 @@ if [[ -f "${STAGING}/skink-lsp" ]]; then
 else
     warn "  skink-lsp binary not found in archive (LSP support optional)"
 fi
+
+if [[ -f "${STAGING}/skinkfmt" ]]; then
+    cp -f "${STAGING}/skinkfmt" "${SKINK_PREFIX}/bin/"
+    chmod 755 "${SKINK_PREFIX}/bin/skinkfmt"
+    info "  Installed: bin/skinkfmt"
+fi
+
+for harness in skink_test.sh skink_bench.sh; do
+    if [[ -f "${STAGING}/${harness}" ]]; then
+        cp -f "${STAGING}/${harness}" "${SKINK_PREFIX}/bin/"
+        chmod 755 "${SKINK_PREFIX}/bin/${harness}"
+        info "  Installed: bin/${harness}"
+    fi
+done
 
 # Install standard library (includes runtime/ subdirectory with C files)
 if [[ -d "${STAGING}/std" ]]; then

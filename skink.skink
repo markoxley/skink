@@ -28,6 +28,7 @@ module main
 import "std/ast"
 import "std/checker"
 import "std/emitter"
+import "std/fs"
 import "std/resolver"
 import "std/str"
 import "std/strconv"
@@ -45,6 +46,28 @@ extern fn fputs(s: string, fp: int64) -> int
 // usage prints the command-line usage message for the compiler.
 fn usage() {
     println("usage: skink [-v | -version] [-t <target>] [-b <target>] [-o <output>] [-check | -emit-ll] <file.skink>")
+}
+
+// findHarnessScript locates a helper script (skink_test.sh / skink_bench.sh)
+// that must sit beside the compiler binary. When argv[0] is a bare name
+// (the common `skink -t` case where the binary was found via PATH), the
+// PATH entries are searched for the script directly.
+fn findHarnessScript(argv0: string, name: string) -> string {
+    if str.Contains(argv0, "/") {
+        binDir := path.Dir(argv0)
+        return str.Concat(binDir, str.Concat("/", name))
+    }
+    pathEnv := getenv("PATH")
+    if int64(pathEnv) != 0 && str.Len(pathEnv) > 0 {
+        dirs := str.Split(pathEnv, ":")
+        for i := 0; i < len(dirs); i = i + 1 {
+            candidate := str.Concat(dirs[i], str.Concat("/", name))
+            if fs.Exists(candidate) {
+                return candidate
+            }
+        }
+    }
+    return str.Concat("./", name)
 }
 
 // main is the compiler entry point; it dispatches to the test/bench
@@ -69,11 +92,7 @@ fn main() -> int {
     // Delegate to the test harness script when -t is given.
     if argc >= 3 && argv[1] == "-t" {
         selfBin := argv[0]
-        binDir := path.Dir(selfBin)
-        if str.Equal(binDir, "") {
-            binDir = "."
-        }
-        script := str.Concat(binDir, "/skink_test.sh")
+        script := findHarnessScript(selfBin, "skink_test.sh")
         cmd := str.Concat("SKINK=", str.Concat(selfBin, str.Concat(" SKINK_HOME=", str.Concat(skinkHome, str.Concat(" ", str.Concat(script, str.Concat(" ", argv[2])))))))
         testRc := system(cmd)
         if testRc == 0 {
@@ -85,11 +104,7 @@ fn main() -> int {
     // Delegate to the benchmark harness script when -b is given.
     if argc >= 3 && argv[1] == "-b" {
         selfBin := argv[0]
-        binDir := path.Dir(selfBin)
-        if str.Equal(binDir, "") {
-            binDir = "."
-        }
-        script := str.Concat(binDir, "/skink_bench.sh")
+        script := findHarnessScript(selfBin, "skink_bench.sh")
         cmd := str.Concat("SKINK=", str.Concat(selfBin, str.Concat(" SKINK_HOME=", str.Concat(skinkHome, str.Concat(" ", str.Concat(script, str.Concat(" ", argv[2])))))))
         benchRc := system(cmd)
         if benchRc == 0 {

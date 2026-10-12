@@ -9,7 +9,7 @@ initial binary is installed.
 Install the latest release from GitHub:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/skink-lang/skink/main/skink-pure/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/markoxley/skink/main/install.sh | bash
 ```
 
 This downloads the `skink` compiler, `skink-lsp` language server, and the
@@ -19,19 +19,19 @@ standard library to `~/.local/skink/`, then updates your shell config
 Install a specific version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/skink-lang/skink/main/skink-pure/install.sh | bash -s -- --version 0.2.0
+curl -fsSL https://raw.githubusercontent.com/markoxley/skink/main/install.sh | bash -s -- --version 0.2.0
 ```
 
 Install to a custom prefix:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/skink-lang/skink/main/skink-pure/install.sh | bash -s -- --prefix /opt/skink
+curl -fsSL https://raw.githubusercontent.com/markoxley/skink/main/install.sh | bash -s -- --prefix /opt/skink
 ```
 
 Skip shell config updates:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/skink-lang/skink/main/skink-pure/install.sh | bash -s -- --no-shell-rc
+curl -fsSL https://raw.githubusercontent.com/markoxley/skink/main/install.sh | bash -s -- --no-shell-rc
 ```
 
 After installing, restart your shell (or `source ~/.bashrc`) and verify:
@@ -92,7 +92,7 @@ gh release create v0.2.0 \
 ## Project Layout
 
 ```
-skink-pure/
+skink/
 ├── skink.skink          Compiler driver (main entry point)
 ├── std/                 Standard library
 │   ├── lexer.skink      Lexer

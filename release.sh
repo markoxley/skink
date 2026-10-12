@@ -152,15 +152,20 @@ info "Verifying compiler..."
 # ============================================================================
 
 LSP_BIN=""
+FMT_BIN=""
 if [[ -d "$LSP_DIR" ]]; then
     info "Building skink-lsp..."
     (
         cd "$LSP_DIR"
         make clean
-        make build
+        # Build against this repo's stdlib, not any ambient SKINK_HOME
+        # (a stale /usr/local/lib/skink export would ship old sources).
+        SKINK_HOME="$SKINK_HOME_DIR" make build
     )
     LSP_BIN="${LSP_DIR}/skink-lsp"
     [[ -f "$LSP_BIN" ]] || fail "LSP build failed"
+    FMT_BIN="${LSP_DIR}/skinkfmt"
+    [[ -f "$FMT_BIN" ]] || warn "skinkfmt not built, skipping formatter"
     info "Verifying LSP..."
     # LSP reads from stdin, just check it starts and exits on EOF
     echo "" | timeout 2 "$LSP_BIN" 2>/dev/null || true
@@ -187,11 +192,29 @@ if [[ -n "$LSP_BIN" ]] && [[ -f "$LSP_BIN" ]]; then
     chmod 755 "${STAGING_DIR}/skink-lsp"
 fi
 
+if [[ -n "$FMT_BIN" ]] && [[ -f "$FMT_BIN" ]]; then
+    cp "$FMT_BIN" "${STAGING_DIR}/skinkfmt"
+    chmod 755 "${STAGING_DIR}/skinkfmt"
+fi
+
+# skink -t / -b resolve their harness scripts relative to argv[0], so they
+# must sit beside the installed compiler binary.
+for harness in skink_test.sh skink_bench.sh; do
+    if [[ -f "${SCRIPT_DIR}/${harness}" ]]; then
+        cp "${SCRIPT_DIR}/${harness}" "${STAGING_DIR}/${harness}"
+        chmod 755 "${STAGING_DIR}/${harness}"
+    fi
+done
+
 # Copy standard library (includes runtime/ subdirectory with C files)
 cp -r "${SKINK_HOME_DIR}" "${STAGING_DIR}/std"
-# Remove test files from the distributed stdlib
+# Remove test files, test fixtures, and stray sync-tool temp files from
+# the distributed stdlib
 find "${STAGING_DIR}/std" -name '*_test.skink' -delete
-find "${STAGING_DIR}/std" -name '__skink_test_bin' -delete
+find "${STAGING_DIR}/std" -name '__skink_test_*' -delete
+find "${STAGING_DIR}/std" -name '*.insyncdl' -delete
+rm -rf "${STAGING_DIR}/std/fixture_libmain" "${STAGING_DIR}/std/diamond" \
+       "${STAGING_DIR}/std/compilefail" "${STAGING_DIR}/std/regress_helper.skink"
 
 # Create output dir and archive
 mkdir -p "$OUTPUT_DIR"

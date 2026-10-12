@@ -25,7 +25,7 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-skink_lang_root=${SKINK_LANG_ROOT:-"$repo_root/../skink-lang"}
+skink_lang_root=${SKINK_LANG_ROOT:-"$repo_root/../skink"}
 target=${SKINK_HOME:-"$repo_root/bootstrap-home"}
 
 copy_skink_tree() {

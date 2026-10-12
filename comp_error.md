@@ -2185,3 +2185,11 @@ i64 indices after truncation.
 - **Fix**: `Skink_chan_recv` now calls `pthread_cond_broadcast(&ch->send_cv)` when `ch->capacity == 0` (broadcast lets the satisfied sender return AND the queued sender enqueue); bounded channels keep the single signal since all their waiters share the same condition. Synced to `runtime/` and `bootstrap-home/runtime/`.
 - **Reproducer**: 20-run loop of the two-sender unbuffered program — 11 hangs pre-fix, 60/60 clean post-fix.
 - **Regression test**: `TestRendezvousChanTwoSenders` in `std/compiler_concurrency_test.skink` — forces the sender1-parked / sender2-queued ordering with staggered spawns across 20 iterations.
+
+## 120. `skink -t`/`-b` fails when invoked via bare PATH name — ✅ FIXED
+
+- **Severity**: feature breakage for installed users (`sh: ./skink_test.sh: No such file or directory`)
+- **Symptom**: `skink -t foo_test.skink` works via absolute path (`/prefix/bin/skink -t`) but fails when the compiler was resolved through PATH (`skink -t`) — exactly the usage pattern the installer sets up.
+- **Root cause**: `skink.skink` derived the harness dir from `path.Dir(argv[0])`; a bare `argv[0]` ("skink") produced `.` and the lookup hit `./skink_test.sh`.
+- **Fix**: `findHarnessScript` now searches PATH entries for the script when `argv[0]` contains no `/`. Verified: `PATH=<prefix>/bin skink -t` passes; absolute invocation unchanged.
+- **Verification**: manual — driver-level behavior depends on the process environment; exercised end-to-end via a staged `~/.local/skink`-style prefix.
