@@ -1,0 +1,495 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/orm.skink
+// Purpose: Lightweight object-relational mapping over std/db. Structs
+//          map to tables by convention (lowercase type name + "s"),
+//          with [column(name=...)] and [db(...)] field tags for
+//          renaming, primary keys, auto-increment, and ignoring fields.
+//          Values move between rows and structs via std/reflect.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module orm
+
+import "std/db"
+import "std/errors"
+import "std/reflect"
+import "std/str"
+import "std/strconv"
+
+// Supported field types map to SQLite affinities as follows:
+//   int, int64 -> INTEGER   string -> TEXT   float -> REAL   bool -> INTEGER
+// Any other field type is rejected by TableOf.
+
+// Table binds a db.Connection to a struct type's table mapping. Obtain
+// one with TableOf or TableNamed; all mapping decisions are resolved
+// once at construction.
+pub struct Table {
+    conn: db.Connection  // the underlying connection
+    typ: reflect.Type  // the reflected struct type
+    name: string  // the table name
+    typeName: string  // the struct type name
+    cols: []string  // column names, parallel to fields
+    fields: []reflect.Field  // the mapped (non-ignored) fields
+    pkIndex: int  // index into cols/fields of the primary key, or -1
+    pkAuto: bool  // whether the pk auto-increments on insert
+}
+
+// Rows iterates query results, scanning each row into a caller-provided
+// struct via Next. Always close short-circuited iteration with Close.
+pub struct Rows {
+    res: db.Result  // the underlying result set
+    tbl: Table  // the table mapping used to decode columns
+}
+
+// Open opens a SQLite database at dsn (a path or ":memory:").
+pub fn Open(dsn: string) -> (db.Connection, errors.Error) {
+    return db.Open("sqlite3", dsn)
+}
+
+// attrArgs returns the space-joined contents of every `name(...)` group
+// in a space-joined tag string such as "column(name=x) db(pk auto)".
+fn attrArgs(tag: string, name: string) -> string {
+    needle := str.Concat(name, "(")
+    result := ""
+    rest := tag
+    idx := str.IndexOf(rest, needle)
+    for idx >= 0 {
+        inner := str.Substr(rest, idx + str.Len(needle), str.Len(rest) - idx - str.Len(needle))
+        close := str.IndexOf(inner, ")")
+        if close < 0 {
+            close = str.Len(inner)
+        }
+        args := str.Substr(inner, 0, close)
+        if str.Len(result) > 0 {
+            result = str.Concat(result, " ")
+        }
+        result = str.Concat(result, args)
+        rest = str.Substr(rest, idx + str.Len(needle) + close + 1, str.Len(rest) - idx - str.Len(needle) - close - 1)
+        idx = str.IndexOf(rest, needle)
+    }
+    return result
+}
+
+// tagFlags returns the individual flag words inside `attr(...)`, split
+// on commas and spaces — e.g. attrArgs "pk auto" -> ["pk", "auto"].
+fn tagFlags(tag: string, attr: string) -> []string {
+    args := str.Replace(attrArgs(tag, attr), ",", " ")
+    raw := str.Split(args, " ")
+    var parts []string
+    for i := 0; i < len(raw); i = i + 1 {
+        p := str.Trim(raw[i])
+        if str.Len(p) > 0 {
+            parts = append(parts, p)
+        }
+    }
+    return parts
+}
+
+// tagHasFlag reports whether `flag` appears inside `attr(...)` in the
+// tag string — e.g. tagHasFlag("db(pk auto)", "db", "pk") is true.
+fn tagHasFlag(tag: string, attr: string, flag: string) -> bool {
+    parts := tagFlags(tag, attr)
+    for i := 0; i < len(parts); i = i + 1 {
+        if str.Equal(parts[i], flag) {
+            return true
+        }
+    }
+    return false
+}
+
+// tagKey returns the value of `key=value` inside `attr(...)` in the tag
+// string — e.g. tagKey("column(name=full_name)", "column", "name") is
+// "full_name". The second return is false when the key is absent.
+fn tagKey(tag: string, attr: string, key: string) -> (string, bool) {
+    parts := tagFlags(tag, attr)
+    prefix := str.Concat(key, "=")
+    for i := 0; i < len(parts); i = i + 1 {
+        p := parts[i]
+        if str.StartsWith(p, prefix) {
+            return str.Substr(p, str.Len(prefix), str.Len(p) - str.Len(prefix)), true
+        }
+    }
+    return "", false
+}
+
+// supportedType reports whether typeName maps to a SQLite column type.
+fn supportedType(typeName: string) -> bool {
+    return str.Equal(typeName, "int") || str.Equal(typeName, "int64") ||
+        str.Equal(typeName, "string") || str.Equal(typeName, "float") ||
+        str.Equal(typeName, "bool")
+}
+
+// columnType returns the SQLite column type for a struct field type.
+fn columnType(typeName: string) -> string {
+    if str.Equal(typeName, "string") {
+        return "TEXT"
+    }
+    if str.Equal(typeName, "float") {
+        return "REAL"
+    }
+    return "INTEGER" // int, int64, bool
+}
+
+// columnName resolves a field's column name: [column(name=x)] wins,
+// then [db(name=x)], otherwise the field name itself.
+fn columnName(f: reflect.Field) -> string {
+    if name, ok := tagKey(f.tag, "column", "name"); ok {
+        return name
+    }
+    if name, ok := tagKey(f.tag, "db", "name"); ok {
+        return name
+    }
+    return f.name
+}
+
+// TableOf binds conn to the table for the struct type described by t,
+// using the conventional table name: the lowercased type name with a
+// trailing "s" (User -> "users"). Every non-ignored field must have a
+// mappable type: int, int64, string, float, or bool.
+//
+// Field tags understood:
+//   [column(name=x)]   rename the column to x
+//   [db(name=x)]       rename the column to x (alternative spelling)
+//   [db(pk)]           mark the field as the primary key
+//   [db(auto)]         auto-increment the pk on Insert (int pks only)
+//   [db(ignore)]       exclude the field from the table entirely
+//   [db(pk,auto)]      flags may be comma- or space-separated
+// A field named "id" is the primary key when no field carries [db(pk)].
+pub fn TableOf(conn: db.Connection, t: reflect.Type) -> (Table, errors.Error) {
+    return TableNamed(conn, t, str.Concat(str.ToLower(reflect.TypeName(t)), "s"))
+}
+
+// TableNamed is TableOf with an explicit table name.
+pub fn TableNamed(conn: db.Connection, t: reflect.Type, name: string) -> (Table, errors.Error) {
+    var cols []string
+    var fields []reflect.Field
+    pkIndex := -1
+    pkAuto := false
+    typeName := reflect.TypeName(t)
+    n := reflect.FieldCount(t)
+    for i := 0; i < n; i = i + 1 {
+        f := reflect.FieldByIndex(t, i)
+        if tagHasFlag(f.tag, "db", "ignore") {
+            continue
+        }
+        if supportedType(f.type_name) == false {
+            return Table{conn: conn, typ: t, name: name, typeName: typeName, cols: cols, fields: fields, pkIndex: -1, pkAuto: false},
+                errors.New(str.Concat(str.Concat("orm: unsupported field type \"", f.type_name), str.Concat("\" on field \"", str.Concat(f.name, "\""))))
+        }
+        mapped := len(cols)
+        cols = append(cols, columnName(f))
+        fields = append(fields, f)
+        if tagHasFlag(f.tag, "db", "pk") || (str.Equal(f.name, "id") && pkIndex < 0) {
+            pkIndex = mapped
+            pkAuto = tagHasFlag(f.tag, "db", "auto")
+        }
+    }
+    return Table{conn: conn, typ: t, name: name, typeName: typeName, cols: cols, fields: fields, pkIndex: pkIndex, pkAuto: pkAuto}, errors.None()
+}
+
+// Name returns the table name.
+pub fn Name(self: Table) -> string {
+    return self.name
+}
+
+// Create issues CREATE TABLE IF NOT EXISTS with the mapped columns.
+pub fn Create(self: *Table) -> errors.Error {
+    b := str.NewBuilder(256)
+    b.Write("CREATE TABLE IF NOT EXISTS ")
+    b.Write(self.name)
+    b.Write(" (")
+    for i := 0; i < len(self.cols); i = i + 1 {
+        if i > 0 {
+            b.Write(", ")
+        }
+        b.Write(self.cols[i])
+        b.Write(" ")
+        b.Write(columnType(self.fields[i].type_name))
+        if i == self.pkIndex {
+            b.Write(" PRIMARY KEY")
+            if self.pkAuto {
+                b.Write(" AUTOINCREMENT")
+            }
+        }
+    }
+    b.Write(")")
+    _, err := self.conn.Exec(b.String())
+    return err
+}
+
+// Drop issues DROP TABLE IF EXISTS.
+pub fn Drop(self: *Table) -> errors.Error {
+    _, err := self.conn.Exec(str.Concat("DROP TABLE IF EXISTS ", self.name))
+    return err
+}
+
+// bindField binds the field's value from the struct at ptr to prepared
+// parameter idx on res.
+fn bindField(res: *db.Result, idx: int, ptr: int64, f: reflect.Field) {
+    if str.Equal(f.type_name, "int") {
+        res.BindInt(idx, reflect.GetInt(ptr, f))
+    } else if str.Equal(f.type_name, "int64") {
+        res.BindInt64(idx, reflect.GetInt64(ptr, f))
+    } else if str.Equal(f.type_name, "string") {
+        res.BindText(idx, reflect.GetString(ptr, f))
+    } else if str.Equal(f.type_name, "float") {
+        res.BindFloat(idx, reflect.GetFloat(ptr, f))
+    } else if str.Equal(f.type_name, "bool") {
+        if reflect.GetBool(ptr, f) {
+            res.BindInt(idx, 1)
+        } else {
+            res.BindInt(idx, 0)
+        }
+    }
+}
+
+// setField converts the text column value val to the field's type and
+// stores it in the struct at ptr.
+fn setField(ptr: int64, f: reflect.Field, val: string) {
+    if str.Equal(f.type_name, "int") {
+        if n, ok := strconv.ParseInt(val); ok {
+            reflect.SetInt(ptr, f, n)
+        }
+    } else if str.Equal(f.type_name, "int64") {
+        if n, ok := strconv.ParseInt64(val); ok {
+            reflect.SetInt64(ptr, f, n)
+        }
+    } else if str.Equal(f.type_name, "string") {
+        reflect.SetString(ptr, f, val)
+    } else if str.Equal(f.type_name, "float") {
+        if n, ok := strconv.ParseFloat(val); ok {
+            reflect.SetFloat(ptr, f, n)
+        }
+    } else if str.Equal(f.type_name, "bool") {
+        reflect.SetBool(ptr, f, str.Equal(val, "1") || str.Equal(val, "true"))
+    }
+}
+
+// execBound prepares sql, binds idx->field pairs, and steps it once —
+// used for INSERT/UPDATE/DELETE statements that return no rows.
+fn execBound(self: *Table, sql: string, ptr: int64, idxs: []int) -> errors.Error {
+    res, err := self.conn.Query(sql)
+    if err.message != "" {
+        return err
+    }
+    for i := 0; i < len(idxs); i = i + 1 {
+        bindField(&res, i + 1, ptr, self.fields[idxs[i]])
+    }
+    res.Next()
+    return errors.None()
+}
+
+// Insert inserts the struct at ptr (pass int64(&obj)) as a new row.
+// When the table has an auto-increment primary key, the pk field is
+// skipped in the INSERT and written back from last_insert_rowid().
+pub fn Insert(self: *Table, ptr: int64) -> errors.Error {
+    b := str.NewBuilder(256)
+    b.Write("INSERT INTO ")
+    b.Write(self.name)
+    b.Write(" (")
+    var idxs []int
+    for i := 0; i < len(self.cols); i = i + 1 {
+        if i == self.pkIndex && self.pkAuto {
+            continue
+        }
+        idxs = append(idxs, i)
+    }
+    for i := 0; i < len(idxs); i = i + 1 {
+        if i > 0 {
+            b.Write(",")
+        }
+        b.Write(self.cols[idxs[i]])
+    }
+    b.Write(") VALUES (")
+    for i := 0; i < len(idxs); i = i + 1 {
+        if i > 0 {
+            b.Write(",")
+        }
+        b.Write("?")
+    }
+    b.Write(")")
+    err := execBound(self, b.String(), ptr, idxs)
+    if err.message != "" {
+        return err
+    }
+    if self.pkAuto == false || self.pkIndex < 0 {
+        return errors.None()
+    }
+    res, qerr := self.conn.Query("SELECT last_insert_rowid()")
+    if qerr.message != "" {
+        return qerr
+    }
+    if res.Next() {
+        val, _ := res.Scan(0)
+        f := self.fields[self.pkIndex]
+        if str.Equal(f.type_name, "int") {
+            if n, ok := strconv.ParseInt(val); ok {
+                reflect.SetInt(ptr, f, n)
+            }
+        } else {
+            if n, ok := strconv.ParseInt64(val); ok {
+                reflect.SetInt64(ptr, f, n)
+            }
+        }
+    }
+    return errors.None()
+}
+
+// Save updates the row matching the struct's primary key field. The
+// struct at ptr (pass int64(&obj)) must have its pk set. Returns an
+// error when the table has no primary key.
+pub fn Save(self: *Table, ptr: int64) -> errors.Error {
+    if self.pkIndex < 0 {
+        return errors.New("orm: table has no primary key")
+    }
+    b := str.NewBuilder(256)
+    b.Write("UPDATE ")
+    b.Write(self.name)
+    b.Write(" SET ")
+    var idxs []int
+    for i := 0; i < len(self.cols); i = i + 1 {
+        if i == self.pkIndex {
+            continue
+        }
+        if len(idxs) > 0 {
+            b.Write(",")
+        }
+        b.Write(self.cols[i])
+        b.Write("=?")
+        idxs = append(idxs, i)
+    }
+    b.Write(" WHERE ")
+    b.Write(self.cols[self.pkIndex])
+    b.Write("=?")
+    idxs = append(idxs, self.pkIndex)
+    return execBound(self, b.String(), ptr, idxs)
+}
+
+// selectSQL builds SELECT <cols> FROM <table> with an optional suffix.
+fn selectSQL(self: *Table, suffix: string) -> string {
+    b := str.NewBuilder(256)
+    b.Write("SELECT ")
+    for i := 0; i < len(self.cols); i = i + 1 {
+        if i > 0 {
+            b.Write(",")
+        }
+        b.Write(self.cols[i])
+    }
+    b.Write(" FROM ")
+    b.Write(self.name)
+    if str.Len(suffix) > 0 {
+        b.Write(" ")
+        b.Write(suffix)
+    }
+    return b.String()
+}
+
+// Get loads the row whose primary key equals pk into the struct at ptr
+// (pass int64(&obj)). Returns false when no such row exists or the
+// table has no primary key. Integer primary keys only.
+pub fn Get(self: *Table, pk: int64, ptr: int64) -> bool {
+    if self.pkIndex < 0 {
+        return false
+    }
+    res, err := self.conn.Query(str.Concat(str.Concat(selectSQL(self, "WHERE "), self.cols[self.pkIndex]), "=?"))
+    if err.message != "" {
+        return false
+    }
+    res.BindInt64(1, pk)
+    if res.Next() == false {
+        return false
+    }
+    scanRow(self, &res, ptr)
+    return true
+}
+
+// Delete removes the row whose primary key equals pk. Returns an error
+// when the table has no primary key.
+pub fn Delete(self: *Table, pk: int64) -> errors.Error {
+    if self.pkIndex < 0 {
+        return errors.New("orm: table has no primary key")
+    }
+    res, err := self.conn.Query(str.Concat(str.Concat("DELETE FROM ", self.name), str.Concat(str.Concat(" WHERE ", self.cols[self.pkIndex]), "=?")))
+    if err.message != "" {
+        return err
+    }
+    res.BindInt64(1, pk)
+    res.Next()
+    return errors.None()
+}
+
+// All returns a Rows over every row in the table.
+pub fn All(self: *Table) -> Rows {
+    return self.Query(selectSQL(self, ""))
+}
+
+// Where returns a Rows over SELECT <cols> FROM <table> WHERE <clause>.
+// The clause may contain ? placeholders bound in order from args; all
+// args are bound as text (SQLite column affinity coerces numeric
+// comparisons on typed columns). Pass an empty slice for no args.
+pub fn Where(self: *Table, clause: string, args: []string) -> Rows {
+    res, err := self.conn.Query(selectSQL(self, str.Concat("WHERE ", clause)))
+    if err.message != "" {
+        return Rows{res: res, tbl: *self}
+    }
+    for i := 0; i < len(args); i = i + 1 {
+        res.BindText(i + 1, args[i])
+    }
+    return Rows{res: res, tbl: *self}
+}
+
+// Query returns a Rows over arbitrary SQL. Column names in the result
+// are matched to mapped fields by name, so any SELECT that produces
+// recognisable columns scans correctly.
+pub fn Query(self: *Table, sql: string) -> Rows {
+    res, _ := self.conn.Query(sql)
+    return Rows{res: res, tbl: *self}
+}
+
+// scanRow copies each result column into the matching mapped field of
+// the struct at ptr, converting text values to the field's type.
+fn scanRow(t: *Table, res: *db.Result, ptr: int64) {
+    count := res.ColumnCount()
+    for j := 0; j < count; j = j + 1 {
+        col := res.ColumnName(j)
+        for i := 0; i < len(t.fields); i = i + 1 {
+            if str.Equal(t.cols[i], col) {
+                val, _ := res.Scan(j)
+                setField(ptr, t.fields[i], val)
+            }
+        }
+    }
+}
+
+// Next advances to the next row and scans its columns into the struct
+// at ptr (pass int64(&obj)). Returns false when the rows are exhausted.
+pub fn Next(self: *Rows, ptr: int64) -> bool {
+    if self.res.Next() == false {
+        return false
+    }
+    scanRow(&self.tbl, &self.res, ptr)
+    return true
+}
+
+// Close releases the underlying statement. Call it when abandoning
+// iteration early; it is safe to call after Next has returned false.
+pub fn Close(self: *Rows) {
+    self.res.Close()
+}

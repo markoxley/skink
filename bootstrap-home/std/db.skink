@@ -151,6 +151,30 @@ pub struct Result {
         }
         return errors.New("")
     }
+
+    // ColumnCount returns the number of columns in the result set.
+    pub fn ColumnCount(self: Result) -> int {
+        return len(self.columns)
+    }
+
+    // ColumnName returns the name of column idx in the result set,
+    // or an empty string when idx is out of range.
+    pub fn ColumnName(self: Result, idx: int) -> string {
+        if idx < 0 || idx >= len(self.columns) {
+            return ""
+        }
+        return self.columns[idx]
+    }
+
+    // Close finalizes the prepared statement early, releasing it before
+    // the rows are fully consumed. Safe to call after Next has finished.
+    pub fn Close(self: *Result) {
+        if self.stmt != int64(0) {
+            Skink_db_finalize(self.stmt)
+            self.stmt = int64(0)
+            self.hasRow = false
+        }
+    }
 }
 
 // Connection is a SQLite database connection.

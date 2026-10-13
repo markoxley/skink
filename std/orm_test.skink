@@ -1,0 +1,286 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/orm_test.skink
+// Purpose: Unit tests for the orm module: struct-to-table mapping via
+//          [column]/[db] field tags, CRUD roundtrips, Where queries,
+//          and implicit "id" primary-key convention.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module orm_test
+
+import "std/db"
+import "std/orm"
+import "std/reflect"
+import "std/str"
+import "std/strconv"
+import "testing"
+
+// User exercises every tag form: comma-separated flags, a column
+// rename, and an ignored field.
+pub struct User {
+    [db(pk,auto)]
+    id: int64
+    [column(name=full_name)]
+    name: string
+    age: int
+    active: bool
+    score: float
+    [db(ignore)]
+    scratch: string
+}
+
+// Pet uses the implicit "id" primary-key convention (no tags at all).
+pub struct Pet {
+    id: int
+    species: string
+}
+
+// Product has an explicit non-auto primary key.
+pub struct Product {
+    [db(pk)]
+    sku: string
+    price: int
+}
+
+// Bad has an unmappable field type; TableOf must reject it.
+pub struct Bad {
+    id: int64
+    tags: []string
+}
+
+// openUser returns a connection and bound users table on :memory:.
+fn openUser() -> (db.Connection, orm.Table) {
+    conn, _ := orm.Open(":memory:")
+    var u User
+    tbl, err := orm.TableOf(conn, reflect.TypeOf<User>(u))
+    if err.message != "" {
+        Errorf("TableOf<User> failed: unexpected error")
+    }
+    return conn, tbl
+}
+
+// TestTableMapping verifies convention name, pk detection, column
+// rename, and ignored fields are resolved at TableOf time.
+pub fn TestTableMapping() {
+    conn, tbl := openUser()
+    if str.Equal(tbl.Name(), "users") == false {
+        Errorf("table name should be 'users' (lowercase type + s)")
+    }
+    if tbl.pkIndex != 0 {
+        Errorf("pkIndex should be 0 for tagged id field")
+    }
+    if tbl.pkAuto == false {
+        Errorf("pkAuto should be true for [db(pk,auto)]")
+    }
+    if len(tbl.cols) != 5 {
+        Errorf("expected 5 mapped columns, got " + strconv.Itoa(len(tbl.cols)))
+    }
+    if str.Equal(tbl.cols[1], "full_name") == false {
+        Errorf("[column(name=full_name)] should rename the column")
+    }
+    for i := 0; i < len(tbl.cols); i = i + 1 {
+        if str.Equal(tbl.cols[i], "scratch") {
+            Errorf("[db(ignore)] field should not be mapped")
+        }
+    }
+    conn.Close()
+}
+
+// TestImplicitPk verifies an untagged "id" field becomes the pk
+// (without auto-increment).
+pub fn TestImplicitPk() {
+    conn, _ := orm.Open(":memory:")
+    var p Pet
+    tbl, err := orm.TableOf(conn, reflect.TypeOf<Pet>(p))
+    if err.message != "" {
+        Errorf("TableOf<Pet> failed: unexpected error")
+    }
+    if str.Equal(tbl.Name(), "pets") == false {
+        Errorf("table name should be 'pets'")
+    }
+    if tbl.pkIndex != 0 {
+        Errorf("implicit 'id' field should be the primary key")
+    }
+    if tbl.pkAuto {
+        Errorf("implicit pk should not auto-increment without [db(auto)]")
+    }
+    conn.Close()
+}
+
+// TestExplicitPk verifies [db(pk)] without auto still maps the key.
+pub fn TestExplicitPk() {
+    conn, _ := orm.Open(":memory:")
+    var p Product
+    tbl, err := orm.TableOf(conn, reflect.TypeOf<Product>(p))
+    if err.message != "" {
+        Errorf("TableOf<Product> failed: unexpected error")
+    }
+    if tbl.pkIndex != 0 || tbl.pkAuto {
+        Errorf("[db(pk)] should set pkIndex without auto")
+    }
+    conn.Close()
+}
+
+// TestUnsupportedField verifies TableOf rejects unmappable types.
+pub fn TestUnsupportedField() {
+    conn, _ := orm.Open(":memory:")
+    var b Bad
+    _, err := orm.TableOf(conn, reflect.TypeOf<Bad>(b))
+    if err.message == "" {
+        Errorf("TableOf<Bad> should reject a slice field")
+    }
+    conn.Close()
+}
+
+// TestCreateInsertGet verifies the full roundtrip: table creation,
+// insert with auto-pk writeback, and load by pk.
+pub fn TestCreateInsertGet() {
+    conn, tbl := openUser()
+    if tbl.Create().message != "" {
+        Errorf("Create should succeed")
+    }
+    var u User
+    u.name = "Ada Lovelace"
+    u.age = 36
+    u.active = true
+    u.score = 9.5
+    u.scratch = "not persisted"
+    if tbl.Insert(int64(&u)).message != "" {
+        Errorf("Insert should succeed")
+    }
+    if u.id == int64(0) {
+        Errorf("Insert should write back the auto-increment pk")
+    }
+    var got User
+    if tbl.Get(u.id, int64(&got)) == false {
+        Errorf("Get should find the inserted row")
+    }
+    if str.Equal(got.name, "Ada Lovelace") == false {
+        Errorf("Get should decode the renamed column")
+    }
+    if got.age != 36 || got.active == false || got.score != 9.5 {
+        Errorf("Get should decode int, bool, and float fields")
+    }
+    if str.Len(got.scratch) != 0 {
+        Errorf("ignored field should stay zero-valued")
+    }
+    conn.Close()
+}
+
+// TestSave verifies UPDATE by primary key.
+pub fn TestSave() {
+    conn, tbl := openUser()
+    tbl.Create()
+    var u User
+    u.name = "Grace"
+    u.age = 30
+    tbl.Insert(int64(&u))
+    u.age = 31
+    u.name = "Grace Hopper"
+    if tbl.Save(int64(&u)).message != "" {
+        Errorf("Save should succeed")
+    }
+    var got User
+    tbl.Get(u.id, int64(&got))
+    if str.Equal(got.name, "Grace Hopper") == false || got.age != 31 {
+        Errorf("Save should persist updated fields")
+    }
+    conn.Close()
+}
+
+// TestDelete verifies row removal by primary key.
+pub fn TestDelete() {
+    conn, tbl := openUser()
+    tbl.Create()
+    var u User
+    u.name = "Alan"
+    tbl.Insert(int64(&u))
+    if tbl.Delete(u.id).message != "" {
+        Errorf("Delete should succeed")
+    }
+    var got User
+    if tbl.Get(u.id, int64(&got)) {
+        Errorf("Get should miss a deleted row")
+    }
+    conn.Close()
+}
+
+// TestAllAndWhere verifies full-table and filtered iteration,
+// including a ? parameter bound as text.
+pub fn TestAllAndWhere() {
+    conn, tbl := openUser()
+    tbl.Create()
+    var a User
+    a.name = "a"
+    a.age = 20
+    var b User
+    b.name = "b"
+    b.age = 40
+    var c User
+    c.name = "c"
+    c.age = 60
+    tbl.Insert(int64(&a))
+    tbl.Insert(int64(&b))
+    tbl.Insert(int64(&c))
+    count := 0
+    var each User
+    rows := tbl.All()
+    for rows.Next(int64(&each)) {
+        count = count + 1
+    }
+    if count != 3 {
+        Errorf("All should yield 3 rows, got " + strconv.Itoa(count))
+    }
+    count = 0
+    rows = tbl.Where("age > ?", []string{"30"})
+    for rows.Next(int64(&each)) {
+        count = count + 1
+        if each.age <= 30 {
+            Errorf("Where clause should filter out age " + strconv.Itoa(each.age))
+        }
+    }
+    if count != 2 {
+        Errorf("Where should yield 2 rows, got " + strconv.Itoa(count))
+    }
+    conn.Close()
+}
+
+// TestRawQuery verifies arbitrary SQL maps columns by name even when
+// the order differs from declaration order.
+pub fn TestRawQuery() {
+    conn, tbl := openUser()
+    tbl.Create()
+    var u User
+    u.name = "x"
+    u.age = 42
+    tbl.Insert(int64(&u))
+    rows := tbl.Query("SELECT age, full_name FROM users WHERE id = 1")
+    var got User
+    if rows.Next(int64(&got)) == false {
+        Errorf("raw query should produce a row")
+    }
+    if got.age != 42 || str.Equal(got.name, "x") == false {
+        Errorf("columns should map to fields by name")
+    }
+    if rows.Next(int64(&got)) {
+        Errorf("raw query should end after one row")
+    }
+    conn.Close()
+}

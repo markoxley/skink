@@ -162,3 +162,18 @@ pub fn TestColumnNames() {
         Errorf("Second column should be y")
     }
 }
+
+// TestResultClose verifies Close finalizes a statement early and is
+// safe to call twice. Guards the early-abandon path used by orm.Rows.
+pub fn TestResultClose() {
+    conn, _ := db.Open("sqlite3", ":memory:")
+    conn.Exec("CREATE TABLE t (x INT)")
+    conn.Exec("INSERT INTO t VALUES (1)")
+    res, _ := conn.Query("SELECT x FROM t")
+    res.Close()
+    if res.Next() == true {
+        Errorf("Next after Close should return false")
+    }
+    res.Close()
+    conn.Close()
+}

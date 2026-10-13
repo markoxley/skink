@@ -49,7 +49,7 @@ The compiler uses **type erasure** for generics (templates). All generic type pa
 
 ## Test Results
 
-**104/104 test suites passing, 1149 test functions.**
+**105/105 test suites passing, 1162 test functions.**
 
 Book examples: **314/326 pass, 0 failed, 12 intentionally skipped**
 (REPL/shell snippets and external-service examples). Extract with `python3 book/extract_samples.py`

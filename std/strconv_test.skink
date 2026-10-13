@@ -196,3 +196,35 @@ pub fn TestFormatFloatNoPrecision() {
     s := strconv.FormatFloat(42.0, 0)
     testing.AssertContains(s, "42", "FormatFloat with 0 precision should show integer")
 }
+
+// TestParseInt64 verifies ParseInt64 parses values beyond the int range,
+// rejects overflow, and reports errors on malformed input. Guards the
+// 64-bit parse path added for orm int64 columns.
+pub fn TestParseInt64() {
+    v, ok := strconv.ParseInt64("123")
+    testing.AssertTrue(ok, "ParseInt64 123 ok")
+    testing.AssertTrue(v == int64(123), "ParseInt64 123 value")
+
+    big, ok2 := strconv.ParseInt64("5000000000")
+    testing.AssertTrue(ok2, "ParseInt64 beyond int32 should parse")
+    testing.AssertTrue(big == int64(5000000000), "ParseInt64 big value")
+
+    neg, ok3 := strconv.ParseInt64("  -9876543210  ")
+    testing.AssertTrue(ok3, "ParseInt64 negative with whitespace ok")
+    // Note: written as -int64(...) — int64(-N) miscompiles for N > i32::MAX
+    // (comp_error.md #121).
+    testing.AssertTrue(neg == -int64(9876543210), "ParseInt64 negative value")
+
+    _, ok4 := strconv.ParseInt64("abc")
+    testing.AssertFalse(ok4, "ParseInt64 invalid should fail")
+
+    _, ok5 := strconv.ParseInt64("")
+    testing.AssertFalse(ok5, "ParseInt64 empty should fail")
+
+    _, ok6 := strconv.ParseInt64("99999999999999999999")
+    testing.AssertFalse(ok6, "ParseInt64 overflow should fail")
+
+    maxv, ok7 := strconv.ParseInt64("9223372036854775807")
+    testing.AssertTrue(ok7, "ParseInt64 INT64_MAX should parse")
+    testing.AssertTrue(maxv == int64(9223372036854775807), "ParseInt64 INT64_MAX value")
+}

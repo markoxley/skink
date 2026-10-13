@@ -9,3 +9,20 @@ continues from **#121**.
 Entry format: numbered heading, severity, symptom/error message, root cause
 (if diagnosed), expected behavior, and any workaround. Mark entries
 `✅ FIXED` in place when resolved.
+
+## #121 — `int64(-N)` literal miscompiles for N > i32::MAX
+
+- **Severity**: medium — silent wrong value, no diagnostic
+- **Symptom**: `int64(-9876543210)` yields `-1286608618` (the i32-truncated
+  magnitude negated). `int64(-5000000000)` yields `-705032704`. Positive
+  out-of-range literals (`int64(9876543210)`) are correct.
+- **Root cause**: the i64-literal-overflow fix made `emitCast` substitute the
+  literal's raw `strVal` when casting `int64(<IntLit>)`. But `-N` parses as
+  `PrefixExpr(-, IntLit)`, not an `IntLit`, so `int64(-N)` never sees a
+  literal — the i32-truncated `intVal` is used, then negated at runtime.
+- **Expected**: `int64(-9876543210)` == `-9876543210`; either fold the
+  prefix minus into the literal's `strVal` at parse time, or teach
+  `emitCast` to look through `PrefixExpr(-, IntLit)`.
+- **Workaround**: negate outside the cast — `-int64(9876543210)` or
+  `int64(0) - int64(9876543210)` both produce the correct value.
+- **Discovered by**: `std/strconv_test.skink` `TestParseInt64` (orm work).
