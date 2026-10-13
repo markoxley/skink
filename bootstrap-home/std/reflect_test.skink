@@ -152,7 +152,7 @@ pub fn TestFieldAccess() {
     ptr := int64(&val)
 
     // bool at offset 0
-    fBool := reflect.Field{name: "b", type_name: "bool", offset: 0}
+    fBool := reflect.Field{name: "b", type_name: "bool", offset: 0, tag: ""}
     if reflect.GetBool(ptr, fBool) != true {
         Errorf("Field b should be true")
     }
@@ -162,7 +162,7 @@ pub fn TestFieldAccess() {
     }
 
     // int at offset 4 (after bool + 3 padding bytes)
-    fInt := reflect.Field{name: "i", type_name: "int", offset: 4}
+    fInt := reflect.Field{name: "i", type_name: "int", offset: 4, tag: ""}
     if reflect.GetInt(ptr, fInt) != 42 {
         Errorf("Field i should be 42")
     }
@@ -172,7 +172,7 @@ pub fn TestFieldAccess() {
     }
 
     // int64 at offset 8
-    fInt64 := reflect.Field{name: "i64", type_name: "int64", offset: 8}
+    fInt64 := reflect.Field{name: "i64", type_name: "int64", offset: 8, tag: ""}
     if reflect.GetInt64(ptr, fInt64) != int64(100) {
         Errorf("Field i64 should be 100")
     }
@@ -182,7 +182,7 @@ pub fn TestFieldAccess() {
     }
 
     // string at offset 16
-    fStr := reflect.Field{name: "s", type_name: "string", offset: 16}
+    fStr := reflect.Field{name: "s", type_name: "string", offset: 16, tag: ""}
     if str.Equal(reflect.GetString(ptr, fStr), "hello") == false {
         Errorf("Field s should be hello")
     }
@@ -192,7 +192,7 @@ pub fn TestFieldAccess() {
     }
 
     // float at offset 24
-    fFloat := reflect.Field{name: "f", type_name: "float", offset: 24}
+    fFloat := reflect.Field{name: "f", type_name: "float", offset: 24, tag: ""}
     if reflect.GetFloat(ptr, fFloat) != 3.14 {
         Errorf("Field f should be 3.14")
     }
@@ -215,5 +215,50 @@ pub fn TestHash() {
     hi := reflect.Hash(string(i), "int")
     if hi < 0 {
         Errorf("Hash should be non-negative")
+    }
+}
+
+// TaggedStruct exercises C#-style [attr] field annotations stored as tags.
+struct TaggedStruct {
+    [json(name=first_name)]
+    name: string
+    [json(name=age_years)] [db(pk)]
+    age: int
+    untagged: bool
+}
+
+// TestFieldTags verifies that [attr]/[attr(args)] annotations above struct
+// fields are captured by the parser and surfaced through reflect.TypeOf as
+// the Field.tag text — stacked tags joined with a space.
+pub fn TestFieldTags() {
+    val := TaggedStruct{name: "skink", age: 4, untagged: true}
+    t := reflect.TypeOf<TaggedStruct>(val)
+
+    if reflect.FieldCount(t) != 3 {
+        Errorf("FieldCount should be 3")
+    }
+
+    // Tag text reaches reflect verbatim.
+    if str.Equal(reflect.FieldTag(t, "name"), "json(name=first_name)") == false {
+        Errorf("FieldTag(name) should be json(name=first_name), got " + reflect.FieldTag(t, "name"))
+    }
+
+    // Stacked attributes are space-joined.
+    if str.Equal(reflect.FieldTag(t, "age"), "json(name=age_years) db(pk)") == false {
+        Errorf("FieldTag(age) should join stacked tags, got " + reflect.FieldTag(t, "age"))
+    }
+
+    // Untagged fields and unknown names both yield an empty string.
+    if str.Equal(reflect.FieldTag(t, "untagged"), "") == false {
+        Errorf("FieldTag(untagged) should be empty")
+    }
+    if str.Equal(reflect.FieldTag(t, "nope"), "") == false {
+        Errorf("FieldTag(nope) should be empty")
+    }
+
+    // The tag also rides along inside Field descriptors.
+    fb := reflect.FieldByIndex(t, 0)
+    if str.Equal(fb.tag, "json(name=first_name)") == false {
+        Errorf("FieldByIndex(0).tag should carry the tag")
     }
 }

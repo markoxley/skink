@@ -28,11 +28,13 @@ module reflect
 import "std/str"
 
 // Field describes a single field in a struct type, including its name,
-// type name, and byte offset within the struct layout.
+// type name, byte offset within the struct layout, and any [attr] tag
+// annotations written above the field in the source (space-joined).
 pub struct Field {
     name: string  // the name
     type_name: string  // the type name
     offset: int  // the offset
+    tag: string  // the tag
 }
 
 // Type describes a runtime type, including its name, size in bytes,
@@ -100,7 +102,7 @@ pub fn FieldType(t: Type, fieldName: string) -> string {
 // The returned Field has offset -1 when index is out of range.
 pub fn FieldByIndex(t: Type, index: int) -> Field {
     if index < 0 || index >= t.numFields {
-        return Field{name: "", type_name: "", offset: -1}
+        return Field{name: "", type_name: "", offset: -1, tag: ""}
     }
     return t.fields[index]
 }
@@ -115,7 +117,15 @@ pub fn FieldByName(t: Type, fieldName: string) -> Field {
             return f
         }
     }
-    return Field{name: "", type_name: "", offset: -1}
+    return Field{name: "", type_name: "", offset: -1, tag: ""}
+}
+
+// FieldTag returns the [attr] tag text attached to the field named
+// fieldName in the struct type described by t (e.g. "json(name=x)"),
+// or an empty string when the field is untagged or does not exist.
+pub fn FieldTag(t: Type, fieldName: string) -> string {
+    f := FieldByName(t, fieldName)
+    return f.tag
 }
 
 // GetBool reads a bool field from the struct at structPtr using the

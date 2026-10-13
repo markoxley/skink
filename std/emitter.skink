@@ -55,6 +55,7 @@ pub struct StructLayout {
     llType:      string  // the LLVM type
     fields:      []string  // the fields
     fieldTypes:  []string  // the field types
+    fieldTags:   []string  // the field tags ([attr] annotations, space-joined)
     isUnsigned:  []bool  // whether unsigned
     size:        int  // the size
     alignment:   int  // the alignment
@@ -2605,7 +2606,7 @@ fn emitReflectTypeOf(cg: *CodeGen, e: ast.Expr) -> string {
 
     // Build fields array
     if numFields > 0 {
-        fieldSize := 24
+        fieldSize := 32
         fieldsArrReg := nextReg(cg)
         emitfmt(cg, "  %s = call i8* @Skink_rc_alloc(i64 %s)\n", []string{fieldsArrReg, strconv.Itoa(fieldSize * numFields)})
         fieldsTypedReg := nextReg(cg)
@@ -2638,6 +2639,19 @@ fn emitReflectTypeOf(cg: *CodeGen, e: ast.Expr) -> string {
             fOffGEP := nextReg(cg)
             emitln(cg, concatMany([]string{"  ", fOffGEP, " = getelementptr inbounds %struct.reflect_Field, %struct.reflect_Field* ", fieldsTypedReg, ", i32 ", fiStr, ", i32 2"}))
             emitfmt(cg, "  store i32 %s, i32* %s\n", []string{strconv.Itoa(fieldOffset), fOffGEP})
+
+            // Set field tag (the joined [attr] annotation text, "" when
+            // the field is untagged)
+            fieldTag := ""
+            if fi < len(layout.fieldTags) {
+                fieldTag = layout.fieldTags[fi]
+            }
+            fTagStr := emitStringLiteral(cg, fieldTag)
+            fTagGEP := nextReg(cg)
+            emitln(cg, concatMany([]string{"  ", fTagGEP, " = getelementptr inbounds %struct.reflect_Field, %struct.reflect_Field* ", fieldsTypedReg, ", i32 ", fiStr, ", i32 3"}))
+            fTagRetained := nextReg(cg)
+            emitfmt(cg, "  %s = call i8* @Skink_rc_retain(i8* %s)\n", []string{fTagRetained, fTagStr})
+            emitfmt(cg, "  store i8* %s, i8** %s\n", []string{fTagRetained, fTagGEP})
 
             fi = fi + 1
         }
@@ -4696,6 +4710,7 @@ fn computeStructLayout(cg: *CodeGen, name: string, d: ast.Decl) -> StructLayout 
     layout.llType = str.Concat("%struct.", sanitizeName(name))
     layout.fields = []string{}
     layout.fieldTypes = []string{}
+    layout.fieldTags = []string{}
     layout.isUnsigned = []bool{}
     layout.offsets = []int{}
 
@@ -4729,6 +4744,7 @@ fn computeStructLayout(cg: *CodeGen, name: string, d: ast.Decl) -> StructLayout 
         offset = alignUp(offset, fAlign)
         layout.fields = append(layout.fields, field.name)
         layout.fieldTypes = append(layout.fieldTypes, fLL)
+        layout.fieldTags = append(layout.fieldTags, str.Join(field.tags, " "))
         layout.isUnsigned = append(layout.isUnsigned, false)
         layout.offsets = append(layout.offsets, offset)
         offset = offset + fSize

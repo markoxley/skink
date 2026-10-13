@@ -34,24 +34,24 @@ import "std/ast"
 // Higher values bind tighter; PREC_LOWEST is the starting point for
 // left-to-right precedence climbing.
 const {
-    PREC_LOWEST   = 0
-    PREC_ASSIGN   = 1
-    PREC_RANGE    = 2
-    PREC_OR       = 3
-    PREC_AND      = 4
-    PREC_BITOR    = 5
-    PREC_BITXOR   = 6
-    PREC_BITAND   = 7
-    PREC_EQUALS   = 8
+    PREC_LOWEST = 0
+    PREC_ASSIGN = 1
+    PREC_RANGE = 2
+    PREC_OR = 3
+    PREC_AND = 4
+    PREC_BITOR = 5
+    PREC_BITXOR = 6
+    PREC_BITAND = 7
+    PREC_EQUALS = 8
     PREC_LESSGREATER = 9
-    PREC_SHIFT    = 10
-    PREC_SUM      = 11
-    PREC_PRODUCT  = 12
-    PREC_POWER    = 13
-    PREC_PREFIX   = 14
-    PREC_POSTFIX  = 15
-    PREC_CALL     = 16
-    PREC_INDEX    = 17
+    PREC_SHIFT = 10
+    PREC_SUM = 11
+    PREC_PRODUCT = 12
+    PREC_POWER = 13
+    PREC_PREFIX = 14
+    PREC_POSTFIX = 15
+    PREC_CALL = 16
+    PREC_INDEX = 17
 }
 
 // === Parser ===
@@ -61,14 +61,14 @@ const {
 // literal parsing in contexts where '{' should start a block (if/for/while
 // conditions, rule conditions, match subjects).
 pub struct Parser {
-    tokens:  []lexer.Token  // the tokens
-    pos:     int  // the position
-    curTok:  lexer.Token  // the current token
-    peekTok: lexer.Token  // the peek token
-    errors:  []string  // the errors
-    noStructInit: bool  // the no struct initial
-    exprDepth: int  // the expression depth
-    stmtDepth: int  // the statement depth
+    tokens:       []lexer.Token // the tokens
+    pos:          int           // the position
+    curTok:       lexer.Token   // the current token
+    peekTok:      lexer.Token   // the peek token
+    errors:       []string      // the errors
+    noStructInit: bool          // the no struct initial
+    exprDepth:    int           // the expression depth
+    stmtDepth:    int           // the statement depth
 }
 
 // New creates a parser from a slice of tokens.
@@ -99,10 +99,10 @@ fn isTrivia(kind: int) -> bool {
 
 // ParserState holds the mutable state of a parser for save/restore.
 pub struct ParserState {
-    pos:     int  // the position
-    curTok:  lexer.Token  // the current token
-    peekTok: lexer.Token  // the peek token
-    errCount: int  // the error count
+    pos:      int         // the position
+    curTok:   lexer.Token // the current token
+    peekTok:  lexer.Token // the peek token
+    errCount: int         // the error count
 }
 
 // saveState captures the current parser state for backtracking.
@@ -171,7 +171,7 @@ fn advance(p: *Parser) {
         p.curTok = p.peekTok
         p.pos = p.pos + 1
         if p.pos + 1 < len(p.tokens) {
-            p.peekTok = p.tokens[p.pos + 1]
+            p.peekTok = p.tokens[p.pos+1]
         } else {
             p.peekTok = lexer.Token{kind: lexer.T_EOF, literal: "", line: 0, col: 0}
         }
@@ -228,10 +228,10 @@ fn synchronize(p: *Parser) {
             return
         }
         if p.curTok.kind == lexer.T_FN || p.curTok.kind == lexer.T_STRUCT ||
-           p.curTok.kind == lexer.T_ENUM || p.curTok.kind == lexer.T_VAR ||
-           p.curTok.kind == lexer.T_CONST || p.curTok.kind == lexer.T_IMPORT ||
-           p.curTok.kind == lexer.T_MODULE || p.curTok.kind == lexer.T_PUB ||
-           p.curTok.kind == lexer.T_TEMPLATE || p.curTok.kind == lexer.T_EOF {
+        p.curTok.kind == lexer.T_ENUM || p.curTok.kind == lexer.T_VAR ||
+        p.curTok.kind == lexer.T_CONST || p.curTok.kind == lexer.T_IMPORT ||
+        p.curTok.kind == lexer.T_MODULE || p.curTok.kind == lexer.T_PUB ||
+        p.curTok.kind == lexer.T_TEMPLATE || p.curTok.kind == lexer.T_EOF {
             return
         }
         advance(p)
@@ -264,14 +264,14 @@ fn isUpperIdent(s: string) -> bool {
 // These are treated as identifiers in expression context.
 fn isTypeKeyword(kind: int) -> bool {
     return kind == lexer.T_INT8 || kind == lexer.T_INT16 ||
-        kind == lexer.T_INT32 || kind == lexer.T_INT64 ||
-        kind == lexer.T_UINT || kind == lexer.T_UINT8 ||
-        kind == lexer.T_UINT16 || kind == lexer.T_UINT32 ||
-        kind == lexer.T_UINT64 || kind == lexer.T_FLOAT ||
-        kind == lexer.T_BOOL || kind == lexer.T_STRING_TYPE ||
-        kind == lexer.T_BYTES_TYPE || kind == lexer.T_TENSOR ||
-        kind == lexer.T_CHAN || kind == lexer.T_VOID ||
-        kind == lexer.T_ERROR
+    kind == lexer.T_INT32 || kind == lexer.T_INT64 ||
+    kind == lexer.T_UINT || kind == lexer.T_UINT8 ||
+    kind == lexer.T_UINT16 || kind == lexer.T_UINT32 ||
+    kind == lexer.T_UINT64 || kind == lexer.T_FLOAT ||
+    kind == lexer.T_BOOL || kind == lexer.T_STRING_TYPE ||
+    kind == lexer.T_BYTES_TYPE || kind == lexer.T_TENSOR ||
+    kind == lexer.T_CHAN || kind == lexer.T_VOID ||
+    kind == lexer.T_ERROR
 }
 
 // tokenPrecedence returns the precedence for an infix token.
@@ -305,7 +305,6 @@ fn tokenPrecedence(tok: lexer.Token) -> int {
     if tok.kind == lexer.T_QUESTION { return PREC_POSTFIX }
     if tok.kind == lexer.T_BANG { return PREC_POSTFIX }
     return PREC_LOWEST
-
 }
 
 // === Top-Level Parse ===
@@ -397,6 +396,37 @@ fn parseAttributes(p: *Parser) -> []string {
         }
     }
     return attrs
+}
+
+// parseFieldTag consumes a [name] or [name(args)] field annotation and
+// returns its inner text (e.g. "json(name=first_name)"). Unlike
+// parseAttributes, the argument text is preserved — field tags are
+// runtime metadata consumed via reflect, not compiler directives.
+// String arguments are re-quoted so "x" stays visibly a string.
+fn parseFieldTag(p: *Parser) -> string {
+    advance(p) // consume [
+    builder := str.NewBuilder(32)
+    parenDepth := 0
+    for !curIs(p, lexer.T_EOF) {
+        if curIs(p, lexer.T_RBRACKET) && parenDepth == 0 {
+            break
+        }
+        if curIs(p, lexer.T_LPAREN) {
+            parenDepth = parenDepth + 1
+        } else if curIs(p, lexer.T_RPAREN) {
+            parenDepth = parenDepth - 1
+        }
+        lit := p.curTok.literal
+        if curIs(p, lexer.T_STRING) {
+            lit = str.Concat("\"", str.Concat(lit, "\""))
+        }
+        str.Write(&builder, lit)
+        advance(p)
+    }
+    if curIs(p, lexer.T_RBRACKET) {
+        advance(p)
+    }
+    return str.String(builder)
 }
 
 // skipParens consumes tokens until a matching ) .
@@ -648,6 +678,12 @@ fn parseStructDecl(p: *Parser, isPub: bool, attrs: []string) -> ast.Stmt {
     var methods []ast.Decl
     for !curIs(p, lexer.T_RBRACE) && !curIs(p, lexer.T_EOF) {
         fieldPub := false
+        var fieldTags []string
+        // [attr] / [attr(args)] annotations before the field (C#-style
+        // struct tags); any number may be stacked.
+        for curIs(p, lexer.T_LBRACKET) {
+            fieldTags = append(fieldTags, parseFieldTag(p))
+        }
         if curIs(p, lexer.T_PUB) {
             fieldPub = true
             advance(p)
@@ -674,7 +710,7 @@ fn parseStructDecl(p: *Parser, isPub: bool, attrs: []string) -> ast.Stmt {
             advance(p)
             continue
         }
-        f := ast.Field{name: fname, typ: ftype, isPub: fieldPub}
+        f := ast.Field{name: fname, typ: ftype, isPub: fieldPub, tags: fieldTags}
         fields = append(fields, f)
     }
     expect(p, lexer.T_RBRACE, "}")
@@ -1150,7 +1186,7 @@ fn parseReturnStmt(p: *Parser) -> ast.Stmt {
     var values []ast.Expr
     // Return with no value: return is followed by }, EOF, case, default, or a newline.
     if curIs(p, lexer.T_RBRACE) || curIs(p, lexer.T_EOF) ||
-       curIs(p, lexer.T_CASE) || curIs(p, lexer.T_DEFAULT) {
+    curIs(p, lexer.T_CASE) || curIs(p, lexer.T_DEFAULT) {
         return ast.Stmt{kind: ast.ST_RETURN, line: line, col: col}
     }
     v0 := parseExpression(p, PREC_LOWEST)
@@ -1445,7 +1481,7 @@ fn parseSelectStmt(p: *Parser) -> ast.Stmt {
             }
             var body []ast.Stmt
             for !curIs(p, lexer.T_RBRACE) && !curIs(p, lexer.T_EOF) &&
-                !curIs(p, lexer.T_CASE) && !curIs(p, lexer.T_DEFAULT) {
+            !curIs(p, lexer.T_CASE) && !curIs(p, lexer.T_DEFAULT) {
                 s := parseStatement(p)
                 if s.kind != 0 {
                     body = append(body, s)
@@ -1467,7 +1503,7 @@ fn parseSelectStmt(p: *Parser) -> ast.Stmt {
             }
             var body []ast.Stmt
             for !curIs(p, lexer.T_RBRACE) && !curIs(p, lexer.T_EOF) &&
-                !curIs(p, lexer.T_CASE) && !curIs(p, lexer.T_DEFAULT) {
+            !curIs(p, lexer.T_CASE) && !curIs(p, lexer.T_DEFAULT) {
                 s := parseStatement(p)
                 if s.kind != 0 {
                     body = append(body, s)
@@ -1643,7 +1679,7 @@ fn parseIntLiteralValue(p: *Parser) -> int {
     }
     // Check for hex (0x), binary (0b), octal (0o) prefixes
     if i + 1 < n && s[i] == 48 { // '0'
-        prefix := s[i + 1]
+        prefix := s[i+1]
         if prefix == 120 || prefix == 88 { // 'x' or 'X' — hex
             i = i + 2
             for i < n {
@@ -1787,9 +1823,9 @@ fn parseExprOrAssignStmt(p: *Parser) -> ast.Stmt {
     }
 
     if curIs(p, lexer.T_ASSIGN) || curIs(p, lexer.T_PLUSEQ) || curIs(p, lexer.T_MINUSEQ) ||
-       curIs(p, lexer.T_STAREQ) || curIs(p, lexer.T_SLASHEQ) || curIs(p, lexer.T_PERCEQ) ||
-       curIs(p, lexer.T_AMPEQ) || curIs(p, lexer.T_PIPEEQ) || curIs(p, lexer.T_CARETEQ) ||
-       curIs(p, lexer.T_LSHIFTEQ) || curIs(p, lexer.T_RSHIFTEQ) {
+    curIs(p, lexer.T_STAREQ) || curIs(p, lexer.T_SLASHEQ) || curIs(p, lexer.T_PERCEQ) ||
+    curIs(p, lexer.T_AMPEQ) || curIs(p, lexer.T_PIPEEQ) || curIs(p, lexer.T_CARETEQ) ||
+    curIs(p, lexer.T_LSHIFTEQ) || curIs(p, lexer.T_RSHIFTEQ) {
         op := p.curTok.literal
         advance(p)
         val := parseExpression(p, PREC_LOWEST)
@@ -1843,7 +1879,7 @@ fn parseExpression(p: *Parser, prec: int) -> ast.Expr {
         // `*x`, `(x)`, or `**x` operand on the next line now breaks —
         // rare enough to accept for correct deref statements.
         if p.curTok.kind == lexer.T_STAR && p.curTok.line != left.line &&
-           (p.peekTok.kind == lexer.T_IDENT || p.peekTok.kind == lexer.T_LPAREN) {
+        (p.peekTok.kind == lexer.T_IDENT || p.peekTok.kind == lexer.T_LPAREN) {
             break
         }
         if p.curTok.kind == lexer.T_DBLSTAR && p.curTok.line != left.line {
@@ -1859,7 +1895,7 @@ fn parseExpression(p: *Parser, prec: int) -> ast.Expr {
         // function literal: `defer fn() {\n...\n}()` invokes the
         // literal and must keep gluing.
         if p.curTok.kind == lexer.T_LPAREN && p.curTok.line != left.line &&
-           left.kind != ast.EX_FN_LIT {
+        left.kind != ast.EX_FN_LIT {
             break
         }
         opPrec := tokenPrecedence(p.curTok)
@@ -1930,7 +1966,6 @@ fn parsePrefix(p: *Parser) -> ast.Expr {
                         e.genericArgs = args
                     } else {
                         // Not a generic call — restore and treat '<' as comparison
-
                         restoreState(p, saved)
                     }
                 }
@@ -2049,8 +2084,8 @@ fn parsePrefix(p: *Parser) -> ast.Expr {
         return e
     }
     if tok.kind == lexer.T_MINUS || tok.kind == lexer.T_BANG ||
-       tok.kind == lexer.T_TILDE || tok.kind == lexer.T_STAR ||
-       tok.kind == lexer.T_AMPERSAND || tok.kind == lexer.T_SEND {
+    tok.kind == lexer.T_TILDE || tok.kind == lexer.T_STAR ||
+    tok.kind == lexer.T_AMPERSAND || tok.kind == lexer.T_SEND {
         e := ast.newExpr(ast.EX_PREFIX, tok.line, tok.col)
         e.prefixOp = tok.literal
         advance(p)
@@ -2233,21 +2268,21 @@ fn hasInterpolation(literal: string) -> bool {
     for i < n {
         if literal[i] == 123 { // '{'
             // Skip "{{" (template syntax or escaped brace)
-            if i + 1 < n && literal[i + 1] == 123 {
+            if i + 1 < n && literal[i+1] == 123 {
                 i = i + 2
                 continue
             }
             // Skip "{}" (format placeholder)
-            if i + 1 < n && literal[i + 1] == 125 {
+            if i + 1 < n && literal[i+1] == 125 {
                 i = i + 2
                 continue
             }
             if i + 1 < n {
-                nextCh := literal[i + 1]
+                nextCh := literal[i+1]
                 // Skip if starts with quote, colon, or whitespace
                 // (likely JSON or other non-expression content)
                 if nextCh == 34 || nextCh == 39 || nextCh == 58 ||
-                   nextCh == 32 || nextCh == 9 || nextCh == 10 {
+                nextCh == 32 || nextCh == 9 || nextCh == 10 {
                     i = i + 1
                     continue
                 }
@@ -2274,23 +2309,23 @@ fn parseInterpolatedString(p: *Parser, tok: lexer.Token) -> ast.Expr {
     for i < n {
         if literal[i] == 123 {
             // Skip "{{" — literal braces, not interpolation
-            if i + 1 < n && literal[i + 1] == 123 {
+            if i + 1 < n && literal[i+1] == 123 {
                 strSeg = str.Concat(strSeg, "{{")
                 i = i + 2
                 continue
             }
             // Skip "{}" — format placeholder
-            if i + 1 < n && literal[i + 1] == 125 {
+            if i + 1 < n && literal[i+1] == 125 {
                 strSeg = str.Concat(strSeg, "{}")
                 i = i + 2
                 continue
             }
             // Check if this looks like interpolation
             if i + 1 < n {
-                nextCh := literal[i + 1]
+                nextCh := literal[i+1]
                 // Skip if starts with quote, colon, or whitespace
                 if nextCh == 34 || nextCh == 39 || nextCh == 58 ||
-                   nextCh == 32 || nextCh == 9 || nextCh == 10 {
+                nextCh == 32 || nextCh == 9 || nextCh == 10 {
                     strSeg = str.Concat(strSeg, str.Substr(literal, i, 1))
                     i = i + 1
                     continue
@@ -2528,40 +2563,40 @@ fn looksLikeGenericArgs(p: *Parser) -> bool {
     // generic argument (comp_error.md #22 needed StrMap<ast.Decl>).
     pk := p.peekTok.kind
     return pk == lexer.T_IDENT || pk == lexer.T_STAR || pk == lexer.T_LBRACKET ||
-           pk == lexer.T_MAP || pk == lexer.T_SET || pk == lexer.T_CHAN ||
-           pk == lexer.T_TENSOR || pk == lexer.T_FN || pk == lexer.T_LPAREN ||
-           pk == lexer.T_INT || pk == lexer.T_INT8 || pk == lexer.T_INT16 ||
-           pk == lexer.T_INT32 || pk == lexer.T_INT64 || pk == lexer.T_UINT ||
-           pk == lexer.T_UINT8 || pk == lexer.T_UINT16 || pk == lexer.T_UINT32 ||
-           pk == lexer.T_UINT64 || pk == lexer.T_BOOL || pk == lexer.T_STRING_TYPE ||
-           pk == lexer.T_BYTES_TYPE || pk == lexer.T_FLOAT || pk == lexer.T_VOID ||
-           pk == lexer.T_ERROR
+    pk == lexer.T_MAP || pk == lexer.T_SET || pk == lexer.T_CHAN ||
+    pk == lexer.T_TENSOR || pk == lexer.T_FN || pk == lexer.T_LPAREN ||
+    pk == lexer.T_INT || pk == lexer.T_INT8 || pk == lexer.T_INT16 ||
+    pk == lexer.T_INT32 || pk == lexer.T_INT64 || pk == lexer.T_UINT ||
+    pk == lexer.T_UINT8 || pk == lexer.T_UINT16 || pk == lexer.T_UINT32 ||
+    pk == lexer.T_UINT64 || pk == lexer.T_BOOL || pk == lexer.T_STRING_TYPE ||
+    pk == lexer.T_BYTES_TYPE || pk == lexer.T_FLOAT || pk == lexer.T_VOID ||
+    pk == lexer.T_ERROR
 }
 
 // peekIsTypeStart checks if the peek token could start a type.
 fn peekIsTypeStart(p: *Parser) -> bool {
     pk := p.peekTok.kind
     return pk == lexer.T_IDENT || pk == lexer.T_STAR || pk == lexer.T_LBRACKET ||
-           pk == lexer.T_MAP || pk == lexer.T_SET || pk == lexer.T_CHAN ||
-           pk == lexer.T_TENSOR || pk == lexer.T_FN || pk == lexer.T_LPAREN ||
-           pk == lexer.T_INT8 || pk == lexer.T_INT16 || pk == lexer.T_INT32 ||
-           pk == lexer.T_INT64 || pk == lexer.T_UINT || pk == lexer.T_UINT8 ||
-           pk == lexer.T_UINT16 || pk == lexer.T_UINT32 || pk == lexer.T_UINT64 ||
-           pk == lexer.T_BOOL || pk == lexer.T_STRING_TYPE || pk == lexer.T_BYTES_TYPE ||
-           pk == lexer.T_FLOAT || pk == lexer.T_VOID || pk == lexer.T_ERROR
+    pk == lexer.T_MAP || pk == lexer.T_SET || pk == lexer.T_CHAN ||
+    pk == lexer.T_TENSOR || pk == lexer.T_FN || pk == lexer.T_LPAREN ||
+    pk == lexer.T_INT8 || pk == lexer.T_INT16 || pk == lexer.T_INT32 ||
+    pk == lexer.T_INT64 || pk == lexer.T_UINT || pk == lexer.T_UINT8 ||
+    pk == lexer.T_UINT16 || pk == lexer.T_UINT32 || pk == lexer.T_UINT64 ||
+    pk == lexer.T_BOOL || pk == lexer.T_STRING_TYPE || pk == lexer.T_BYTES_TYPE ||
+    pk == lexer.T_FLOAT || pk == lexer.T_VOID || pk == lexer.T_ERROR
 }
 
 // curIsTypeStart reports whether the current token could start a type.
 fn curIsTypeStart(p: *Parser) -> bool {
     k := p.curTok.kind
     return k == lexer.T_IDENT || k == lexer.T_STAR || k == lexer.T_LBRACKET ||
-           k == lexer.T_MAP || k == lexer.T_SET || k == lexer.T_CHAN ||
-           k == lexer.T_TENSOR || k == lexer.T_FN || k == lexer.T_LPAREN ||
-           k == lexer.T_INT8 || k == lexer.T_INT16 || k == lexer.T_INT32 ||
-           k == lexer.T_INT64 || k == lexer.T_UINT || k == lexer.T_UINT8 ||
-           k == lexer.T_UINT16 || k == lexer.T_UINT32 || k == lexer.T_UINT64 ||
-           k == lexer.T_BOOL || k == lexer.T_STRING_TYPE || k == lexer.T_BYTES_TYPE ||
-           k == lexer.T_FLOAT || k == lexer.T_VOID || k == lexer.T_ERROR
+    k == lexer.T_MAP || k == lexer.T_SET || k == lexer.T_CHAN ||
+    k == lexer.T_TENSOR || k == lexer.T_FN || k == lexer.T_LPAREN ||
+    k == lexer.T_INT8 || k == lexer.T_INT16 || k == lexer.T_INT32 ||
+    k == lexer.T_INT64 || k == lexer.T_UINT || k == lexer.T_UINT8 ||
+    k == lexer.T_UINT16 || k == lexer.T_UINT32 || k == lexer.T_UINT64 ||
+    k == lexer.T_BOOL || k == lexer.T_STRING_TYPE || k == lexer.T_BYTES_TYPE ||
+    k == lexer.T_FLOAT || k == lexer.T_VOID || k == lexer.T_ERROR
 }
 
 // genericCallFollows checks if a '<' starts generic args followed by a call.
@@ -2648,13 +2683,13 @@ fn peekPastTrivia(p: *Parser) -> int {
 fn peekPastTriviaIsTypeStart(p: *Parser) -> bool {
     pk := peekPastTrivia(p)
     return pk == lexer.T_IDENT || pk == lexer.T_STAR || pk == lexer.T_LBRACKET ||
-           pk == lexer.T_MAP || pk == lexer.T_SET || pk == lexer.T_CHAN ||
-           pk == lexer.T_TENSOR || pk == lexer.T_FN || pk == lexer.T_LPAREN ||
-           pk == lexer.T_INT8 || pk == lexer.T_INT16 || pk == lexer.T_INT32 ||
-           pk == lexer.T_INT64 || pk == lexer.T_UINT || pk == lexer.T_UINT8 ||
-           pk == lexer.T_UINT16 || pk == lexer.T_UINT32 || pk == lexer.T_UINT64 ||
-           pk == lexer.T_BOOL || pk == lexer.T_STRING_TYPE || pk == lexer.T_BYTES_TYPE ||
-           pk == lexer.T_FLOAT || pk == lexer.T_VOID || pk == lexer.T_ERROR
+    pk == lexer.T_MAP || pk == lexer.T_SET || pk == lexer.T_CHAN ||
+    pk == lexer.T_TENSOR || pk == lexer.T_FN || pk == lexer.T_LPAREN ||
+    pk == lexer.T_INT8 || pk == lexer.T_INT16 || pk == lexer.T_INT32 ||
+    pk == lexer.T_INT64 || pk == lexer.T_UINT || pk == lexer.T_UINT8 ||
+    pk == lexer.T_UINT16 || pk == lexer.T_UINT32 || pk == lexer.T_UINT64 ||
+    pk == lexer.T_BOOL || pk == lexer.T_STRING_TYPE || pk == lexer.T_BYTES_TYPE ||
+    pk == lexer.T_FLOAT || pk == lexer.T_VOID || pk == lexer.T_ERROR
 }
 
 // parseStructLit parses a struct literal expression (Name{field: value, ...}).
@@ -2738,7 +2773,7 @@ fn parseIfExprBranch(p: *Parser) -> ast.Expr {
     if curIs(p, lexer.T_LBRACE) {
         body := parseBlock(p)
         if len(body) > 0 {
-            last := body[len(body) - 1]
+            last := body[len(body)-1]
             if last.kind == ast.ST_EXPR && ast.hasExpr(last.expr) {
                 return last.expr[0]
             }
@@ -2922,11 +2957,11 @@ fn parseType(p: *Parser) -> ast.Type {
     }
 
     if tok.kind == lexer.T_IDENT || tok.kind == lexer.T_INT || tok.kind == lexer.T_INT8 || tok.kind == lexer.T_INT16 ||
-       tok.kind == lexer.T_INT32 || tok.kind == lexer.T_INT64 || tok.kind == lexer.T_UINT ||
-       tok.kind == lexer.T_UINT8 || tok.kind == lexer.T_UINT16 || tok.kind == lexer.T_UINT32 ||
-       tok.kind == lexer.T_UINT64 || tok.kind == lexer.T_BOOL || tok.kind == lexer.T_STRING_TYPE ||
-       tok.kind == lexer.T_BYTES_TYPE || tok.kind == lexer.T_VOID || tok.kind == lexer.T_ERROR ||
-       tok.kind == lexer.T_FLOAT {
+    tok.kind == lexer.T_INT32 || tok.kind == lexer.T_INT64 || tok.kind == lexer.T_UINT ||
+    tok.kind == lexer.T_UINT8 || tok.kind == lexer.T_UINT16 || tok.kind == lexer.T_UINT32 ||
+    tok.kind == lexer.T_UINT64 || tok.kind == lexer.T_BOOL || tok.kind == lexer.T_STRING_TYPE ||
+    tok.kind == lexer.T_BYTES_TYPE || tok.kind == lexer.T_VOID || tok.kind == lexer.T_ERROR ||
+    tok.kind == lexer.T_FLOAT {
         name := tok.literal
         if str.Len(name) == 0 {
             name = lexer.KindName(tok.kind)

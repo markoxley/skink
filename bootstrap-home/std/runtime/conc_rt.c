@@ -216,7 +216,17 @@ void *Skink_chan_recv(void *ch_ptr) {
     ch->tail = NULL;
   ch->count--;
   free(node);
-  pthread_cond_signal(&ch->send_cv);
+  // On a rendezvous channel (capacity 0), send_cv waiters are a mix of
+  // post-enqueue senders (waiting for their value to be consumed — this
+  // dequeue is their completion) and pre-send waiters (waiting for the
+  // slot to free so they can enqueue). A single signal wakes only one:
+  // if it lands on the already-satisfied sender, the queued sender is
+  // never re-signaled and blocks forever. Broadcast so both proceed;
+  // for bounded channels one free slot correctly wakes one sender.
+  if (ch->capacity == 0)
+    pthread_cond_broadcast(&ch->send_cv);
+  else
+    pthread_cond_signal(&ch->send_cv);
   pthread_mutex_unlock(&ch->mu);
   return data;
 }
