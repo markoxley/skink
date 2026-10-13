@@ -225,17 +225,27 @@ struct TaggedStruct {
     [json(name=age_years)] [db(pk)]
     age: int
     untagged: bool
+    [experimental]
+    flag: bool
+    [json(name="quoted_name")]
+    quoted: string
+    [column(pk)] pub id: int
+
+    // A method on a tagged struct must still parse and run.
+    fn Greet(self: *TaggedStruct) -> string {
+        return "hi " + self.name
+    }
 }
 
 // TestFieldTags verifies that [attr]/[attr(args)] annotations above struct
 // fields are captured by the parser and surfaced through reflect.TypeOf as
 // the Field.tag text — stacked tags joined with a space.
 pub fn TestFieldTags() {
-    val := TaggedStruct{name: "skink", age: 4, untagged: true}
+    val := TaggedStruct{name: "skink", age: 4, untagged: true, flag: true, quoted: "q", id: 7}
     t := reflect.TypeOf<TaggedStruct>(val)
 
-    if reflect.FieldCount(t) != 3 {
-        Errorf("FieldCount should be 3")
+    if reflect.FieldCount(t) != 6 {
+        Errorf("FieldCount should be 6")
     }
 
     // Tag text reaches reflect verbatim.
@@ -246,6 +256,29 @@ pub fn TestFieldTags() {
     // Stacked attributes are space-joined.
     if str.Equal(reflect.FieldTag(t, "age"), "json(name=age_years) db(pk)") == false {
         Errorf("FieldTag(age) should join stacked tags, got " + reflect.FieldTag(t, "age"))
+    }
+
+    // Bare attribute (no parentheses) is stored as-is.
+    if str.Equal(reflect.FieldTag(t, "flag"), "experimental") == false {
+        Errorf("FieldTag(flag) should be experimental, got " + reflect.FieldTag(t, "flag"))
+    }
+
+    // String arguments keep their quotes.
+    if str.Equal(reflect.FieldTag(t, "quoted"), "json(name=\"quoted_name\")") == false {
+        Errorf("FieldTag(quoted) should preserve quoted arg, got " + reflect.FieldTag(t, "quoted"))
+    }
+
+    // Tags on pub fields land the same way; the field is still accessible.
+    if str.Equal(reflect.FieldTag(t, "id"), "column(pk)") == false {
+        Errorf("FieldTag(id) should be column(pk), got " + reflect.FieldTag(t, "id"))
+    }
+    if val.id != 7 {
+        Errorf("Tagged pub field should still hold its value")
+    }
+
+    // Methods on tagged structs still work.
+    if str.Equal(val.Greet(), "hi skink") == false {
+        Errorf("Greet on tagged struct should return hi skink")
     }
 
     // Untagged fields and unknown names both yield an empty string.
@@ -260,5 +293,9 @@ pub fn TestFieldTags() {
     fb := reflect.FieldByIndex(t, 0)
     if str.Equal(fb.tag, "json(name=first_name)") == false {
         Errorf("FieldByIndex(0).tag should carry the tag")
+    }
+    // FieldByIndex on an out-of-range index reports no tag either.
+    if str.Equal(reflect.FieldByIndex(t, 99).tag, "") == false {
+        Errorf("FieldByIndex(99).tag should be empty")
     }
 }
