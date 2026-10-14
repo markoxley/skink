@@ -25,6 +25,7 @@ module compiler_fixes_test
 
 import "testing"
 import "std/errors"
+import "std/fs"
 import "std/sync"
 import "std/strconv"
 import "std/str"
@@ -1849,4 +1850,40 @@ pub fn TestI64NegLiteralCast() {
     e := int64(9223372036854775807)
     testing.AssertEqualString("9223372036854775807", strconv.Itoa64(e),
         "INT64_MAX positive literal should be unchanged")
+}
+
+// libc/runtime declarations for the stdout-capture test below. `close`
+// is the channel builtin, so fd teardown goes through Skink_close_fd
+// (net_rt.c — linked into every program).
+extern fn open(path: string, flags: int, mode: int) -> int
+extern fn dup(fd: int) -> int
+extern fn dup2(oldfd: int, newfd: int) -> int
+extern fn fflush(fp: int64) -> int
+extern fn Skink_close_fd(fd: int) -> int
+
+// TestPrintMultiArg guards comp_error.md #124: print/println are
+// declared variadic, so every argument must be emitted — previously
+// only the first was, and print(a, ": ", b) silently printed just a.
+// stdout is redirected to a temp file via dup2 so the emitted text can
+// be asserted byte-for-byte.
+pub fn TestPrintMultiArg() {
+    path := "/tmp/skink_print_capture.txt"
+    fs.Remove(path)
+    saved := dup(1)
+    // O_WRONLY|O_CREAT|O_TRUNC = 577, mode 0666 = 438 (Linux).
+    fd := open(path, 577, 438)
+    testing.AssertTrue(fd >= 0, "open capture file")
+    dup2(fd, 1)
+    print("a", "b", "c")
+    println("x", "y")
+    print(1, 2.5, "z")
+    fflush(0)
+    dup2(saved, 1)
+    Skink_close_fd(saved)
+    Skink_close_fd(fd)
+    data, rerr := fs.ReadAll(path)
+    testing.AssertTrue(rerr.message == "", "read capture file")
+    testing.AssertEqualString("abcxy\n12.500000z", data,
+        "print emits every argument in order")
+    fs.Remove(path)
 }

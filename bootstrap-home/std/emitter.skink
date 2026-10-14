@@ -9357,49 +9357,57 @@ fn emitPrintCall(cg: *CodeGen, e: ast.Expr, newline: bool) -> string {
         }
         return ""
     }
-    arg := emitExpression(cg, e.callArgs[0])
-    argType := exprLLType(cg, e.callArgs[0])
+    // print/println are declared variadic — every argument gets its own
+    // printf call in order. Previously only callArgs[0] was emitted, so
+    // print(id, ": ", text) silently dropped everything after the first
+    // argument (comp_error.md #124).
+    argIdx := 0
+    for argIdx < len(e.callArgs) {
+        arg := emitExpression(cg, e.callArgs[argIdx])
+        argType := exprLLType(cg, e.callArgs[argIdx])
 
-    // Narrow ints: printf varargs read a full i32, so extend explicitly —
-    // otherwise the register's upper bits leak through and narrow signed
-    // ints render as unsigned (int16(-5) prints 65531).
-    if str.Equal(argType, "i8") || str.Equal(argType, "i16") {
-        arg = extendNarrowInt(cg, arg, argType, exprIsUnsignedInt(cg, e.callArgs[0]))
-        argType = "i32"
-    }
+        // Narrow ints: printf varargs read a full i32, so extend explicitly —
+        // otherwise the register's upper bits leak through and narrow signed
+        // ints render as unsigned (int16(-5) prints 65531).
+        if str.Equal(argType, "i8") || str.Equal(argType, "i16") {
+            arg = extendNarrowInt(cg, arg, argType, exprIsUnsignedInt(cg, e.callArgs[argIdx]))
+            argType = "i32"
+        }
 
-    // For bool and array/slice types, convert to string first so they
-    // print as "true"/"false" and "[1, 2, 3]" respectively.
-    if str.Equal(argType, "i1") {
-        arg = emitValAsString(cg, arg, argType)
-        argType = "i8*"
-    } else if str.EndsWith(argType, "*") && !str.Equal(argType, "i8*") {
-        arg = emitValAsString(cg, arg, argType)
-        argType = "i8*"
-    }
+        // For bool and array/slice types, convert to string first so they
+        // print as "true"/"false" and "[1, 2, 3]" respectively.
+        if str.Equal(argType, "i1") {
+            arg = emitValAsString(cg, arg, argType)
+            argType = "i8*"
+        } else if str.EndsWith(argType, "*") && !str.Equal(argType, "i8*") {
+            arg = emitValAsString(cg, arg, argType)
+            argType = "i8*"
+        }
 
-    // Choose format specifier based on argument type
-    fmtStr := "%s"
-    if str.Equal(argType, "i32") || str.Equal(argType, "i8") || str.Equal(argType, "i16") {
-        fmtStr = "%d"
-    } else if str.Equal(argType, "i64") {
-        fmtStr = "%ld"
-    } else if str.Equal(argType, "double") {
-        fmtStr = "%f"
+        // Choose format specifier based on argument type
+        fmtStr := "%s"
+        if str.Equal(argType, "i32") || str.Equal(argType, "i8") || str.Equal(argType, "i16") {
+            fmtStr = "%d"
+        } else if str.Equal(argType, "i64") {
+            fmtStr = "%ld"
+        } else if str.Equal(argType, "double") {
+            fmtStr = "%f"
+        }
+        if newline && argIdx == len(e.callArgs) - 1 {
+            fmtStr = str.Concat(fmtStr, "\n")
+        }
+        fmtReg := emitStringLiteral(cg, fmtStr)
+        parts := []string{}
+        parts = append(parts, "  call i32 (i8*, ...) @printf(i8* ")
+        parts = append(parts, fmtReg)
+        parts = append(parts, ", ")
+        parts = append(parts, argType)
+        parts = append(parts, " ")
+        parts = append(parts, arg)
+        parts = append(parts, ")")
+        emitln(cg, concatMany(parts))
+        argIdx = argIdx + 1
     }
-    if newline {
-        fmtStr = str.Concat(fmtStr, "\n")
-    }
-    fmtReg := emitStringLiteral(cg, fmtStr)
-    parts := []string{}
-    parts = append(parts, "  call i32 (i8*, ...) @printf(i8* ")
-    parts = append(parts, fmtReg)
-    parts = append(parts, ", ")
-    parts = append(parts, argType)
-    parts = append(parts, " ")
-    parts = append(parts, arg)
-    parts = append(parts, ")")
-    emitln(cg, concatMany(parts))
     return ""
 }
 

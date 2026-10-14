@@ -72,3 +72,24 @@ Entry format: numbered heading, severity, symptom/error message, root cause
 - **Discovered by**: Phase-5 battle sweep — building
   `skink-advanced/07-ruleset-intro` and `08-distributed-system` end to
   end (prior validation only `-check`ed those projects).
+
+## #124 — variadic `print`/`println` drops all but the first argument — ✅ FIXED
+
+- **Severity**: high — silently wrong output; `print(a, b, c)` prints
+  only `a`, and the checker accepts the call (the builtin is declared
+  `makeVariadicFn(anyType) -> void`), so nothing warns.
+- **Symptom**: `print(1, ": ", "hello")` emits `1` — the separator and
+  trailing operands vanish. `println` same. The tutorials/book use
+  exactly this idiom (`print(id, ": ", text)`), so readers were
+  silently getting truncated output.
+- **Root cause**: `emitPrintCall` (`std/emitter.skink`) only emitted
+  `e.callArgs[0]` — the variadic signature was never honored in codegen.
+- **Fix**: loop over `e.callArgs`, one `printf` per argument with its
+  own format specifier; `println` appends `\n` to the last arg's format.
+- **Regression test**: `compiler_fixes_test` `TestPrintMultiArg` —
+  redirects fd 1 to a temp file via `dup`/`dup2` (libc externs declared
+  in the test file), prints multi-arg calls, asserts the captured bytes
+  (`"abcxy\n12.500000z"`). Old emitter captures `"ax\n1"`.
+- **Discovered by**: writing the `std/orm` tutorial section in
+  `skink-tutorials/18` — the sample's `print(row.id, ": ", row.text)`
+  printed only `1`.
