@@ -51,7 +51,7 @@ The compiler uses **type erasure** for generics (templates). All generic type pa
 
 **105/105 test suites passing, 1170 test functions.**
 
-Book examples: **314/326 pass, 0 failed, 12 intentionally skipped**
+Book examples: **320/332 pass, 0 failed, 12 intentionally skipped**
 (REPL/shell snippets and external-service examples). The book now lives in
 the sibling `skink-book` repo (`v1.1/`): extract with `python3 v1.1/extract_samples.py`
 and verify with `bash v1.1/test_examples.sh` — the harness derives `SKINK_HOME`
