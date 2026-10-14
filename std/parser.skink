@@ -689,6 +689,12 @@ fn parseStructDecl(p: *Parser, isPub: bool, attrs: []string) -> ast.Stmt {
             advance(p)
         }
         if curIs(p, lexer.T_FN) {
+            // [attr] annotations were collected as field tags but the
+            // member is a method — tags are field-only for now, so
+            // report instead of silently discarding them.
+            if len(fieldTags) > 0 {
+                errorAt(p, p.curTok, "field attributes are not supported on methods")
+            }
             m := parseFnDecl(p, fieldPub, []string{})
             methods = append(methods, m.decl)
             continue

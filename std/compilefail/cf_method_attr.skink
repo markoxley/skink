@@ -1,0 +1,12 @@
+// expect: field attributes are not supported on methods
+module main
+struct S {
+    [route]
+    pub fn M(self: *S) -> int {
+        return 1
+    }
+}
+fn main() -> int {
+    var s S
+    return s.M()
+}

@@ -10,7 +10,7 @@ Entry format: numbered heading, severity, symptom/error message, root cause
 (if diagnosed), expected behavior, and any workaround. Mark entries
 `✅ FIXED` in place when resolved.
 
-## #121 — `int64(-N)` literal miscompiles for N > i32::MAX
+## #121 — `int64(-N)` literal miscompiles for N > i32::MAX — ✅ FIXED
 
 - **Severity**: medium — silent wrong value, no diagnostic
 - **Symptom**: `int64(-9876543210)` yields `-1286608618` (the i32-truncated
@@ -26,3 +26,20 @@ Entry format: numbered heading, severity, symptom/error message, root cause
 - **Workaround**: negate outside the cast — `-int64(9876543210)` or
   `int64(0) - int64(9876543210)` both produce the correct value.
 - **Discovered by**: `std/strconv_test.skink` `TestParseInt64` (orm work).
+
+## #122 — `Fn[T]` bracket syntax gives opaque "cannot index" — ✅ FIXED
+
+- **Severity**: low — misleading diagnostic, no wrong code
+- **Symptom**: `Probe[string]()` (square brackets instead of `<>`) fails
+  with `undefined variable: string` + `cannot index type fn() -> string`
+  — accurate (it *is* an index of a function) but unhelpful: the user
+  meant generic args. Angle-bracket `Probe<string>()` always worked;
+  the original "bug" was a square-bracket typo.
+- **Fix**: `std/checker.skink` `checkIndexExpr` — when the index target
+  is a generic function (`genericFnDecl` + `fnGenerics`), report
+  `cannot index generic function "Probe" — generic arguments use <...>,
+  e.g. Probe<T>(...)`.
+- **Regression test**: `std/compilefail` fixture `fixture_generic_index`
+  asserting the hint text appears.
+- **Discovered by**: orm generics probe (square-bracket typo that
+  produced the confusing error).

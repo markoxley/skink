@@ -4451,6 +4451,17 @@ fn checkIndexExpr(c: *Checker, e: ast.Expr) -> TType {
         }
         return builtinType("int")
     }
+    // Indexing a generic function usually means the writer used
+    // f[T](args) where the generic-call form f<T>(args) was meant —
+    // give that hint instead of the opaque "cannot index" (#122).
+    if leftType.kind == TK_FUNCTION && e.indexTarget[0].kind == ast.EX_IDENT {
+        fnDecl := genericFnDecl(c, e.indexTarget[0].ident)
+        if fnDecl.kind != 0 && len(fnDecl.fnGenerics) > 0 {
+            name := e.indexTarget[0].ident
+            report(c, str.Concat(str.Concat("cannot index generic function \"", str.Concat(name, "\" — generic arguments use <...>, e.g. ")), str.Concat(name, "<T>(...)")))
+            return unknownType()
+        }
+    }
     report(c, str.Concat("cannot index type ", typeString(leftType)))
     return unknownType()
 }

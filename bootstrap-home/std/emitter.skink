@@ -7701,6 +7701,17 @@ fn emitCast(cg: *CodeGen, expr: ast.Expr, targetType: string) -> string {
     if expr.kind == ast.EX_INT && str.Equal(targetType, "i64") && str.Len(expr.strVal) > 0 {
         return intLitToI64String(expr.strVal)
     }
+    // Unary minus over an int literal parses as PrefixExpr(-, IntLit), so
+    // it never reaches the raw-strVal path above — int64(-N) for N > i32
+    // range emitted the truncated i32 magnitude negated (#121). Fold the
+    // sign into the raw literal instead: intLitToI64String already handles
+    // a leading '-', including over 0x/0b/0o and '_' digit separators.
+    if expr.kind == ast.EX_PREFIX && str.Equal(targetType, "i64") && len(expr.prefixRight) > 0 {
+        inner := expr.prefixRight[0]
+        if inner.kind == ast.EX_INT && str.Len(inner.strVal) > 0 && str.Equal(expr.prefixOp, "-") {
+            return intLitToI64String(str.Concat("-", inner.strVal))
+        }
+    }
     operand := emitExpression(cg, expr)
     srcType := exprLLType(cg, expr)
     reg := nextReg(cg)

@@ -1825,3 +1825,28 @@ pub fn TestStringLitNilNotNilLiteral() {
     testing.AssertEqualInt(3, len(s), `"nil" is a 3-byte string`)
     testing.AssertEqualString("nil", s, `string value is "nil"`)
 }
+
+// TestI64NegLiteralCast guards comp_error.md #121: int64(-N) for
+// N > i32::MAX must yield the true negative i64, not the i32-truncated
+// magnitude negated. The RHS -int64(N) is the correct-by-construction
+// path (literal widened, then negated at runtime).
+pub fn TestI64NegLiteralCast() {
+    a := int64(-5000000000)
+    testing.AssertTrue(a == -int64(5000000000),
+        "int64(-5000000000) should equal -int64(5000000000)")
+    b := int64(-9876543210)
+    testing.AssertTrue(b == -int64(9876543210),
+        "int64(-9876543210) should equal -int64(9876543210)")
+    testing.AssertEqualString("-5000000000", strconv.Itoa64(a),
+        "int64(-5000000000) should render as -5000000000")
+    // Hex and underscored literals under unary minus take the same path.
+    c := int64(-0x123456789)
+    testing.AssertTrue(c == -int64(0x123456789),
+        "int64(-0x123456789) should equal -int64(0x123456789)")
+    // Regression guard: positive literals and in-range negatives unchanged.
+    d := int64(-7)
+    testing.AssertTrue(d == int64(-7), "int64(-7) should still work")
+    e := int64(9223372036854775807)
+    testing.AssertEqualString("9223372036854775807", strconv.Itoa64(e),
+        "INT64_MAX positive literal should be unchanged")
+}

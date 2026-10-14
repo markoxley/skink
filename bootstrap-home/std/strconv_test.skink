@@ -211,9 +211,7 @@ pub fn TestParseInt64() {
 
     neg, ok3 := strconv.ParseInt64("  -9876543210  ")
     testing.AssertTrue(ok3, "ParseInt64 negative with whitespace ok")
-    // Note: written as -int64(...) — int64(-N) miscompiles for N > i32::MAX
-    // (comp_error.md #121).
-    testing.AssertTrue(neg == -int64(9876543210), "ParseInt64 negative value")
+    testing.AssertTrue(neg == int64(-9876543210), "ParseInt64 negative value")
 
     _, ok4 := strconv.ParseInt64("abc")
     testing.AssertFalse(ok4, "ParseInt64 invalid should fail")

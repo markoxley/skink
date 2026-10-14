@@ -1,0 +1,10 @@
+// expect: generic arguments use <...>
+module main
+fn Probe<T>() -> string {
+    var x T
+    return "x"
+}
+fn main() -> int {
+    _ = Probe[string]()
+    return 0
+}
