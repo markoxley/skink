@@ -27,6 +27,11 @@ import "std/str"
 import "std/strconv"
 
 extern fn Skink_test_failnow(msg: string)
+extern fn Skink_rc_detect_cycles() -> int64
+extern fn Skink_rc_report_cycles() -> int64
+extern fn Skink_rc_live_objects() -> int64
+extern fn Skink_rc_live_bytes() -> int64
+extern fn Skink_rc_peak_bytes() -> int64
 
 var failed: bool = false
 var testCount: int = 0
@@ -249,4 +254,33 @@ pub fn FailCount() -> int {
 // TestCount returns the total number of assertions.
 pub fn TestCount() -> int {
     return testCount
+}
+
+// DetectCycles scans the live RC heap using Tarjan's strongly-connected
+// components algorithm and returns the number of objects currently
+// participating in reference cycles (0 when the heap is cycle-free).
+pub fn DetectCycles() -> int64 {
+    return Skink_rc_detect_cycles()
+}
+
+// ReportCycles scans the live RC heap, writes a diagnostic cycle report
+// (group count, object addresses, byte sizes, refcounts, and reachability)
+// to stderr, and returns the number of cyclic objects found.
+pub fn ReportCycles() -> int64 {
+    return Skink_rc_report_cycles()
+}
+
+// LiveObjects returns the number of RC-managed allocations currently alive.
+pub fn LiveObjects() -> int64 {
+    return Skink_rc_live_objects()
+}
+
+// LiveBytes returns the total payload bytes currently allocated by the RC runtime.
+pub fn LiveBytes() -> int64 {
+    return Skink_rc_live_bytes()
+}
+
+// PeakBytes returns the peak payload bytes allocated by the RC runtime.
+pub fn PeakBytes() -> int64 {
+    return Skink_rc_peak_bytes()
 }

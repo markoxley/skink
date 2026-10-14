@@ -5908,11 +5908,23 @@ fn emitAddressOf(cg: *CodeGen, e: ast.Expr) -> string {
     if e.kind == ast.EX_INDEX {
         arrExpr := e.indexTarget[0]
         arrReg := emitExpression(cg, arrExpr)
+        leftType := exprLLType(cg, arrExpr)
         idxReg := emitExpression(cg, e.indexExpr[0])
+        emitIndexBoundsCheck(cg, arrExpr, arrReg, leftType, idxReg, e.indexExpr[0])
+        idxReg = emitIndexAsI32(cg, idxReg, e.indexExpr[0])
         elemType := exprLLType(cg, e)
+        if str.Equal(leftType, "i8*") && exprIsByteSlice(cg, arrExpr) {
+            elemType = "i8"
+        }
+        elemPtrType := str.Concat(elemType, "*")
+        actualBase := arrReg
+        if exprIsSlice(cg, arrExpr) || (str.Equal(leftType, "i8*") && exprIsByteSlice(cg, arrExpr)) {
+            dataPtr := emitSliceData(cg, arrReg, leftType)
+            actualBase = emitFromI8Ptr(cg, dataPtr, elemPtrType)
+        }
         indices := []string{}
         indices = append(indices, idxReg)
-        return emitGEP(cg, elemType, str.Concat(elemType, "*"), arrReg, indices)
+        return emitGEP(cg, elemType, elemPtrType, actualBase, indices)
     }
     if e.kind == ast.EX_FIELD {
         receiverExpr := e.fieldTarget[0]
@@ -6965,6 +6977,16 @@ fn exprIsUnsignedInt(cg: *CodeGen, e: ast.Expr) -> bool {
 // Used when the LLVM type alone is ambiguous (e.g., i8* is shared by strings
 // and byte slices).
 fn exprSkinkType(cg: *CodeGen, e: ast.Expr) -> checker.TType {
+    // Sub-expressions inside string interpolations are parsed from fragment
+    // text with line=1, which collides across interpolations in the same
+    // file. Local variable bindings in cg carry their exact semantic type
+    // in sv.synType, so consult the scope table first for identifiers.
+    if e.kind == ast.EX_IDENT {
+        sv, ok := lookupVar(cg, e.ident)
+        if ok && sv.synType.kind != 0 && sv.synType.kind != checker.TK_UNKNOWN {
+            return sv.synType
+        }
+    }
     if e.line <= 0 {
         return checker.TType{}
     }
@@ -6997,6 +7019,17 @@ fn exprIsString(cg: *CodeGen, e: ast.Expr) -> bool {
 // or []int8.
 fn exprIsByteSlice(cg: *CodeGen, e: ast.Expr) -> bool {
     return typeIsByteSlice(exprSkinkType(cg, e))
+}
+
+// exprIsSlice reports whether the expression's value is a slice — under the
+// fat-slice ABI the register then holds a slice header, and element access
+// must unwrap h->data. Raw *T pointers and strings return false.
+fn exprIsSlice(cg: *CodeGen, e: ast.Expr) -> bool {
+    tt := exprSkinkType(cg, e)
+    if tt.kind == checker.TK_NAMED {
+        tt = resolveAliasCG(cg, tt)
+    }
+    return tt.kind == checker.TK_ARRAY
 }
 
 // extendNarrowInt widens an i8/i16 register to i32 with the correct
@@ -7106,9 +7139,9 @@ fn emitFloatToString(cg: *CodeGen, val: string) -> string {
 // emitArrayToString converts an array/slice value to a string like "[1, 2, 3]".
 // It iterates over elements, converts each to a string, and joins with ", ".
 fn emitArrayToString(cg: *CodeGen, arrVal: string, arrType: string, elemType: string) -> string {
-    // Get raw pointer for null check and length access
-    rawPtr := nextReg(cg)
-    emitfmt(cg, "  %s = bitcast %s %s to i8*\n", []string{rawPtr, arrType, arrVal})
+    // Get raw header pointer for null check and length access ([]byte is
+    // already i8* — emitI8Ptr elides the invalid same-type bitcast).
+    rawPtr := emitI8Ptr(cg, arrVal, arrType)
 
     // Initialize result with "["
     openBracket := emitStringLiteral(cg, "[")
@@ -7132,11 +7165,13 @@ fn emitArrayToString(cg: *CodeGen, arrVal: string, arrType: string, elemType: st
     emitLabel(cg, nullLabel)
     emitBranch(cg, endLabel)
 
-    // Element count via the runtime — view-aware (a view's length is not
-    // stored at payload-8).
+    // Element count via the runtime — reads the slice header's len.
     emitLabel(cg, lenLabel)
     lenReg := nextReg(cg)
     emitfmt(cg, "  %s = call i64 @Skink_slice_len(i8* %s)\n", []string{lenReg, rawPtr})
+    arrData := nextReg(cg)
+    emitfmt(cg, "  %s = call i8* @Skink_slice_data(i8* %s)\n", []string{arrData, rawPtr})
+    arrDataTyped := emitFromI8Ptr(cg, arrData, str.Concat(elemType, "*"))
 
     // Check if empty
     isEmpty := nextReg(cg)
@@ -7172,11 +7207,12 @@ fn emitArrayToString(cg: *CodeGen, arrVal: string, arrType: string, elemType: st
     emitStore(cg, "i8*", resultWithSep, "i8*", resultAlloca)
     emitBranch(cg, loadElemLabel)
 
-    // Load element and convert to string
+    // Load element and convert to string. Under the fat-slice ABI arrVal is
+    // a slice header — unwrap its data pointer in lenLabel above.
     emitLabel(cg, loadElemLabel)
     indices := []string{}
     indices = append(indices, iVal)
-    elemPtr := emitGEP(cg, elemType, str.Concat(elemType, "*"), arrVal, indices)
+    elemPtr := emitGEP(cg, elemType, str.Concat(elemType, "*"), arrDataTyped, indices)
     elemVal := emitLoad(cg, elemType, elemType, elemPtr)
     elemStr := emitValAsString(cg, elemVal, elemType)
 
@@ -7821,6 +7857,13 @@ fn emitCastToString(cg: *CodeGen, expr: ast.Expr) -> string {
         return ptrReg
     }
     if str.Equal(srcType, "i8*") {
+        // A byte slice operand is a slice header under the fat-slice ABI —
+        // string(b) must materialize h->data into a NUL-terminated copy.
+        if exprIsByteSlice(cg, expr) {
+            convReg := nextReg(cg)
+            emitfmt(cg, "  %s = call i8* @Skink_str_from_slice(i8* %s)\n", []string{convReg, operand})
+            return convReg
+        }
         return operand
     }
     return operand
@@ -8674,16 +8717,14 @@ fn emitLenCall(cg: *CodeGen, e: ast.Expr) -> string {
     return emitLenCallRaw(cg, arg, argType, argExpr)
 }
 
-// emitSliceCopyArr copies a non-null backing array (given as an i8* payload
+// emitSliceCopyArr copies a non-null backing array (given as an i8* element
 // pointer) and returns the new payload pointer as i8*. The element LLVM type
-// determines the array destructor and whether copied elements must be retained.
-// This is the fast path: a single bulk memcpy plus an optional retain loop for
-// reference-counted element types.
-fn emitSliceCopyArr(cg: *CodeGen, srcRaw: string, elemLL: string) -> string {
-    // Source element count via the runtime so slice views (whose length is
-    // not at payload-8) copy correctly; plain arrays read the same slot.
-    srcLen64 := nextReg(cg)
-    emitfmt(cg, "  %s = call i64 @Skink_slice_len(i8* %s)\n", []string{srcLen64, srcRaw})
+// determines the array destructor and whether copied elements must be
+// retained, and srcLen64 supplies the element count — callers pass
+// Skink_slice_len(h) for slice headers or Skink_arr_count(a) for raw map/set
+// backing arrays. This is the fast path: a single bulk memcpy plus an
+// optional retain loop for reference-counted element types.
+fn emitSliceCopyArr(cg: *CodeGen, srcRaw: string, elemLL: string, srcLen64: string) -> string {
 
     // Allocation size = srcLen * sizeof(elem)
     elemSizeReg := emitElemSize(cg, elemLL)
@@ -8756,17 +8797,18 @@ fn emitSliceCopyArr(cg: *CodeGen, srcRaw: string, elemLL: string) -> string {
     return newArr
 }
 
-// emitSliceCopyNullable copies a backing array that may be null. srcArr has
-// LLVM type elemLL*. Returns the new payload pointer as i8* (null if the
-// source was null).
+// emitSliceCopyNullable copies a raw backing array that may be null — used
+// for map/set internal arrays, whose element count sits at payload-8
+// (read via Skink_arr_count). Slice values go through emitSliceCopyValue
+// instead: their count lives in the header. srcArr has LLVM type elemLL*.
+// Returns the new payload pointer as i8* (null if the source was null).
 fn emitSliceCopyNullable(cg: *CodeGen, srcArr: string, elemLL: string) -> string {
     // Use an alloca for the result so we don't have to track the exact
     // predecessor basic block (emitSliceCopyArr may create internal blocks
     // for the retain loop).
     resultAlloca := nextReg(cg)
     emitfmt(cg, "  %s = alloca i8*\n", []string{resultAlloca})
-    srcRaw := nextReg(cg)
-    emitfmt(cg, "  %s = bitcast %s %s to i8*\n", []string{srcRaw, str.Concat(elemLL, "*"), srcArr})
+    srcRaw := emitI8Ptr(cg, srcArr, str.Concat(elemLL, "*"))
     isNull := nextReg(cg)
     emitfmt(cg, "  %s = icmp eq i8* %s, null\n", []string{isNull, srcRaw})
     nullLabel := nextLabel(cg)
@@ -8777,13 +8819,106 @@ fn emitSliceCopyNullable(cg: *CodeGen, srcArr: string, elemLL: string) -> string
     emitfmt(cg, "  store i8* null, i8** %s\n", []string{resultAlloca})
     emitBranch(cg, mergeLabel)
     emitLabel(cg, copyLabel)
-    newArrI8 := emitSliceCopyArr(cg, srcRaw, elemLL)
+    srcCnt := nextReg(cg)
+    emitfmt(cg, "  %s = call i64 @Skink_arr_count(i8* %s)\n", []string{srcCnt, srcRaw})
+    newArrI8 := emitSliceCopyArr(cg, srcRaw, elemLL, srcCnt)
     emitfmt(cg, "  store i8* %s, i8** %s\n", []string{newArrI8, resultAlloca})
     emitBranch(cg, mergeLabel)
     emitLabel(cg, mergeLabel)
     resultReg := nextReg(cg)
     emitfmt(cg, "  %s = load i8*, i8** %s\n", []string{resultReg, resultAlloca})
     return resultReg
+}
+
+// emitI8Ptr coerces a register of any pointer LL type to i8*, eliding the
+// bitcast when the source is already i8* (LLVM rejects same-type bitcasts —
+// this matters for []byte slices, whose header is itself i8*).
+fn emitI8Ptr(cg: *CodeGen, reg: string, llType: string) -> string {
+    if str.Equal(llType, "i8*") {
+        return reg
+    }
+    r := nextReg(cg)
+    emitfmt(cg, "  %s = bitcast %s %s to i8*\n", []string{r, llType, reg})
+    return r
+}
+
+// emitFromI8Ptr bitcasts an i8* register to an arbitrary target type,
+// eliding the bitcast when the target is already i8* (invalid in LLVM).
+fn emitFromI8Ptr(cg: *CodeGen, reg: string, targetLL: string) -> string {
+    if str.Equal(targetLL, "i8*") {
+        return reg
+    }
+    r := nextReg(cg)
+    emitfmt(cg, "  %s = bitcast i8* %s to %s\n", []string{r, reg, targetLL})
+    return r
+}
+
+// emitSliceData unwraps a slice header to its element base pointer (i8*).
+// Nil-safe: Skink_slice_data returns null for a nil slice value.
+fn emitSliceData(cg: *CodeGen, sliceReg: string, sliceLL: string) -> string {
+    raw := sliceReg
+    if !str.Equal(sliceLL, "i8*") {
+        raw = nextReg(cg)
+        emitfmt(cg, "  %s = bitcast %s %s to i8*\n", []string{raw, sliceLL, sliceReg})
+    }
+    res := nextReg(cg)
+    emitfmt(cg, "  %s = call i8* @Skink_slice_data(i8* %s)\n", []string{res, raw})
+    return res
+}
+
+// emitSliceLenReg unwraps a slice header's element length (i64). Nil-safe.
+fn emitSliceLenReg(cg: *CodeGen, sliceReg: string, sliceLL: string) -> string {
+    raw := sliceReg
+    if !str.Equal(sliceLL, "i8*") {
+        raw = nextReg(cg)
+        emitfmt(cg, "  %s = bitcast %s %s to i8*\n", []string{raw, sliceLL, sliceReg})
+    }
+    res := nextReg(cg)
+    emitfmt(cg, "  %s = call i64 @Skink_slice_len(i8* %s)\n", []string{res, raw})
+    return res
+}
+
+// emitSliceCopyValue deep-copies a slice VALUE — under the fat-slice ABI
+// srcVal is a slice header, so the element base and count come from the
+// header and the result is re-wrapped in a fresh header. Nil propagates.
+// Returns a register of LLVM type srcType (the slice's elemLL* fiction).
+fn emitSliceCopyValue(cg: *CodeGen, srcVal: string, srcType: string, elemLL: string) -> string {
+    rawHdr := srcVal
+    if !str.Equal(srcType, "i8*") {
+        rawHdr = nextReg(cg)
+        emitfmt(cg, "  %s = bitcast %s %s to i8*\n", []string{rawHdr, srcType, srcVal})
+    }
+    srcData := nextReg(cg)
+    emitfmt(cg, "  %s = call i8* @Skink_slice_data(i8* %s)\n", []string{srcData, rawHdr})
+    srcLen := nextReg(cg)
+    emitfmt(cg, "  %s = call i64 @Skink_slice_len(i8* %s)\n", []string{srcLen, rawHdr})
+    resultAlloca := nextReg(cg)
+    emitfmt(cg, "  %s = alloca i8*\n", []string{resultAlloca})
+    isNull := nextReg(cg)
+    emitfmt(cg, "  %s = icmp eq i8* %s, null\n", []string{isNull, srcData})
+    nullLabel := nextLabel(cg)
+    copyLabel := nextLabel(cg)
+    mergeLabel := nextLabel(cg)
+    emitCondBranch(cg, isNull, nullLabel, copyLabel)
+    emitLabel(cg, nullLabel)
+    emitfmt(cg, "  store i8* null, i8** %s\n", []string{resultAlloca})
+    emitBranch(cg, mergeLabel)
+    emitLabel(cg, copyLabel)
+    newData := emitSliceCopyArr(cg, srcData, elemLL, srcLen)
+    newHdr := nextReg(cg)
+    emitfmt(cg, "  %s = call i8* @Skink_slice_hdr(i8* %s, i64 %s, i64 %s, i8* %s)\n",
+        []string{newHdr, newData, srcLen, srcLen, newData})
+    emitfmt(cg, "  store i8* %s, i8** %s\n", []string{newHdr, resultAlloca})
+    emitBranch(cg, mergeLabel)
+    emitLabel(cg, mergeLabel)
+    resI8 := nextReg(cg)
+    emitfmt(cg, "  %s = load i8*, i8** %s\n", []string{resI8, resultAlloca})
+    if str.Equal(srcType, "i8*") {
+        return resI8
+    }
+    res := nextReg(cg)
+    emitfmt(cg, "  %s = bitcast i8* %s to %s\n", []string{res, resI8, srcType})
+    return res
 }
 
 // emitPinMapField loads a map backing-array field and pins it against a
@@ -8957,10 +9092,7 @@ fn emitCopyCall(cg: *CodeGen, e: ast.Expr) -> string {
         elemLL = str.Substr(srcType, 0, str.Len(srcType) - 1)
     }
 
-    newI8 := emitSliceCopyNullable(cg, src, elemLL)
-    resultReg := nextReg(cg)
-    emitfmt(cg, "  %s = bitcast i8* %s to %s\n", []string{resultReg, newI8, srcType})
-    return resultReg
+    return emitSliceCopyValue(cg, src, srcType, elemLL)
 }
 
 // emitDeleteCall implements delete(map, key) for removing a key from a map.
@@ -9567,7 +9699,14 @@ fn emitAppendValues(cg: *CodeGen, oldArr: string, arrType: string, valExpr: ast.
         valReg = emitRetain(cg, valReg, valType)
     }
 
-    elemSizeI32 := emitElemSize(cg, elemType)
+    return emitAppendCore(cg, oldArr, arrType, valType, valReg, mayGrow)
+}
+
+// emitAppendCore appends one already-coerced, already-retained element
+// register to a slice value. Under the fat-slice ABI the result is always
+// a (possibly new) slice header of type arrType.
+fn emitAppendCore(cg: *CodeGen, oldArr: string, arrType: string, valType: string, valReg: string, mayGrow: bool) -> string {
+    elemSizeI32 := emitElemSize(cg, valType)
     elemSizeI64 := nextReg(cg)
     emitfmt(cg, "  %s = zext i32 %s to i64\n", []string{elemSizeI64, elemSizeI32})
 
@@ -9579,17 +9718,26 @@ fn emitAppendValues(cg: *CodeGen, oldArr: string, arrType: string, valExpr: ast.
         arrDtorPtr = str.Concat("i8* bitcast (void (i8*)* @", str.Concat(arrDtorName, " to i8*)"))
     }
 
-    oldArrRaw := nextReg(cg)
-    emitfmt(cg, "  %s = bitcast %s %s to i8*\n", []string{oldArrRaw, arrType, oldArr})
+    // Fat-slice ABI: the slice register is a header. Read its fields, then
+    // take one of three paths — spare capacity (write the shared backing and
+    // mint a longer header), unique in-place grow (mutate the header after
+    // Skink_slice_ensure reallocs the backing), or copy.
+    oldHdrRaw := emitI8Ptr(cg, oldArr, arrType)
     isNull := nextReg(cg)
-    emitfmt(cg, "  %s = icmp eq i8* %s, null\n", []string{isNull, oldArrRaw})
+    emitfmt(cg, "  %s = icmp eq i8* %s, null\n", []string{isNull, oldHdrRaw})
 
     nullLabel := nextLabel(cg)
     notNullLabel := nextLabel(cg)
+    capLabel := nextLabel(cg)
+    growGateLabel := nextLabel(cg)
+    tryEnsureLabel := nextLabel(cg)
+    doGrowLabel := nextLabel(cg)
+    growDoneLabel := nextLabel(cg)
+    copyLabel := nextLabel(cg)
     mergeLabel := nextLabel(cg)
     emitCondBranch(cg, isNull, nullLabel, notNullLabel)
 
-    // NULL: create new 1-element array
+    // NULL header: fresh 1-element backing wrapped in a header.
     emitLabel(cg, nullLabel)
     rawNull := nextReg(cg)
     if str.Len(arrDtorName) > 0 {
@@ -9602,70 +9750,127 @@ fn emitAppendValues(cg: *CodeGen, oldArr: string, arrType: string, valExpr: ast.
     typedLenPtrNull := nextReg(cg)
     emitfmt(cg, "  %s = bitcast i8* %s to i64*\n", []string{typedLenPtrNull, lenPtrNull})
     emitfmt(cg, "  store i64 1, i64* %s\n", []string{typedLenPtrNull})
-    typedElemStartNull := nextReg(cg)
-    emitfmt(cg, "  %s = bitcast i8* %s to %s*\n", []string{typedElemStartNull, rawNull, valType})
+    typedElemStartNull := emitFromI8Ptr(cg, rawNull, str.Concat(valType, "*"))
     emitStore(cg, valType, valReg, valType, typedElemStartNull)
+    nullHdr := nextReg(cg)
+    emitfmt(cg, "  %s = call i8* @Skink_slice_hdr(i8* %s, i64 1, i64 1, i8* %s)\n", []string{nullHdr, rawNull, rawNull})
     emitBranch(cg, mergeLabel)
 
-    // NOT NULL: resize and append
+    // NOT NULL: unwrap the header fields.
     emitLabel(cg, notNullLabel)
-    // Element count via the runtime — view-aware (a view's length is not
-    // stored at payload-8).
     oldLenReg := nextReg(cg)
-    emitfmt(cg, "  %s = call i64 @Skink_slice_len(i8* %s)\n", []string{oldLenReg, oldArrRaw})
+    emitfmt(cg, "  %s = call i64 @Skink_slice_len(i8* %s)\n", []string{oldLenReg, oldHdrRaw})
+    oldCapReg := nextReg(cg)
+    emitfmt(cg, "  %s = call i64 @Skink_slice_cap(i8* %s)\n", []string{oldCapReg, oldHdrRaw})
+    oldDataReg := nextReg(cg)
+    emitfmt(cg, "  %s = call i8* @Skink_slice_data(i8* %s)\n", []string{oldDataReg, oldHdrRaw})
+    oldBaseReg := nextReg(cg)
+    emitfmt(cg, "  %s = call i8* @Skink_slice_base(i8* %s)\n", []string{oldBaseReg, oldHdrRaw})
     newLenReg := nextReg(cg)
     emitfmt(cg, "  %s = add i64 %s, 1\n", []string{newLenReg, oldLenReg})
     bytesNeeded := nextReg(cg)
     emitfmt(cg, "  %s = mul i64 %s, %s\n", []string{bytesNeeded, newLenReg, elemSizeI64})
+    emitBranch(cg, growGateLabel)
 
-    // Fast path: when the caller proved the source array's reference is dead
-    // (mayGrow) and the backing array is uniquely owned (refcount == 1),
-    // Skink_slice_ensure grows it geometrically — reallocating in place when
-    // possible — so append is amortized O(1) instead of copying every
-    // element into a fresh len+1 block each time (comp_error.md #30: the
-    // O(N^2) churn OOM-killed stage-2 self-compiles). A uniquely owned
-    // array needs no element retains because its storage is moved, not
-    // copied; the shared path below still copies with retains.
-    uniqueLabel := nextLabel(cg)
-    uniqueGrowLabel := nextLabel(cg)
-    sharedLabel := nextLabel(cg)
+    // In-place append (either into existing spare capacity or by growing via
+    // Skink_slice_ensure) is safe only when mayGrow is true, the slice is a
+    // full-backing owner (cap >= 0; subslice views carry cap == -1), and BOTH
+    // the header and its backing allocation have refcount == 1.
+    emitLabel(cg, growGateLabel)
     if mayGrow {
-        refCountReg := nextReg(cg)
-        emitfmt(cg, "  %s = call i64 @Skink_rc_count(i8* %s)\n", []string{refCountReg, oldArrRaw})
-        isUnique := nextReg(cg)
-        emitfmt(cg, "  %s = icmp eq i64 %s, 1\n", []string{isUnique, refCountReg})
-        emitCondBranch(cg, isUnique, uniqueLabel, sharedLabel)
-    } else {
-        emitBranch(cg, sharedLabel)
-    }
+        hdrRc := nextReg(cg)
+        emitfmt(cg, "  %s = call i64 @Skink_rc_count(i8* %s)\n", []string{hdrRc, oldHdrRaw})
+        hdrUnique := nextReg(cg)
+        emitfmt(cg, "  %s = icmp eq i64 %s, 1\n", []string{hdrUnique, hdrRc})
+        notView := nextReg(cg)
+        emitfmt(cg, "  %s = icmp sge i64 %s, 0\n", []string{notView, oldCapReg})
+        baseNonNull := nextReg(cg)
+        emitfmt(cg, "  %s = icmp ne i8* %s, null\n", []string{baseNonNull, oldBaseReg})
+        gate1 := nextReg(cg)
+        emitfmt(cg, "  %s = and i1 %s, %s\n", []string{gate1, hdrUnique, notView})
+        gateOk := nextReg(cg)
+        emitfmt(cg, "  %s = and i1 %s, %s\n", []string{gateOk, gate1, baseNonNull})
+        emitCondBranch(cg, gateOk, tryEnsureLabel, copyLabel)
 
-    typedElemStartUnique := oldArr
-    if mayGrow {
-        emitLabel(cg, uniqueLabel)
+        emitLabel(cg, tryEnsureLabel)
+        baseRc := nextReg(cg)
+        emitfmt(cg, "  %s = call i64 @Skink_rc_count(i8* %s)\n", []string{baseRc, oldBaseReg})
+        baseUnique := nextReg(cg)
+        emitfmt(cg, "  %s = icmp eq i64 %s, 1\n", []string{baseUnique, baseRc})
+        fitsCap := nextReg(cg)
+        emitfmt(cg, "  %s = icmp sle i64 %s, %s\n", []string{fitsCap, newLenReg, oldCapReg})
+        canInPlaceCap := nextReg(cg)
+        emitfmt(cg, "  %s = and i1 %s, %s\n", []string{canInPlaceCap, baseUnique, fitsCap})
+        checkGrowLabel := nextLabel(cg)
+        emitCondBranch(cg, canInPlaceCap, capLabel, checkGrowLabel)
+
+        // Uniquely-owned spare capacity: store the element at data[oldLen] and
+        // bump both the backing element-count slot and header len in place.
+        emitLabel(cg, capLabel)
+        capDataT := emitFromI8Ptr(cg, oldDataReg, str.Concat(valType, "*"))
+        capEnd := nextReg(cg)
+        emitfmt(cg, "  %s = getelementptr %s, %s* %s, i64 %s\n", []string{capEnd, valType, valType, capDataT, oldLenReg})
+        emitStore(cg, valType, valReg, valType, capEnd)
+        capCntPtr := nextReg(cg)
+        emitfmt(cg, "  %s = getelementptr inbounds i8, i8* %s, i64 -8\n", []string{capCntPtr, oldBaseReg})
+        capCntTyped := nextReg(cg)
+        emitfmt(cg, "  %s = bitcast i8* %s to i64*\n", []string{capCntTyped, capCntPtr})
+        emitfmt(cg, "  store i64 %s, i64* %s\n", []string{newLenReg, capCntTyped})
+        capHp := nextReg(cg)
+        emitfmt(cg, "  %s = bitcast i8* %s to %hdr.slice*\n", []string{capHp, oldHdrRaw})
+        capFldLen := nextReg(cg)
+        emitfmt(cg, "  %s = getelementptr %hdr.slice, %hdr.slice* %s, i32 0, i32 1\n", []string{capFldLen, capHp})
+        emitfmt(cg, "  store i64 %s, i64* %s\n", []string{newLenReg, capFldLen})
+        emitBranch(cg, mergeLabel)
+
+        emitLabel(cg, checkGrowLabel)
+        emitCondBranch(cg, baseUnique, doGrowLabel, copyLabel)
+
+        emitLabel(cg, doGrowLabel)
         grownRaw := nextReg(cg)
-        emitfmt(cg, "  %s = call i8* @Skink_slice_ensure(i8* %s, i64 %s)\n", []string{grownRaw, oldArrRaw, bytesNeeded})
-        // Skink_slice_ensure only grows real backing arrays (kind-0
-        // blocks); for a slice view — or a failed realloc — it returns
-        // NULL, in which case fall back to the shared copy path.
+        emitfmt(cg, "  %s = call i8* @Skink_slice_ensure(i8* %s, i64 %s)\n", []string{grownRaw, oldBaseReg, bytesNeeded})
         ensureOk := nextReg(cg)
         emitfmt(cg, "  %s = icmp ne i8* %s, null\n", []string{ensureOk, grownRaw})
-        emitCondBranch(cg, ensureOk, uniqueGrowLabel, sharedLabel)
-        emitLabel(cg, uniqueGrowLabel)
-        lenPtrUnique := nextReg(cg)
-        emitfmt(cg, "  %s = getelementptr inbounds i8, i8* %s, i64 -8\n", []string{lenPtrUnique, grownRaw})
-        typedLenPtrUnique := nextReg(cg)
-        emitfmt(cg, "  %s = bitcast i8* %s to i64*\n", []string{typedLenPtrUnique, lenPtrUnique})
-        emitfmt(cg, "  store i64 %s, i64* %s\n", []string{newLenReg, typedLenPtrUnique})
-        typedElemStartUnique = nextReg(cg)
-        emitfmt(cg, "  %s = bitcast i8* %s to %s*\n", []string{typedElemStartUnique, grownRaw, valType})
-        endGepUnique := nextReg(cg)
-        emitfmt(cg, "  %s = getelementptr %s, %s* %s, i64 %s\n", []string{endGepUnique, valType, valType, typedElemStartUnique, oldLenReg})
-        emitStore(cg, valType, valReg, valType, endGepUnique)
+        emitCondBranch(cg, ensureOk, growDoneLabel, copyLabel)
+
+        // Update the solely-owned header in place — base and data move to the
+        // grown block and cap reflects the new capacity.
+        emitLabel(cg, growDoneLabel)
+        hp := nextReg(cg)
+        emitfmt(cg, "  %s = bitcast i8* %s to %hdr.slice*\n", []string{hp, oldHdrRaw})
+        capBytesReg := nextReg(cg)
+        emitfmt(cg, "  %s = call i64 @Skink_rc_capacity(i8* %s)\n", []string{capBytesReg, grownRaw})
+        capElems := nextReg(cg)
+        emitfmt(cg, "  %s = udiv i64 %s, %s\n", []string{capElems, capBytesReg, elemSizeI64})
+        fldData := nextReg(cg)
+        emitfmt(cg, "  %s = getelementptr %hdr.slice, %hdr.slice* %s, i32 0, i32 0\n", []string{fldData, hp})
+        emitfmt(cg, "  store i8* %s, i8** %s\n", []string{grownRaw, fldData})
+        fldLen := nextReg(cg)
+        emitfmt(cg, "  %s = getelementptr %hdr.slice, %hdr.slice* %s, i32 0, i32 1\n", []string{fldLen, hp})
+        emitfmt(cg, "  store i64 %s, i64* %s\n", []string{newLenReg, fldLen})
+        fldCap := nextReg(cg)
+        emitfmt(cg, "  %s = getelementptr %hdr.slice, %hdr.slice* %s, i32 0, i32 2\n", []string{fldCap, hp})
+        emitfmt(cg, "  store i64 %s, i64* %s\n", []string{capElems, fldCap})
+        fldBase := nextReg(cg)
+        emitfmt(cg, "  %s = getelementptr %hdr.slice, %hdr.slice* %s, i32 0, i32 3\n", []string{fldBase, hp})
+        emitfmt(cg, "  store i8* %s, i8** %s\n", []string{grownRaw, fldBase})
+        // Backing element count for Skink_array_dtor_sized = live element count.
+        cntPtr := nextReg(cg)
+        emitfmt(cg, "  %s = getelementptr inbounds i8, i8* %s, i64 -8\n", []string{cntPtr, grownRaw})
+        cntTyped := nextReg(cg)
+        emitfmt(cg, "  %s = bitcast i8* %s to i64*\n", []string{cntTyped, cntPtr})
+        emitfmt(cg, "  store i64 %s, i64* %s\n", []string{newLenReg, cntTyped})
+        gDataT := emitFromI8Ptr(cg, grownRaw, str.Concat(valType, "*"))
+        gEnd := nextReg(cg)
+        emitfmt(cg, "  %s = getelementptr %s, %s* %s, i64 %s\n", []string{gEnd, valType, valType, gDataT, oldLenReg})
+        emitStore(cg, valType, valReg, valType, gEnd)
         emitBranch(cg, mergeLabel)
+    } else {
+        emitBranch(cg, copyLabel)
     }
 
-    // Shared array (refcount > 1): must copy so other owners keep their view.
-    emitLabel(cg, sharedLabel)
+    // Shared or foreign backing: copy into a fresh block sized for newLen.
+    emitLabel(cg, copyLabel)
     rawNew := nextReg(cg)
     if str.Len(arrDtorName) > 0 {
         emitfmt(cg, "  %s = call i8* @Skink_rc_alloc_typed(i64 %s, %s)\n", []string{rawNew, bytesNeeded, arrDtorPtr})
@@ -9677,10 +9882,11 @@ fn emitAppendValues(cg: *CodeGen, oldArr: string, arrType: string, valExpr: ast.
     typedLenPtrNew := nextReg(cg)
     emitfmt(cg, "  %s = bitcast i8* %s to i64*\n", []string{typedLenPtrNew, lenPtrNew})
     emitfmt(cg, "  store i64 %s, i64* %s\n", []string{newLenReg, typedLenPtrNew})
-    typedElemStartNew := nextReg(cg)
-    emitfmt(cg, "  %s = bitcast i8* %s to %s*\n", []string{typedElemStartNew, rawNew, valType})
+    typedElemStartNew := emitFromI8Ptr(cg, rawNew, str.Concat(valType, "*"))
+    oldDataT := emitFromI8Ptr(cg, oldDataReg, str.Concat(valType, "*"))
 
-    // Copy old elements
+    // Copy old elements, retaining heap-reachable ones so the new array
+    // owns its own references.
     copyIdxAlloca := emitAlloca(cg, "i64")
     emitfmt(cg, "  store i64 0, i64* %s\n", []string{copyIdxAlloca})
     loopCondLabel := nextLabel(cg)
@@ -9697,13 +9903,9 @@ fn emitAppendValues(cg: *CodeGen, oldArr: string, arrType: string, valExpr: ast.
 
     emitLabel(cg, loopBodyLabel)
     srcGep := nextReg(cg)
-    emitfmt(cg, "  %s = getelementptr %s, %s* %s, i64 %s\n", []string{srcGep, valType, valType, oldArr, currIdx})
+    emitfmt(cg, "  %s = getelementptr %s, %s* %s, i64 %s\n", []string{srcGep, valType, valType, oldDataT, currIdx})
     srcVal := nextReg(cg)
     emitfmt(cg, "  %s = load %s, %s* %s\n", []string{srcVal, valType, valType, srcGep})
-    // Retain the element before storing it in the new array. The old array
-    // also holds a reference; when the old array is released (by the caller's
-    // scope cleanup), its destructor will release its copy. Without this
-    // retain, the new array would hold a dangling pointer.
     if isHeapLLType(valType) {
         srcVal = emitRetain(cg, srcVal, valType)
     } else if isCompositeType(valType) && !str.EndsWith(valType, "*") {
@@ -9721,16 +9923,23 @@ fn emitAppendValues(cg: *CodeGen, oldArr: string, arrType: string, valExpr: ast.
     endGep := nextReg(cg)
     emitfmt(cg, "  %s = getelementptr %s, %s* %s, i64 %s\n", []string{endGep, valType, valType, typedElemStartNew, oldLenReg})
     emitStore(cg, valType, valReg, valType, endGep)
+    copyHdr := nextReg(cg)
+    emitfmt(cg, "  %s = call i8* @Skink_slice_hdr(i8* %s, i64 %s, i64 %s, i8* %s)\n",
+        []string{copyHdr, rawNew, newLenReg, newLenReg, rawNew})
     emitBranch(cg, mergeLabel)
 
     emitLabel(cg, mergeLabel)
-    resPtr := nextReg(cg)
+    resHdr := nextReg(cg)
     if mayGrow {
-        emitfmt(cg, "  %s = phi %s* [%s, %s], [%s, %s], [%s, %s]\n", []string{resPtr, valType, typedElemStartNull, str.Concat("%", nullLabel), typedElemStartUnique, str.Concat("%", uniqueGrowLabel), typedElemStartNew, str.Concat("%", loopEndLabel)})
+        emitfmt(cg, "  %s = phi i8* [%s, %s], [%s, %s], [%s, %s], [%s, %s]\n",
+            []string{resHdr, nullHdr, str.Concat("%", nullLabel), oldHdrRaw, str.Concat("%", capLabel),
+                     oldHdrRaw, str.Concat("%", growDoneLabel), copyHdr, str.Concat("%", loopEndLabel)})
     } else {
-        emitfmt(cg, "  %s = phi %s* [%s, %s], [%s, %s]\n", []string{resPtr, valType, typedElemStartNull, str.Concat("%", nullLabel), typedElemStartNew, str.Concat("%", loopEndLabel)})
+        emitfmt(cg, "  %s = phi i8* [%s, %s], [%s, %s]\n",
+            []string{resHdr, nullHdr, str.Concat("%", nullLabel),
+                     copyHdr, str.Concat("%", loopEndLabel)})
     }
-    return resPtr
+    return emitFromI8Ptr(cg, resHdr, arrType)
 }
 
 // emitSpreadAppend handles append(slice, anotherSlice...) by iterating
@@ -9772,16 +9981,30 @@ fn emitSpreadAppend(cg: *CodeGen, e: ast.Expr, growVar: string) -> string {
     if str.Equal(srcType, "i8*") && !exprIsByteSlice(cg, spreadExpr) {
         emitfmt(cg, "  %s = call i64 @strlen(i8* %s)\n", []string{srcLen, srcArr})
     } else {
-        castReg := nextReg(cg)
-        emitfmt(cg, "  %s = bitcast %s %s to i8*\n", []string{castReg, srcType, srcArr})
+        castReg := emitI8Ptr(cg, srcArr, srcType)
         emitfmt(cg, "  %s = call i64 @Skink_slice_len(i8* %s)\n", []string{srcLen, castReg})
     }
 
     // Loop: for i = 0; i < srcLen; i++ { dstArr = append(dstArr, srcArr[i]) }
+    // When !mayGrow, detach dstArr into a fresh private header once before the
+    // loop so every iteration can grow in place without mutating the caller's
+    // source slice or leaking intermediate headers.
+    startDst := dstArr
+    if !mayGrow {
+        startDst = emitSliceCopyValue(cg, dstArr, srcType, elemType)
+    }
     iAlloca := emitAlloca(cg, "i32")
     emitStore(cg, "i32", "0", "i32", iAlloca)
     dstAlloca := emitAlloca(cg, srcType)
-    emitStore(cg, srcType, dstArr, srcType, dstAlloca)
+    emitStore(cg, srcType, startDst, srcType, dstAlloca)
+    // A slice source is a slice header under the fat-slice ABI: unwrap
+    // its element base pointer once here; the loop GEPs against it. A
+    // string source stays a raw i8*.
+    srcData := srcArr
+    if !str.Equal(srcType, "i8*") || exprIsByteSlice(cg, spreadExpr) {
+        srcRaw := emitSliceData(cg, srcArr, srcType)
+        srcData = emitFromI8Ptr(cg, srcRaw, str.Concat(elemType, "*"))
+    }
 
     condLabel := nextLabel(cg)
     bodyLabel := nextLabel(cg)
@@ -9800,7 +10023,7 @@ fn emitSpreadAppend(cg: *CodeGen, e: ast.Expr, growVar: string) -> string {
     // Load element from source.
     indices := []string{}
     indices = append(indices, iVal)
-    elemPtr := emitGEP(cg, elemType, str.Concat(elemType, "*"), srcArr, indices)
+    elemPtr := emitGEP(cg, elemType, str.Concat(elemType, "*"), srcData, indices)
     elemVal := emitLoad(cg, elemType, elemType, elemPtr)
 
     // Retain heap elements.
@@ -9808,180 +10031,10 @@ fn emitSpreadAppend(cg: *CodeGen, e: ast.Expr, growVar: string) -> string {
         elemVal = emitRetain(cg, elemVal, elemType)
     }
 
-    // Append to destination by calling the runtime append.
-    // Build a new append call expression.
+    // Append through the shared append core (header-aware).
     curDst := emitLoad(cg, srcType, srcType, dstAlloca)
-
-    // Emit inline append logic (simplified version of emitAppendCall).
-    elemSizeI32 := emitElemSize(cg, elemType)
-    elemSizeI64 := nextReg(cg)
-    emitfmt(cg, "  %s = zext i32 %s to i64\n", []string{elemSizeI64, elemSizeI32})
-    arrDtorName := getOrCreateArrayDtor(cg, elemType)
-    arrDtorPtr := "null"
-    if str.Len(arrDtorName) > 0 {
-        arrDtorPtr = str.Concat("i8* bitcast (void (i8*)* @", str.Concat(arrDtorName, " to i8*)"))
-    }
-
-    curDstRaw := nextReg(cg)
-    emitfmt(cg, "  %s = bitcast %s %s to i8*\n", []string{curDstRaw, srcType, curDst})
-    isNull := nextReg(cg)
-    emitfmt(cg, "  %s = icmp eq i8* %s, null\n", []string{isNull, curDstRaw})
-
-    nullLabel := nextLabel(cg)
-    notNullLabel := nextLabel(cg)
-    mergeLabel := nextLabel(cg)
-    emitCondBranch(cg, isNull, nullLabel, notNullLabel)
-
-    // NULL: create new 1-element array.
-    emitLabel(cg, nullLabel)
-    rawNull := nextReg(cg)
-    if str.Len(arrDtorName) > 0 {
-        emitfmt(cg, "  %s = call i8* @Skink_rc_alloc_typed(i64 %s, %s)\n", []string{rawNull, elemSizeI64, arrDtorPtr})
-    } else {
-        emitfmt(cg, "  %s = call i8* @Skink_rc_alloc(i64 %s)\n", []string{rawNull, elemSizeI64})
-    }
-    lenPtrNull := nextReg(cg)
-    emitfmt(cg, "  %s = getelementptr inbounds i8, i8* %s, i64 -8\n", []string{lenPtrNull, rawNull})
-    typedLenPtrNull := nextReg(cg)
-    emitfmt(cg, "  %s = bitcast i8* %s to i64*\n", []string{typedLenPtrNull, lenPtrNull})
-    emitfmt(cg, "  store i64 1, i64* %s\n", []string{typedLenPtrNull})
-    typedElemStartNull := nextReg(cg)
-    emitfmt(cg, "  %s = bitcast i8* %s to %s*\n", []string{typedElemStartNull, rawNull, elemType})
-    emitStore(cg, elemType, elemVal, elemType, typedElemStartNull)
-    emitBranch(cg, mergeLabel)
-
-    // NOT NULL: resize and append.
-    emitLabel(cg, notNullLabel)
-    // Element count via the runtime — view-aware (a view's length is not
-    // stored at payload-8).
-    oldLen := nextReg(cg)
-    emitfmt(cg, "  %s = call i64 @Skink_slice_len(i8* %s)\n", []string{oldLen, curDstRaw})
-    newLen := nextReg(cg)
-    emitfmt(cg, "  %s = add i64 %s, 1\n", []string{newLen, oldLen})
-    newLenI32 := nextReg(cg)
-    emitfmt(cg, "  %s = trunc i64 %s to i32\n", []string{newLenI32, newLen})
-    newSize := nextReg(cg)
-    emitfmt(cg, "  %s = mul i64 %s, %s\n", []string{newSize, newLen, elemSizeI64})
-
-    // Fast path: when the self-assign idiom permits it (mayGrow) and the
-    // backing array is uniquely owned (refcount == 1), it grows
-    // geometrically in place via Skink_slice_ensure — amortized O(1) instead
-    // of an O(N^2) realloc-and-copy per appended element (#30). The source
-    // elements were already retained above; the destination's own storage
-    // moves rather than copies.
-    uniqueLabel := nextLabel(cg)
-    uniqueGrowLabel := nextLabel(cg)
-    sharedLabel := nextLabel(cg)
-    uTypedArr := curDst
-    if mayGrow {
-        refCountReg := nextReg(cg)
-        emitfmt(cg, "  %s = call i64 @Skink_rc_count(i8* %s)\n", []string{refCountReg, curDstRaw})
-        isUnique := nextReg(cg)
-        emitfmt(cg, "  %s = icmp eq i64 %s, 1\n", []string{isUnique, refCountReg})
-        emitCondBranch(cg, isUnique, uniqueLabel, sharedLabel)
-
-        emitLabel(cg, uniqueLabel)
-        grownRaw := nextReg(cg)
-        emitfmt(cg, "  %s = call i8* @Skink_slice_ensure(i8* %s, i64 %s)\n", []string{grownRaw, curDstRaw, newSize})
-        // Skink_slice_ensure only grows real backing arrays (kind-0
-        // blocks); for a slice view — or a failed realloc — it returns
-        // NULL, in which case fall back to the shared copy path.
-        ensureOk := nextReg(cg)
-        emitfmt(cg, "  %s = icmp ne i8* %s, null\n", []string{ensureOk, grownRaw})
-        emitCondBranch(cg, ensureOk, uniqueGrowLabel, sharedLabel)
-        emitLabel(cg, uniqueGrowLabel)
-        // Store new element.
-        uElemPtr := nextReg(cg)
-        uTypedArr = nextReg(cg)
-        emitfmt(cg, "  %s = bitcast i8* %s to %s*\n", []string{uTypedArr, grownRaw, elemType})
-        emitfmt(cg, "  %s = getelementptr inbounds %s, %s* %s, i64 %s\n", []string{uElemPtr, elemType, elemType, uTypedArr, oldLen})
-        emitStore(cg, elemType, elemVal, elemType, uElemPtr)
-        // Store new length.
-        uLenPtr := nextReg(cg)
-        emitfmt(cg, "  %s = getelementptr inbounds i8, i8* %s, i64 -8\n", []string{uLenPtr, grownRaw})
-        uTypedLenPtr := nextReg(cg)
-        emitfmt(cg, "  %s = bitcast i8* %s to i64*\n", []string{uTypedLenPtr, uLenPtr})
-        emitfmt(cg, "  store i64 %s, i64* %s\n", []string{newLen, uTypedLenPtr})
-        emitBranch(cg, mergeLabel)
-    } else {
-        emitBranch(cg, sharedLabel)
-    }
-
-    // Shared array (refcount > 1): copy so other owners keep their view.
-    emitLabel(cg, sharedLabel)
-    rawNew := nextReg(cg)
-    if str.Len(arrDtorName) > 0 {
-        emitfmt(cg, "  %s = call i8* @Skink_rc_alloc_typed(i64 %s, %s)\n", []string{rawNew, newSize, arrDtorPtr})
-    } else {
-        emitfmt(cg, "  %s = call i8* @Skink_rc_alloc(i64 %s)\n", []string{rawNew, newSize})
-    }
-    // Copy old elements.
-    oldSize := nextReg(cg)
-    emitfmt(cg, "  %s = mul i64 %s, %s\n", []string{oldSize, oldLen, elemSizeI64})
-    emitfmt(cg, "  call void @llvm.memcpy.p0.p0.i64(i8* %s, i8* %s, i64 %s, i1 false)\n", []string{rawNew, curDstRaw, oldSize})
-    // Retain each copied element so the new array holds its own references —
-    // the old array's destructor releases its copies when it is freed.
-    if needsArrayDtor(cg, elemType) {
-        oldArrTyped := nextReg(cg)
-        emitfmt(cg, "  %s = bitcast i8* %s to %s*\n", []string{oldArrTyped, rawNew, elemType})
-        retIdxAlloca := emitAlloca(cg, "i64")
-        emitfmt(cg, "  store i64 0, i64* %s\n", []string{retIdxAlloca})
-        retCondLabel := nextLabel(cg)
-        retBodyLabel := nextLabel(cg)
-        retEndLabel := nextLabel(cg)
-        emitBranch(cg, retCondLabel)
-        emitLabel(cg, retCondLabel)
-        retIdx := nextReg(cg)
-        emitfmt(cg, "  %s = load i64, i64* %s\n", []string{retIdx, retIdxAlloca})
-        retCmp := nextReg(cg)
-        emitfmt(cg, "  %s = icmp slt i64 %s, %s\n", []string{retCmp, retIdx, oldLen})
-        emitCondBranch(cg, retCmp, retBodyLabel, retEndLabel)
-        emitLabel(cg, retBodyLabel)
-        retElemAddr := nextReg(cg)
-        emitfmt(cg, "  %s = getelementptr %s, %s* %s, i64 %s\n", []string{retElemAddr, elemType, elemType, oldArrTyped, retIdx})
-        if isHeapLLType(elemType) {
-            retElemVal := nextReg(cg)
-            emitfmt(cg, "  %s = load %s, %s* %s\n", []string{retElemVal, elemType, elemType, retElemAddr})
-            retElemRaw := nextReg(cg)
-            emitfmt(cg, "  %s = bitcast %s %s to i8*\n", []string{retElemRaw, elemType, retElemVal})
-            emitfmt(cg, "  call void @Skink_rc_retain(i8* %s)\n", []string{retElemRaw})
-        } else if isCompositeType(elemType) && !str.EndsWith(elemType, "*") {
-            retStructVal := nextReg(cg)
-            emitfmt(cg, "  %s = load %s, %s* %s\n", []string{retStructVal, elemType, elemType, retElemAddr})
-            emitRetainStructHeapFields(cg, retStructVal, elemType)
-        }
-        retNext := nextReg(cg)
-        emitfmt(cg, "  %s = add i64 %s, 1\n", []string{retNext, retIdx})
-        emitfmt(cg, "  store i64 %s, i64* %s\n", []string{retNext, retIdxAlloca})
-        emitBranch(cg, retCondLabel)
-        emitLabel(cg, retEndLabel)
-    }
-    // Store new element.
-    newArrTypedElem := nextReg(cg)
-    emitfmt(cg, "  %s = bitcast i8* %s to %s*\n", []string{newArrTypedElem, rawNew, elemType})
-    newElemPtr := nextReg(cg)
-    emitfmt(cg, "  %s = getelementptr inbounds %s, %s* %s, i64 %s\n", []string{newElemPtr, elemType, elemType, newArrTypedElem, oldLen})
-    emitStore(cg, elemType, elemVal, elemType, newElemPtr)
-    // Store new length.
-    newLenPtr := nextReg(cg)
-    emitfmt(cg, "  %s = getelementptr inbounds i8, i8* %s, i64 -8\n", []string{newLenPtr, rawNew})
-    typedNewLenPtr := nextReg(cg)
-    emitfmt(cg, "  %s = bitcast i8* %s to i64*\n", []string{typedNewLenPtr, newLenPtr})
-    emitfmt(cg, "  store i64 %s, i64* %s\n", []string{newLen, typedNewLenPtr})
-    typedElemStartNew := nextReg(cg)
-    emitfmt(cg, "  %s = bitcast i8* %s to %s*\n", []string{typedElemStartNew, rawNew, elemType})
-    emitBranch(cg, mergeLabel)
-
-    emitLabel(cg, mergeLabel)
-    newArr := nextReg(cg)
-    if mayGrow {
-        emitfmt(cg, "  %s = phi %s* [%s, %s], [%s, %s], [%s, %s]\n", []string{newArr, elemType, typedElemStartNull, str.Concat("%", nullLabel), uTypedArr, str.Concat("%", uniqueGrowLabel), typedElemStartNew, str.Concat("%", sharedLabel)})
-    } else {
-        emitfmt(cg, "  %s = phi %s* [%s, %s], [%s, %s]\n", []string{newArr, elemType, typedElemStartNull, str.Concat("%", nullLabel), typedElemStartNew, str.Concat("%", sharedLabel)})
-    }
-    newArrTyped := nextReg(cg)
-    emitfmt(cg, "  %s = bitcast %s* %s to %s\n", []string{newArrTyped, elemType, newArr, srcType})
-    emitStore(cg, srcType, newArrTyped, srcType, dstAlloca)
+    newDst := emitAppendCore(cg, curDst, srcType, elemType, elemVal, true)
+    emitStore(cg, srcType, newDst, srcType, dstAlloca)
 
     // i = i + 1
     nextI := emitBinaryOp(cg, "add", "i32", iVal, "1")
@@ -10423,10 +10476,14 @@ fn emitFromEndExpr(cg: *CodeGen, e: ast.Expr) -> string {
     realIdx := nextReg(cg)
     emitfmt(cg, "  %s = sub i32 %s, %s\n", []string{realIdx, lenReg, idxExpr})
 
-    // String indexing
+    // String and byte-slice indexing
     if str.Equal(leftType, "i8*") {
+        base := target
+        if exprIsByteSlice(cg, e.indexTarget[0]) {
+            base = emitSliceData(cg, target, leftType)
+        }
         gep := nextReg(cg)
-        emitfmt(cg, "  %s = getelementptr inbounds i8, i8* %s, i32 %s\n", []string{gep, target, realIdx})
+        emitfmt(cg, "  %s = getelementptr inbounds i8, i8* %s, i32 %s\n", []string{gep, base, realIdx})
         reg := nextReg(cg)
         emitfmt(cg, "  %s = load i8, i8* %s\n", []string{reg, gep})
         zext := nextReg(cg)
@@ -10434,11 +10491,14 @@ fn emitFromEndExpr(cg: *CodeGen, e: ast.Expr) -> string {
         return zext
     }
 
-    // Array/slice indexing
+    // Array/slice indexing — unwrap h->data for slice headers.
     elemType := exprLLType(cg, e)
     actualBase := target
     elemPtrType := str.Concat(elemType, "*")
-    if !str.Equal(leftType, elemPtrType) {
+    if exprIsSlice(cg, e.indexTarget[0]) {
+        dataPtr := emitSliceData(cg, target, leftType)
+        actualBase = emitFromI8Ptr(cg, dataPtr, elemPtrType)
+    } else if !str.Equal(leftType, elemPtrType) {
         castReg := nextReg(cg)
         emitfmt(cg, "  %s = bitcast %s %s to %s*\n", []string{castReg, leftType, target, elemType})
         actualBase = castReg
@@ -10497,8 +10557,7 @@ fn emitLenCallRaw(cg: *CodeGen, target: string, leftType: string, expr: ast.Expr
     }
     // Array: element count via the runtime — Skink_slice_len handles nil
     // (0) and slice views, whose length is not stored at payload-8.
-    rawPtr := nextReg(cg)
-    emitfmt(cg, "  %s = bitcast %s %s to i8*\n", []string{rawPtr, leftType, target})
+    rawPtr := emitI8Ptr(cg, target, leftType)
     lenReg64 := nextReg(cg)
     emitfmt(cg, "  %s = call i64 @Skink_slice_len(i8* %s)\n", []string{lenReg64, rawPtr})
     truncReg := nextReg(cg)
@@ -10551,8 +10610,7 @@ fn emitIndexBoundsCheck(cg: *CodeGen, targetExpr: ast.Expr, target: string, left
     // Slice element count via Skink_slice_len: nil-safe (0, so any index
     // trips the bounds panic — comp_error.md #69) and view-aware, since a
     // view's length is not stored at payload-8.
-    rawPtr := nextReg(cg)
-    emitfmt(cg, "  %s = bitcast %s %s to i8*\n", []string{rawPtr, leftType, target})
+    rawPtr := emitI8Ptr(cg, target, leftType)
     lenReg := nextReg(cg)
     emitfmt(cg, "  %s = call i64 @Skink_slice_len(i8* %s)\n", []string{lenReg, rawPtr})
     // Skink_bounds_check takes i32 params; coerce the index and length.
@@ -10578,28 +10636,39 @@ fn emitIndexExpr(cg: *CodeGen, e: ast.Expr) -> string {
         return emitMapIndex(cg, target, idx, keyLL, valLL)
     }
     
-    // String indexing
+    // String and byte-slice indexing. Strings are raw i8*; byte slices
+    // share the i8* LLVM type but are slice headers under the fat-slice
+    // ABI — unwrap the element base pointer before the GEP.
     if str.Equal(leftType, "i8*") {
         idx := emitExpression(cg, e.indexExpr[0])
         emitIndexBoundsCheck(cg, e.indexTarget[0], target, leftType, idx, e.indexExpr[0])
         idx = emitIndexAsI32(cg, idx, e.indexExpr[0])
+        base := target
+        if exprIsByteSlice(cg, e.indexTarget[0]) {
+            base = emitSliceData(cg, target, leftType)
+        }
         gep := nextReg(cg)
-        emitfmt(cg, "  %s = getelementptr inbounds i8, i8* %s, i32 %s\n", []string{gep, target, idx})
+        emitfmt(cg, "  %s = getelementptr inbounds i8, i8* %s, i32 %s\n", []string{gep, base, idx})
         reg := nextReg(cg)
         emitfmt(cg, "  %s = load i8, i8* %s\n", []string{reg, gep})
         zext := nextReg(cg)
         emitfmt(cg, "  %s = zext i8 %s to i32\n", []string{zext, reg})
         return zext
     }
-    
+
     idx := emitExpression(cg, e.indexExpr[0])
     emitIndexBoundsCheck(cg, e.indexTarget[0], target, leftType, idx, e.indexExpr[0])
     idx = emitIndexAsI32(cg, idx, e.indexExpr[0])
     elemType := exprLLType(cg, e)
 
+    // Slice values are headers — the element base lives at h->data.
+    // Raw *T pointers index their pointee directly.
     actualBase := target
     elemPtrType := str.Concat(elemType, "*")
-    if !str.Equal(leftType, elemPtrType) {
+    if exprIsSlice(cg, e.indexTarget[0]) {
+        dataPtr := emitSliceData(cg, target, leftType)
+        actualBase = emitFromI8Ptr(cg, dataPtr, elemPtrType)
+    } else if !str.Equal(leftType, elemPtrType) {
         castReg := nextReg(cg)
         emitfmt(cg, "  %s = bitcast %s %s to %s*\n", []string{castReg, leftType, target, elemType})
         actualBase = castReg
@@ -10808,7 +10877,13 @@ fn emitArrayLiteral(cg: *CodeGen, e: ast.Expr) -> string {
         emitStore(cg, elemType, elemReg, elemType, elemPtr)
         i = i + 1
     }
-    return arrReg
+    // Wrap the backing array in a slice header: {data, len, cap, base}
+    // where data == base (a full slice owns its storage from index 0).
+    hdrReg := nextReg(cg)
+    nStr := strconv.Itoa(n)
+    emitfmt(cg, "  %s = call i8* @Skink_slice_hdr(i8* %s, i64 %s, i64 %s, i8* %s)\n",
+        []string{hdrReg, allocReg, nStr, nStr, allocReg})
+    return emitFromI8Ptr(cg, hdrReg, str.Concat(elemType, "*"))
 }
 
 // emitStructInitExpr handles struct literal expressions.
@@ -11007,40 +11082,34 @@ fn emitSliceExpr(cg: *CodeGen, e: ast.Expr) -> string {
         return newBuf
     }
 
-    // Array slicing. A slice expression with a nonzero lower bound produces
-    // a view — an interior pointer into the source's backing array,
-    // registered with the RC runtime (Skink_slice_view) so its length and
-    // its hold on the base are tracked. s[0:len] aliases the source
-    // directly; s[0:k] with k < len must copy: a view at offset 0 would
-    // share the base pointer and therefore the base's length slot at
-    // payload-8, so it could not carry its own length.
-    // Determine element type from the target type (e.g. "i32*" -> "i32")
+    // Array slicing. Under the fat-slice ABI (comp_error.md #114) every
+    // s[a:b] produces a new slice header sharing the source's backing
+    // store — including strict prefixes s[0:k], which the old thin-pointer
+    // representation had to copy because a view at offset 0 could not
+    // carry its own length. Skink_slice_sub is nil-safe: a nil source
+    // yields a nil view.
     elemType := targetType
-    if str.EndsWith(targetType, "*") && !str.EndsWith(targetType, "**") {
-        elemType = str.Substr(targetType, 0, str.Len(targetType) - 1)
-    } else if str.EndsWith(targetType, "**") {
-        // Slice of slices: element type is the single-pointer type
+    if str.EndsWith(targetType, "*") {
         elemType = str.Substr(targetType, 0, str.Len(targetType) - 1)
     }
 
-    // Source length via the runtime: handles nil (0) and view pointers.
-    rawPtr := nextReg(cg)
-    emitfmt(cg, "  %s = bitcast %s %s to i8*\n", []string{rawPtr, targetType, target})
+    rawPtr := emitI8Ptr(cg, target, targetType)
     srcLen64 := nextReg(cg)
     emitfmt(cg, "  %s = call i64 @Skink_slice_len(i8* %s)\n", []string{srcLen64, rawPtr})
     srcLen32 := nextReg(cg)
     emitfmt(cg, "  %s = trunc i64 %s to i32\n", []string{srcLen32, srcLen64})
 
-    // Determine low (default 0)
+    // Determine low (default 0). Slice bounds coerce like indices — an
+    // int64 bound must truncate to i32 for the bounds check and offset math.
     lowVal := "0"
     if len(e.sliceLow) > 0 {
-        lowVal = emitExpression(cg, e.sliceLow[0])
+        lowVal = emitIndexAsI32(cg, emitExpression(cg, e.sliceLow[0]), e.sliceLow[0])
     }
 
     // Determine high (default = srcLen)
     highVal := srcLen32
     if len(e.sliceHigh) > 0 {
-        highVal = emitExpression(cg, e.sliceHigh[0])
+        highVal = emitIndexAsI32(cg, emitExpression(cg, e.sliceHigh[0]), e.sliceHigh[0])
     }
 
     // Bounds check: panic on lo < 0, hi < lo, or hi > len.
@@ -11049,164 +11118,28 @@ fn emitSliceExpr(cg: *CodeGen, e: ast.Expr) -> string {
     // Compute slice length = high - low
     sliceLen := nextReg(cg)
     emitfmt(cg, "  %s = sub i32 %s, %s\n", []string{sliceLen, highVal, lowVal})
-
     sliceLen64 := nextReg(cg)
     emitfmt(cg, "  %s = zext i32 %s to i64\n", []string{sliceLen64, sliceLen})
 
-    // Three-way split on the lower bound:
-    //   low > 0               → view (interior pointer, RC-registered)
-    //   low == 0, high == len → identity (plain retain of the source)
-    //   low == 0, high < len  → copy (a prefix view could not carry its
-    //                           own length at payload-8)
-    viewMergeLabel := nextLabel(cg)
-    isLowZero := nextReg(cg)
-    emitfmt(cg, "  %s = icmp eq i32 %s, 0\n", []string{isLowZero, lowVal})
-    viewLabel := nextLabel(cg)
-    viewOkLabel := nextLabel(cg)
-    prefixLabel := nextLabel(cg)
-    identLabel := nextLabel(cg)
-    copyLabel := nextLabel(cg)
-    copyDoneLabel := nextLabel(cg)
-    emitCondBranch(cg, isLowZero, prefixLabel, viewLabel)
+    // View capacity = source capacity - low (the writable tail from data).
+    srcCap64 := nextReg(cg)
+    emitfmt(cg, "  %s = call i64 @Skink_slice_cap(i8* %s)\n", []string{srcCap64, rawPtr})
+    lowVal64 := nextReg(cg)
+    emitfmt(cg, "  %s = sext i32 %s to i64\n", []string{lowVal64, lowVal})
+    viewCap64 := nextReg(cg)
+    emitfmt(cg, "  %s = sub i64 %s, %s\n", []string{viewCap64, srcCap64, lowVal64})
 
-    emitLabel(cg, viewLabel)
-    viewSrc := target
-    if !str.Equal(targetType, str.Concat(elemType, "*")) {
-        viewSrc = nextReg(cg)
-        emitfmt(cg, "  %s = bitcast %s %s to %s*\n", []string{viewSrc, targetType, target, elemType})
-    }
-    viewElemPtr := nextReg(cg)
-    emitfmt(cg, "  %s = getelementptr inbounds %s, %s* %s, i32 %s\n", []string{viewElemPtr, elemType, elemType, viewSrc, lowVal})
-    viewI8 := nextReg(cg)
-    emitfmt(cg, "  %s = bitcast %s* %s to i8*\n", []string{viewI8, elemType, viewElemPtr})
-    // Skink_slice_view registers the view and returns it; it returns NULL
-    // when a live view already owns this interior pointer with a
-    // different length — the registry is keyed by the pointer, so a
-    // second length cannot coexist — and we copy instead.
-    viewOk := nextReg(cg)
-    emitfmt(cg, "  %s = call i8* @Skink_slice_view(i8* %s, i8* %s, i64 %s)\n", []string{viewOk, rawPtr, viewI8, sliceLen64})
-    viewOkCmp := nextReg(cg)
-    emitfmt(cg, "  %s = icmp ne i8* %s, null\n", []string{viewOkCmp, viewOk})
-    emitCondBranch(cg, viewOkCmp, viewOkLabel, copyLabel)
-
-    emitLabel(cg, viewOkLabel)
-    viewTyped := nextReg(cg)
-    emitfmt(cg, "  %s = bitcast i8* %s to %s\n", []string{viewTyped, viewOk, targetType})
-    emitBranch(cg, viewMergeLabel)
-
-    emitLabel(cg, prefixLabel)
-    isFullRange := nextReg(cg)
-    emitfmt(cg, "  %s = icmp eq i32 %s, %s\n", []string{isFullRange, highVal, srcLen32})
-    emitCondBranch(cg, isFullRange, identLabel, copyLabel)
-
-    emitLabel(cg, identLabel)
-    // The result owns a reference, matching the copy path's convention.
-    emitRetain(cg, target, targetType)
-    emitBranch(cg, viewMergeLabel)
-
-    emitLabel(cg, copyLabel)
-
-    // Compute allocation size: sliceLen * sizeof(elemType)
+    // Byte offset of the view's first element = low * sizeof(elem).
     elemSizeReg := emitElemSize(cg, elemType)
     elemSizeI64 := nextReg(cg)
     emitfmt(cg, "  %s = zext i32 %s to i64\n", []string{elemSizeI64, elemSizeReg})
-    nBytes := nextReg(cg)
-    emitfmt(cg, "  %s = mul i64 %s, %s\n", []string{nBytes, sliceLen64, elemSizeI64})
+    offBytes := nextReg(cg)
+    emitfmt(cg, "  %s = mul i64 %s, %s\n", []string{offBytes, lowVal64, elemSizeI64})
 
-    // Allocate new array with destructor if needed
-    arrDtorName := getOrCreateArrayDtor(cg, elemType)
-    newArr := nextReg(cg)
-    if str.Len(arrDtorName) > 0 {
-        arrDtorPtr := str.Concat("i8* bitcast (void (i8*)* @", str.Concat(arrDtorName, " to i8*)"))
-        emitfmt(cg, "  %s = call i8* @Skink_rc_alloc_typed(i64 %s, %s)\n", []string{newArr, nBytes, arrDtorPtr})
-    } else {
-        emitfmt(cg, "  %s = call i8* @Skink_rc_alloc(i64 %s)\n", []string{newArr, nBytes})
-    }
-
-    // Store the new length at offset -8
-    newLenPtr := nextReg(cg)
-    emitfmt(cg, "  %s = getelementptr inbounds i8, i8* %s, i64 -8\n", []string{newLenPtr, newArr})
-    newTypedLenPtr := nextReg(cg)
-    emitfmt(cg, "  %s = bitcast i8* %s to i64*\n", []string{newTypedLenPtr, newLenPtr})
-    emitfmt(cg, "  store i64 %s, i64* %s\n", []string{sliceLen64, newTypedLenPtr})
-
-    // Compute source element pointer: target + low
-    // Cast target to elemType* if needed, then GEP with low
-    srcElemPtr := nextReg(cg)
-    if str.Equal(targetType, str.Concat(elemType, "*")) {
-        emitfmt(cg, "  %s = getelementptr inbounds %s, %s* %s, i32 %s\n", []string{srcElemPtr, elemType, elemType, target, lowVal})
-    } else {
-        casted := nextReg(cg)
-        emitfmt(cg, "  %s = bitcast %s %s to %s*\n", []string{casted, targetType, target, elemType})
-        emitfmt(cg, "  %s = getelementptr inbounds %s, %s* %s, i32 %s\n", []string{srcElemPtr, elemType, elemType, casted, lowVal})
-    }
-
-    // Cast new array to elemType*
-    newArrTyped := nextReg(cg)
-    emitfmt(cg, "  %s = bitcast i8* %s to %s*\n", []string{newArrTyped, newArr, elemType})
-
-    // Copy elements using memcpy
-    emitfmt(cg, "  call void @llvm.memcpy.p0i8.p0i8.i64(i8* %s, i8* %s, i64 %s, i1 false)\n", []string{newArr, srcElemPtr, nBytes})
-
-    // If the element type is heap-reachable, retain each copied element so
-    // the new slice owns its own references. The source slice's destructor
-    // will release its copies when the source is freed.
-    if needsArrayDtor(cg, elemType) {
-        retainIdxAlloca := nextReg(cg)
-        emitfmt(cg, "  %s = alloca i64\n", []string{retainIdxAlloca})
-        emitfmt(cg, "  store i64 0, i64* %s\n", []string{retainIdxAlloca})
-        retCondLabel := nextLabel(cg)
-        retBodyLabel := nextLabel(cg)
-        retEndLabel := nextLabel(cg)
-        emitBranch(cg, retCondLabel)
-        emitLabel(cg, retCondLabel)
-        retIdx := nextReg(cg)
-        emitfmt(cg, "  %s = load i64, i64* %s\n", []string{retIdx, retainIdxAlloca})
-        retCmp := nextReg(cg)
-        emitfmt(cg, "  %s = icmp slt i64 %s, %s\n", []string{retCmp, retIdx, sliceLen64})
-        emitCondBranch(cg, retCmp, retBodyLabel, retEndLabel)
-        emitLabel(cg, retBodyLabel)
-        retElemAddr := nextReg(cg)
-        emitfmt(cg, "  %s = getelementptr %s, %s* %s, i64 %s\n", []string{retElemAddr, elemType, elemType, newArrTyped, retIdx})
-        if isHeapLLType(elemType) {
-            retElemVal := nextReg(cg)
-            emitfmt(cg, "  %s = load %s, %s* %s\n", []string{retElemVal, elemType, elemType, retElemAddr})
-            retElemRaw := nextReg(cg)
-            emitfmt(cg, "  %s = bitcast %s %s to i8*\n", []string{retElemRaw, elemType, retElemVal})
-            emitfmt(cg, "  call void @Skink_rc_retain(i8* %s)\n", []string{retElemRaw})
-        } else if isCompositeType(elemType) && !str.EndsWith(elemType, "*") {
-            // Struct-by-value: load, retain heap fields, store back
-            retElemVal := nextReg(cg)
-            emitfmt(cg, "  %s = load %s, %s* %s\n", []string{retElemVal, elemType, elemType, retElemAddr})
-            retained := emitRetainStructHeapFields(cg, retElemVal, elemType)
-            emitStore(cg, elemType, retained, elemType, retElemAddr)
-        }
-        retNextIdx := nextReg(cg)
-        emitfmt(cg, "  %s = add i64 %s, 1\n", []string{retNextIdx, retIdx})
-        emitfmt(cg, "  store i64 %s, i64* %s\n", []string{retNextIdx, retainIdxAlloca})
-        emitBranch(cg, retCondLabel)
-        emitLabel(cg, retEndLabel)
-    }
-
-    // Copy result: same LLVM type as the original target.
-    copyResult := newArrTyped
-    if !str.Equal(targetType, str.Concat(elemType, "*")) {
-        // For double-pointer (slice of slices), cast back
-        copyResult = nextReg(cg)
-        emitfmt(cg, "  %s = bitcast %s* %s to %s\n", []string{copyResult, elemType, newArrTyped, targetType})
-    }
-    // The element-retain loop above may have been the last block; route
-    // through a dedicated done-block so the merge phi has one stable
-    // predecessor for the copy path.
-    emitBranch(cg, copyDoneLabel)
-    emitLabel(cg, copyDoneLabel)
-    emitBranch(cg, viewMergeLabel)
-
-    emitLabel(cg, viewMergeLabel)
-    resultReg := nextReg(cg)
-    emitfmt(cg, "  %s = phi %s [%s, %s], [%s, %s], [%s, %s]\n",
-            []string{resultReg, targetType, viewTyped, str.Concat("%", viewOkLabel), target, str.Concat("%", identLabel), copyResult, str.Concat("%", copyDoneLabel)})
-    return resultReg
+    newHdr := nextReg(cg)
+    emitfmt(cg, "  %s = call i8* @Skink_slice_sub(i8* %s, i64 %s, i64 %s, i64 %s)\n",
+            []string{newHdr, rawPtr, offBytes, sliceLen64, viewCap64})
+    return emitFromI8Ptr(cg, newHdr, targetType)
 }
 
 // emitMakeExpr handles make() expressions.
@@ -11301,7 +11234,9 @@ fn emitMakeExpr(cg: *CodeGen, e: ast.Expr) -> string {
             emitfmt(cg, "  %s = call i8* @Skink_rc_alloc(i64 %s)\n", []string{rawReg, bytes64})
         }
 
-        // Store the slice length at payload - 8 (RC header size field)
+        // Store the backing capacity at payload - 8 (the array destructor
+        // scans that many slots; unwritten slots are zeroed and release to
+        // no-ops).
         nReg64 := nextReg(cg)
         emitfmt(cg, "  %s = zext i32 %s to i64\n", []string{nReg64, nReg})
         lenPtr := nextReg(cg)
@@ -11310,9 +11245,11 @@ fn emitMakeExpr(cg: *CodeGen, e: ast.Expr) -> string {
         emitfmt(cg, "  %s = bitcast i8* %s to i64*\n", []string{typedLenPtr, lenPtr})
         emitfmt(cg, "  store i64 %s, i64* %s\n", []string{nReg64, typedLenPtr})
 
-        typedReg := nextReg(cg)
-        emitfmt(cg, "  %s = bitcast i8* %s to %s*\n", []string{typedReg, rawReg, elemLL})
-        return typedReg
+        // Wrap the backing array in a slice header {data, len, cap, base}.
+        hdrReg := nextReg(cg)
+        emitfmt(cg, "  %s = call i8* @Skink_slice_hdr(i8* %s, i64 %s, i64 %s, i8* %s)\n",
+            []string{hdrReg, rawReg, nReg64, nReg64, rawReg})
+        return emitFromI8Ptr(cg, hdrReg, str.Concat(elemLL, "*"))
     }
     
     return "null"
@@ -12460,10 +12397,15 @@ fn emitIndexAssignment(cg: *CodeGen, target: ast.Expr, valReg: string, valType: 
 
     // String byte assignment: string is i8*, element is i8 (not i32).
     // exprIndexLLType returns i32 for reads (zero-extended byte), but
-    // for writes we must store a single byte.
+    // for writes we must store a single byte. Byte slices share the i8*
+    // LLVM type but are slice headers — unwrap the data pointer first.
     if str.Equal(leftType, "i8*") {
         emitIndexBoundsCheck(cg, arrExpr, arrReg, leftType, idxReg, idxExpr)
         idxReg = emitIndexAsI32(cg, idxReg, idxExpr)
+        base := arrReg
+        if exprIsByteSlice(cg, arrExpr) {
+            base = emitSliceData(cg, arrReg, leftType)
+        }
         // Truncate value to i8 (skip if already i8)
         truncReg := valReg
         if !str.Equal(valType, "i8") {
@@ -12473,7 +12415,7 @@ fn emitIndexAssignment(cg: *CodeGen, target: ast.Expr, valReg: string, valType: 
         // GEP as i8* (1 byte per element)
         indices := []string{}
         indices = append(indices, idxReg)
-        elemPtr := emitGEP(cg, "i8", "i8", arrReg, indices)
+        elemPtr := emitGEP(cg, "i8", "i8", base, indices)
         if !str.Equal(op, "=") {
             oldVal := emitLoad(cg, "i8", "i8", elemPtr)
             extOld := nextReg(cg)
@@ -12492,9 +12434,13 @@ fn emitIndexAssignment(cg: *CodeGen, target: ast.Expr, valReg: string, valType: 
 
     emitIndexBoundsCheck(cg, arrExpr, arrReg, leftType, idxReg, idxExpr)
     idxReg = emitIndexAsI32(cg, idxReg, idxExpr)
+    // Slice values are headers — the element base lives at h->data.
     actualBase := arrReg
     elemPtrType := str.Concat(elemType, "*")
-    if !str.Equal(leftType, elemPtrType) {
+    if exprIsSlice(cg, arrExpr) {
+        dataPtr := emitSliceData(cg, arrReg, leftType)
+        actualBase = emitFromI8Ptr(cg, dataPtr, elemPtrType)
+    } else if !str.Equal(leftType, elemPtrType) {
         castReg := nextReg(cg)
         emitfmt(cg, "  %s = bitcast %s %s to %s*\n", []string{castReg, leftType, arrReg, elemType})
         actualBase = castReg
@@ -13653,16 +13599,7 @@ fn emitForInStmt(cg: *CodeGen, stmt: ast.Stmt) {
         // Array: element count via Skink_slice_len — nil-safe (a nil slice
         // iterates zero times, comp_error.md #69) and view-aware, since a
         // view's length is not stored at payload-8.
-        castReg := nextReg(cg)
-        parts := []string{}
-        parts = append(parts, "  ")
-        parts = append(parts, castReg)
-        parts = append(parts, " = bitcast ")
-        parts = append(parts, iterType)
-        parts = append(parts, " ")
-        parts = append(parts, iterable)
-        parts = append(parts, " to i8*")
-        emitln(cg, concatMany(parts))
+        castReg := emitI8Ptr(cg, iterable, iterType)
         parts2 := []string{}
         parts2 = append(parts2, "  ")
         parts2 = append(parts2, lenReg)
@@ -13675,6 +13612,14 @@ fn emitForInStmt(cg: *CodeGen, stmt: ast.Stmt) {
     // Allocate loop counter and iter variable
     iAlloca := emitAlloca(cg, "i32")
     emitStore(cg, "i32", "0", "i32", iAlloca)
+
+    // Under the fat-slice ABI a slice iterable register is a header; unwrap
+    // its element base pointer once before the loop. Strings stay raw.
+    iterData := iterable
+    if exprIsSlice(cg, iterExpr) || (str.Equal(iterType, "i8*") && exprIsByteSlice(cg, iterExpr)) {
+        dataPtr := emitSliceData(cg, iterable, iterType)
+        iterData = emitFromI8Ptr(cg, dataPtr, iterType)
+    }
 
     elemType := exprLLType(cg, iterExpr)
     // For arrays/slices, iterType is a pointer (e.g., "i32*"); strip the * to get element type
@@ -13728,7 +13673,7 @@ fn emitForInStmt(cg: *CodeGen, stmt: ast.Stmt) {
     // Load element: iterVar = iterable[i]
     indices := []string{}
     indices = append(indices, iVal)
-    elemPtr := emitGEP(cg, elemType, str.Concat(elemType, "*"), iterable, indices)
+    elemPtr := emitGEP(cg, elemType, str.Concat(elemType, "*"), iterData, indices)
     elemVal := emitLoad(cg, elemType, elemType, elemPtr)
     // The element is borrowed from the collection; the loop variable
     // (scope-tracked) takes its own reference.
@@ -15845,10 +15790,17 @@ fn emitRuntimeMain(cg: *CodeGen, decls: []ast.Stmt) {
     emitln(cg, "  ret i32 %r\n")
     emitln(cg, "}\n")
 
+    // Wrap argv in a slice header: the C storage is foreign (not RC-owned),
+    // so the header's base is NULL and it releases nothing when freed.
     emitln(cg, "define i8** @_skink_runtime_get_argv() {\n")
     emitln(cg, "entry:\n")
     emitln(cg, "  %r = load i8**, i8*** @skink_argv\n")
-    emitln(cg, "  ret i8** %r\n")
+    emitln(cg, "  %n = load i32, i32* @skink_argc\n")
+    emitln(cg, "  %n64 = sext i32 %n to i64\n")
+    emitln(cg, "  %d = bitcast i8** %r to i8*\n")
+    emitln(cg, "  %h = call i8* @Skink_slice_hdr(i8* %d, i64 %n64, i64 %n64, i8* null)\n")
+    emitln(cg, "  %t = bitcast i8* %h to i8**\n")
+    emitln(cg, "  ret i8** %t\n")
     emitln(cg, "}\n")
 
     // Emit global init function (initializes module-level vars with initializers)
@@ -15949,7 +15901,18 @@ fn emitRuntimeDecls(cg: *CodeGen) {
     emitHeader(cg, "declare i64 @Skink_rc_count(i8*)\n")
     emitHeader(cg, "declare i8* @Skink_slice_ensure(i8*, i64)\n")
     emitHeader(cg, "declare i64 @Skink_slice_len(i8*)\n")
-    emitHeader(cg, "declare i8* @Skink_slice_view(i8*, i8*, i64)\n")
+    emitHeader(cg, "declare i64 @Skink_slice_cap(i8*)\n")
+    emitHeader(cg, "declare i8* @Skink_slice_data(i8*)\n")
+    emitHeader(cg, "declare i8* @Skink_slice_base(i8*)\n")
+    emitHeader(cg, "declare i8* @Skink_slice_hdr(i8*, i64, i64, i8*)\n")
+    emitHeader(cg, "declare i8* @Skink_slice_sub(i8*, i64, i64, i64)\n")
+    emitHeader(cg, "declare i8* @Skink_str_from_slice(i8*)\n")
+    emitHeader(cg, "declare i64 @Skink_arr_count(i8*)\n")
+    emitHeader(cg, "declare i64 @Skink_rc_capacity(i8*)\n")
+    // The slice-header struct type mirrors SkinkSliceHdr in rc_rt.c:
+    // { i8* data, i64 len, i64 cap, i8* base }. Slice VALUES are headers;
+    // emitted code unwraps data/cap/base only at element-access sites.
+    emitHeader(cg, "%hdr.slice = type { i8*, i64, i64, i8* }\n")
     emitHeader(cg, "declare i32 @Skink_str_hash(i8*)\n")
     emitHeader(cg, "declare void @Skink_panic(i8*)\n")
     emitHeader(cg, "declare void @Skink_bounds_check(i32, i32, i32)\n")
@@ -15981,7 +15944,9 @@ fn emitRuntimeDecls(cg: *CodeGen) {
         "Skink_rc_alloc", "Skink_rc_alloc_typed", "Skink_rc_retain",
         "Skink_rc_release", "Skink_rc_release_ptr", "Skink_array_dtor_sized",
         "Skink_rc_count", "Skink_slice_ensure",
-        "Skink_slice_len", "Skink_slice_view",
+        "Skink_slice_len", "Skink_slice_cap", "Skink_slice_data",
+        "Skink_slice_base", "Skink_slice_hdr", "Skink_slice_sub",
+        "Skink_str_from_slice", "Skink_arr_count", "Skink_rc_capacity",
         "Skink_panic", "Skink_bounds_check", "setjmp",
         "Skink_panic_push_handler", "Skink_panic_pop_handler",
         "Skink_panic_pending", "Skink_panic_recover", "Skink_panic_reraise",

@@ -304,3 +304,39 @@ pub fn TestFailNowExists() {
         FailNow()
     }
 }
+
+// CycleNode is a linked-node fixture used to exercise RC cycle detection.
+struct CycleNode {
+    id:   int
+    next: *CycleNode
+}
+
+// TestDetectCycles verifies that testing.DetectCycles reports 0 for acyclic
+// object graphs, detects both 1-node self-cycles and 2-node mutual cycles,
+// and returns to baseline once the cycle edge is cleared.
+pub fn TestDetectCycles() {
+    Reset()
+    base := int(DetectCycles())
+
+    // Acyclic chain a -> b: 0 cyclic objects.
+    a := CycleNode{id: 1, next: nil}
+    b := CycleNode{id: 2, next: nil}
+    pa := &a
+    pb := &b
+    pa.next = pb
+    AssertEqualInt(base, int(DetectCycles()), "acyclic chain has 0 cycles")
+
+    // 2-node mutual cycle a <-> b: 2 cyclic objects.
+    pb.next = pa
+    AssertEqualInt(base + 2, int(DetectCycles()), "2-node mutual cycle detected")
+
+    // Break the mutual cycle and form a 1-node self-cycle a -> a.
+    pb.next = nil
+    AssertEqualInt(base, int(DetectCycles()), "broken mutual cycle returns to 0")
+    pa.next = pa
+    AssertEqualInt(base + 1, int(DetectCycles()), "1-node self-cycle detected")
+
+    // Break the self-cycle so the nodes are cleanly reclaimed on scope exit.
+    pa.next = nil
+    AssertEqualInt(base, int(DetectCycles()), "broken self-cycle returns to 0")
+}

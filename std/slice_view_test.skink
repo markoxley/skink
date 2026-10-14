@@ -5,11 +5,11 @@
 //          modern ergonomics and a Go-inspired syntax.
 //
 // File:    std/slice_view_test.skink
-// Purpose: Regression tests for slice-view semantics. s[a:b] with a > 0
-//          produces an interior-pointer view registered with the RC
-//          runtime (kind-3 entry); s[0:len] aliases the source; s[0:k]
-//          with k < len copies (a thin prefix pointer cannot carry its
-//          own length at payload-8 — documented limitation).
+// Purpose: Regression tests for slice-view semantics under the fat-slice
+//          header ABI (comp_error.md #114). Every s[a:b] — including
+//          strict prefixes s[0:k] and multiple live views sharing the
+//          same start offset with different lengths — produces an
+//          independent slice header sharing the backing allocation.
 // Author:  Mark Oxley
 // Created: 2026
 //
@@ -115,15 +115,96 @@ pub fn TestFullRangeSliceAliases() {
     testing.AssertEqualInt(42, s[0], "full-range slice aliases source")
 }
 
-// TestPrefixSliceIsCopy verifies s[0:k] (k < len) does NOT alias: a
-// thin prefix pointer cannot carry its own length at payload-8, so the
-// emitter materialises a copy — a documented limitation of the ABI.
-pub fn TestPrefixSliceIsCopy() {
+// TestPrefixSliceAliasesSource verifies s[0:k] (k < len) is a genuine
+// view that aliases the source while reporting its own length k
+// (comp_error.md #114).
+pub fn TestPrefixSliceAliasesSource() {
     s := []int{1, 2, 3, 4}
     p := s[0:2]
     testing.AssertEqualInt(2, len(p), "prefix len")
+    testing.AssertEqualInt(4, len(s), "source len unchanged while prefix view is live")
     p[0] = 99
-    testing.AssertEqualInt(1, s[0], "prefix copy does not alias source")
+    p[1] = 88
+    testing.AssertEqualInt(99, s[0], "prefix write p[0] aliases s[0]")
+    testing.AssertEqualInt(88, s[1], "prefix write p[1] aliases s[1]")
+    s[0] = 77
+    testing.AssertEqualInt(77, p[0], "source write s[0] visible in prefix view")
+}
+
+// TestSameOffsetViewsDifferentLengths verifies two simultaneously-live
+// views starting at the same element offset (both offset 0 and interior
+// offset > 0) carry independent lengths while sharing backing storage
+// (comp_error.md #114).
+pub fn TestSameOffsetViewsDifferentLengths() {
+    s := []int{10, 20, 30, 40, 50}
+    v1 := s[1:3]
+    v2 := s[1:5]
+    p1 := s[0:2]
+    p2 := s[0:4]
+    testing.AssertEqualInt(2, len(v1), "v1 len")
+    testing.AssertEqualInt(4, len(v2), "v2 len")
+    testing.AssertEqualInt(2, len(p1), "p1 len")
+    testing.AssertEqualInt(4, len(p2), "p2 len")
+    testing.AssertEqualInt(5, len(s), "s len")
+    v2[0] = 222
+    testing.AssertEqualInt(222, v1[0], "v2[0] write visible in same-offset v1[0]")
+    testing.AssertEqualInt(222, p1[1], "v2[0] write visible in p1[1]")
+    testing.AssertEqualInt(222, s[1], "v2[0] write visible in s[1]")
+    p2[3] = 444
+    testing.AssertEqualInt(444, v2[2], "p2[3] write visible in v2[2]")
+    testing.AssertEqualInt(444, s[3], "p2[3] write visible in s[3]")
+}
+
+// TestNestedPrefixViewAliases verifies taking a prefix view of an interior
+// view (v := s[1:4]; p := v[0:2]) preserves shared backing storage and
+// reports independent lengths for s, v, and p (comp_error.md #114).
+pub fn TestNestedPrefixViewAliases() {
+    s := []int{1, 2, 3, 4, 5}
+    v := s[1:4]
+    p := v[0:2]
+    testing.AssertEqualInt(5, len(s), "base len")
+    testing.AssertEqualInt(3, len(v), "outer view len")
+    testing.AssertEqualInt(2, len(p), "nested prefix view len")
+    p[1] = 333
+    testing.AssertEqualInt(333, v[1], "nested prefix write visible in outer view")
+    testing.AssertEqualInt(333, s[2], "nested prefix write visible in base")
+}
+
+// TestByteSliceViewAliases verifies []uint8 views (both prefix and
+// interior) share backing storage, report independent lengths, and
+// iterate/format through the slice header (comp_error.md #114).
+pub fn TestByteSliceViewAliases() {
+    b := []uint8{uint8(10), uint8(20), uint8(30), uint8(40), uint8(50)}
+    sub := b[1:4]
+    pref := b[0:2]
+    testing.AssertEqualInt(3, len(sub), "byte subslice len")
+    testing.AssertEqualInt(2, len(pref), "byte prefix len")
+    sub[0] = uint8(99)
+    testing.AssertEqualInt(99, int(pref[1]), "byte sub[0] write visible in pref[1]")
+    testing.AssertEqualInt(99, int(b[1]), "byte sub[0] write visible in b[1]")
+    sum := 0
+    for x in sub {
+        sum = sum + int(x)
+    }
+    testing.AssertEqualInt(169, sum, "for-in over []uint8 view (99+30+40)")
+}
+
+// TestAddrOfViewElement verifies &v[i] on a slice view (both prefix and
+// interior) addresses the element inside the shared backing array rather
+// than the slice header (comp_error.md #114).
+pub fn TestAddrOfViewElement() {
+    s := []int{10, 20, 30, 40}
+    v := s[1:4]
+    p := s[0:2]
+    pv := &v[1]
+    *pv = 300
+    testing.AssertEqualInt(300, s[2], "write through &v[1] reaches s[2]")
+    pp := &p[1]
+    *pp = 200
+    testing.AssertEqualInt(200, v[0], "write through &p[1] reaches v[0]")
+    testing.AssertEqualInt(200, s[1], "write through &p[1] reaches s[1]")
+    testing.AssertEqualInt(40, v[^1], "from-end v[^1] on interior view")
+    testing.AssertEqualInt(200, p[^1], "from-end p[^1] on prefix view")
 }
 
 // TestAppendToViewDoesNotCorrupt verifies appending a view produces a

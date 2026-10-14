@@ -35,6 +35,7 @@ typedef int64_t atomic_int_fast64_t;
 #else
 #include <stdatomic.h>
 #endif
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -759,6 +760,9 @@ void *Skink_slice_ensure(void *ptr, int64_t needBytes) {
     return NULL;
   }
   void *newpayload = (char *)newraw + RC_PREFIX_SIZE;
+  if (newBytes > oldBytes) {
+    memset((char *)newpayload + oldBytes, 0, (size_t)(newBytes - oldBytes));
+  }
   RCHeader *h = (RCHeader *)newraw;
   // The header (count, magic, and the size field which carries the slice's
   // element count) was copied by realloc — reassert magic defensively but
@@ -914,31 +918,48 @@ int64_t Skink_rc_count(void *ptr) {
 
 // === Slice views ===
 //
-// A slice expression s[a:b] with a > 0 produces a view: an interior
-// pointer into the source's backing array, registered here as a kind-3
-// entry. The entry carries the view's element length (in `size`, since
-// `ptr - 8` is parent data and cannot store it) and its own refcount.
-// One reference on the backing array is held for the entry's lifetime,
-// so a view can never dangle even if the original slice is appended
-// (which then sees refcount > 1 and copies) or released.
+// Views are ordinary slice headers sharing a backing allocation — see
+// "Slice headers" below. Kind-3 registry entries are legacy: nothing
+// creates them any more, but the release/count paths still honour them so
+// stale entries remain harmless.
 //
-// s[0:k] is the exception: a view starting at offset 0 would share the
-// base pointer and therefore the base's length slot, so it cannot carry
-// a distinct length — the emitter emits a copy for strict prefixes, and
-// identity for s[0:len].
+// === Slice headers (fat-slice ABI, comp_error.md #114) ===
+//
+// A Skink slice value is a pointer to an SkinkSliceHdr — a small RC-managed
+// record carrying the element base pointer, element length, element
+// capacity, and a reference to the backing allocation. Every slice value
+// flows through a header, so views are independent objects: s[0:k] and two
+// same-offset views s[i:j]/s[i:k] each carry their own length, and a view
+// keeps the backing alive via `base` regardless of the parent's fate.
+// (The thin-pointer representation could not express same-base views —
+// its length slot lived at payload-8 of the backing block, shared by all
+// aliases with that pointer value.)
+//
+// The backing allocation is an ordinary RC payload (kind 0). Its payload-8
+// slot stores the element CAPACITY for destructor scans (all allocated
+// slots; unwritten slots are zeroed by rc_alloc and release to no-ops).
+// Backing arrays are only reachable through headers — they are never slice
+// values themselves.
+
+// === Legacy thin-pointer slice views (kind 3 registry) ===
+//
+// The pre-fat-slice ABI represented a slice as a bare element pointer, so a
+// non-zero-offset view s[i:j] needed a registry entry to carry its own
+// length (the pointer could not). Bootstrap stage-0 binaries still emit
+// calls to Skink_slice_view, so it must remain for bootstrap-home/runtime
+// to keep building stage-1. New-ABI code never calls it — views are
+// headers via Skink_slice_sub — but the kind-3 machinery also stays live in
+// retain/release/count so stage-0-emitted code keeps working.
+//
+// s[0:k] is the exception that motivated the ABI change (comp_error.md
+// #114): a view starting at offset 0 shares the base pointer and cannot
+// carry a distinct length. Only headers can express that.
 
 // Skink_slice_view registers view_ptr as a view of src (or its ultimate
 // base when src is itself a view) with the given element length, and
-// returns the pointer the caller should use as the slice value.
-//
-// A thin-pointer view cannot carry its own length — the registry entry
-// is keyed by view_ptr, so two simultaneously-live views of the SAME
-// interior pointer can only ever report one length. s[i:j] and s[i:k]
-// with j != k collide that way; when the existing entry's length differs
-// this function returns NULL instead of registering a wrong-len view,
-// and the emitter falls back to a copy for that expression. Kind 0/1/2
-// collisions cannot happen for a strictly interior pointer into a live
-// allocation; they are treated as no-ops defensively.
+// returns the pointer the caller should use as the slice value. NULL means
+// "fall back to a copy" — the registry can only carry one length per
+// interior pointer.
 void *Skink_slice_view(void *src, void *view_ptr, int64_t len) {
   if (!src || !view_ptr)
     return NULL;
@@ -970,11 +991,81 @@ void *Skink_slice_view(void *src, void *view_ptr, int64_t len) {
   return view_ptr;
 }
 
-// Skink_slice_len returns a slice's element count. For view pointers the
-// length comes from the kind-3 registry entry; for everything else it is
-// the conventional count stored at payload-8 (also correct for untracked
-// pointers that still carry the header slot). NULL yields 0, so emitted
-// code needs no nil check.
+// === Fat-slice headers (comp_error.md #114) ===
+//
+// Under the current ABI a slice value points to an RC-managed header
+// instead of the elements themselves. The header carries the slice's own
+// data/len/cap plus the backing allocation it holds a reference on, so any
+// number of views — including same-offset views with different lengths —
+// coexist with independent lengths and shared aliasing.
+
+typedef struct {
+  void   *data;  // first visible element (== base for full slices)
+  int64_t len;   // element count visible through this slice
+  int64_t cap;   // elements writable from data before a grow is needed
+  void   *base;  // RC payload owning the backing store; NULL = foreign data
+} SkinkSliceHdr;
+
+// Skink_slicehdr_dtor releases the backing allocation when the last header
+// referencing it dies.
+void Skink_slicehdr_dtor(void *p) {
+  SkinkSliceHdr *h = (SkinkSliceHdr *)p;
+  if (h && h->base)
+    Skink_rc_release(h->base);
+}
+
+// Skink_slice_hdr allocates a slice header describing (data, len, cap)
+// over a freshly-allocated backing allocation `base`. Ownership of the
+// caller's reference on `base` (refcount == 1 from Skink_rc_alloc*)
+// transfers to the header and is released by Skink_slicehdr_dtor when the
+// header dies. Pass NULL for foreign/borrowed storage such as argv — such
+// a header releases nothing when it dies.
+void *Skink_slice_hdr(void *data, int64_t len, int64_t cap, void *base) {
+  SkinkSliceHdr *h = (SkinkSliceHdr *)Skink_rc_alloc_typed(
+      (int64_t)sizeof(SkinkSliceHdr), Skink_slicehdr_dtor);
+  if (!h) {
+    if (base)
+      Skink_rc_release(base);
+    return NULL;
+  }
+  h->data = data;
+  h->len = len;
+  h->cap = cap;
+  h->base = base;
+  return h;
+}
+
+// Skink_slice_sub produces a view of an existing slice: a fresh header
+// sharing the source's backing store. offBytes is the byte offset of the
+// view's first element from src->data; len is the view's element count.
+// Views carry cap = -1 so append() always copies a view into its own
+// backing store rather than overwriting elements of the parent slice.
+// Retains s->base so the new view header owns its own reference to the
+// shared backing allocation. NULL src yields NULL.
+void *Skink_slice_sub(void *src, int64_t offBytes, int64_t len, int64_t cap) {
+  (void)cap;
+  if (!src)
+    return NULL;
+  SkinkSliceHdr *s = (SkinkSliceHdr *)src;
+  if (s->base)
+    Skink_rc_retain(s->base);
+  return Skink_slice_hdr((char *)s->data + offBytes, len, -1, s->base);
+}
+
+// Field readers — all NULL-safe so emitted code needs no nil check.
+//
+// These are dual-mode during the ABI transition: a slice value is a header
+// iff its registry entry is a kind-0 block whose destructor is
+// Skink_slicehdr_dtor (the only allocation made with it). Everything else
+// follows the legacy thin-pointer rules, so programs emitted by stage-0
+// binaries — raw backing pointers and kind-3 view pointers — keep working:
+// len reads payload-8 (or the view registry), data/base are the pointer
+// itself (or the view's owning base), cap is unknown (0 → callers copy).
+static int rc_is_slice_hdr(void *p) {
+  RCEntry *e = rc_table_find(p);
+  return e != NULL && e->kind == 0 && e->dtor == Skink_slicehdr_dtor;
+}
+
 int64_t Skink_slice_len(void *ptr) {
   if (!ptr)
     return 0;
@@ -982,11 +1073,99 @@ int64_t Skink_slice_len(void *ptr) {
   RCEntry *e = rc_table_find(ptr);
   int64_t n = -1;
   if (e != NULL && e->kind == 3)
-    n = e->size;
+    n = e->size;                       // legacy view: registry carries len
+  else if (e != NULL && e->kind == 0 && e->dtor == Skink_slicehdr_dtor)
+    n = ((SkinkSliceHdr *)ptr)->len;   // fat-slice header
   pthread_rwlock_unlock(&rc_lock);
   if (n >= 0)
     return n;
+  // Legacy raw backing array: count lives at payload-8.
   return *((int64_t *)((char *)ptr - 8));
+}
+
+int64_t Skink_slice_cap(void *h) {
+  if (!h)
+    return 0;
+  pthread_rwlock_rdlock(&rc_lock);
+  int isHdr = rc_is_slice_hdr(h);
+  pthread_rwlock_unlock(&rc_lock);
+  return isHdr ? ((SkinkSliceHdr *)h)->cap : 0;
+}
+
+// Skink_slice_data unwraps a header to its element base. Legacy callers
+// (raw backing or kind-3 view pointers) get their pointer back unchanged —
+// under the old ABI the value WAS the data pointer — which keeps
+// runtime-shared C consumers like tensor_rt.c correct under both ABIs.
+void *Skink_slice_data(void *h) {
+  if (!h)
+    return NULL;
+  pthread_rwlock_rdlock(&rc_lock);
+  int isHdr = rc_is_slice_hdr(h);
+  pthread_rwlock_unlock(&rc_lock);
+  return isHdr ? ((SkinkSliceHdr *)h)->data : h;
+}
+
+// Skink_slice_base returns the RC payload owning the backing store: the
+// header's base, a kind-3 view's owning base, or the pointer itself for a
+// legacy raw array. Untracked/foreign pointers return NULL.
+void *Skink_slice_base(void *h) {
+  if (!h)
+    return NULL;
+  void *base = NULL;
+  pthread_rwlock_rdlock(&rc_lock);
+  RCEntry *e = rc_table_find(h);
+  if (e != NULL) {
+    if (e->kind == 3)
+      base = e->view_base;
+    else if (e->kind == 0)
+      base = (e->dtor == Skink_slicehdr_dtor) ? ((SkinkSliceHdr *)h)->base : h;
+  }
+  pthread_rwlock_unlock(&rc_lock);
+  return base;
+}
+
+// Skink_arr_count reads the element-count slot at payload-8 of a raw
+// backing array — the convention used by map/set internal arrays, which
+// are plain allocations without a slice header.
+int64_t Skink_arr_count(void *p) {
+  return p ? *((int64_t *)((char *)p - 8)) : 0;
+}
+
+// Skink_rc_capacity returns the byte capacity recorded in the RC table for
+// a kind-0 block — e.g. the grown size after Skink_slice_ensure reallocates
+// a slice backing array. Untracked/foreign pointers yield 0.
+int64_t Skink_rc_capacity(void *ptr) {
+  if (!ptr)
+    return 0;
+  pthread_rwlock_rdlock(&rc_lock);
+  RCEntry *e = rc_table_find(ptr);
+  int64_t sz = (e != NULL && e->kind == 0) ? e->size : 0;
+  pthread_rwlock_unlock(&rc_lock);
+  return sz;
+}
+
+// Skink_slice_wrap_raw wraps foreign (non-RC) storage in a slice header —
+// e.g. argv. The header's base is NULL so nothing is ever freed.
+void *Skink_slice_wrap_raw(void *data, int64_t len, int64_t cap) {
+  return Skink_slice_hdr(data, len, cap, NULL);
+}
+
+// Skink_str_from_slice materializes a byte slice ([]uint8/[]int8) as a
+// NUL-terminated RC string: alloc len+1, copy h->data, append 0. A slice
+// header is not itself a string — the data it wraps is not NUL-terminated
+// in general — so string(b) must copy. NULL slice yields NULL.
+void *Skink_str_from_slice(void *h) {
+  if (!h)
+    return NULL;
+  int64_t n = Skink_slice_len(h);
+  char *d = (char *)Skink_slice_data(h);
+  char *s = (char *)Skink_rc_alloc(n + 1);
+  if (!s)
+    return NULL;
+  if (n > 0 && d)
+    memcpy(s, d, (size_t)n);
+  s[n] = '\0';
+  return s;
 }
 
 // Skink_rc_live_bytes returns the total bytes currently allocated by the RC runtime.
@@ -997,3 +1176,298 @@ int64_t Skink_rc_peak_bytes(void) { return atomic_load(&rc_peak_bytes); }
 
 // Skink_rc_live_objects returns the number of RC-managed objects currently alive.
 int64_t Skink_rc_live_objects(void) { return atomic_load(&rc_live_objects); }
+
+// === Debug-Mode Reference Cycle Detection ===
+//
+// Because rc_table records every live kind-0 RC payload pointer along with
+// its byte size and destructor, we can reconstruct the exact directed
+// reference graph among live composite RC objects (those with dtor != NULL,
+// i.e. heap structs, boxed variables, slice headers, typed slice backing
+// arrays, template boxes, and closure environments) and run Tarjan's
+// strongly-connected-components (SCC) algorithm in O(V + E) time.
+//
+// Any SCC with > 1 vertex, or 1 vertex with a self-edge, is a live reference
+// cycle that pure reference counting will never reclaim unless broken.
+
+static int rc_find_vertex_idx(void **keys, int *bucket_head, int *bucket_next,
+                              int mask, void *ptr) {
+  if (!ptr)
+    return -1;
+  uint64_t h = ((uint64_t)(uintptr_t)ptr >> 3) * 0x9E3779B97F4A7C15ULL;
+  int b = (int)(h & (uint64_t)mask);
+  for (int idx = bucket_head[b]; idx != -1; idx = bucket_next[idx]) {
+    if (keys[idx] == ptr)
+      return idx;
+  }
+  return -1;
+}
+
+static int64_t rc_scan_cycles_impl(int report) {
+  pthread_rwlock_rdlock(&rc_lock);
+  if (!rc_table || rc_table_cap == 0) {
+    pthread_rwlock_unlock(&rc_lock);
+    if (report)
+      fprintf(stderr, "[skink-rc] cycle detector: 0 cyclic objects found\n");
+    return 0;
+  }
+
+  int n = 0;
+  for (size_t i = 0; i < rc_table_cap; i++) {
+    if (rc_table[i].key != NULL && rc_table[i].kind == 0 &&
+        rc_table[i].dtor != NULL) {
+      n++;
+    }
+  }
+  if (n == 0) {
+    pthread_rwlock_unlock(&rc_lock);
+    if (report)
+      fprintf(stderr, "[skink-rc] cycle detector: 0 cyclic objects found\n");
+    return 0;
+  }
+
+  int hash_cap = 16;
+  while (hash_cap < n * 2)
+    hash_cap <<= 1;
+  int hash_mask = hash_cap - 1;
+
+  void **keys = (void **)calloc((size_t)n, sizeof(void *));
+  int64_t *sizes = (int64_t *)calloc((size_t)n, sizeof(int64_t));
+  SkinkDtor *dtors = (SkinkDtor *)calloc((size_t)n, sizeof(SkinkDtor));
+  int64_t *rcs = (int64_t *)calloc((size_t)n, sizeof(int64_t));
+  int *bucket_head = (int *)malloc((size_t)hash_cap * sizeof(int));
+  int *bucket_next = (int *)malloc((size_t)n * sizeof(int));
+  if (!keys || !sizes || !dtors || !rcs || !bucket_head || !bucket_next) {
+    pthread_rwlock_unlock(&rc_lock);
+    free(keys);
+    free(sizes);
+    free(dtors);
+    free(rcs);
+    free(bucket_head);
+    free(bucket_next);
+    return 0;
+  }
+  memset(bucket_head, -1, (size_t)hash_cap * sizeof(int));
+
+  int idx = 0;
+  for (size_t i = 0; i < rc_table_cap; i++) {
+    if (rc_table[i].key != NULL && rc_table[i].kind == 0 &&
+        rc_table[i].dtor != NULL) {
+      void *k = rc_table[i].key;
+      RCHeader *hdr = (RCHeader *)((char *)k - RC_PREFIX_SIZE);
+      keys[idx] = k;
+      sizes[idx] = rc_table[i].size;
+      dtors[idx] = rc_table[i].dtor;
+      rcs[idx] = atomic_load(&hdr->count);
+      uint64_t h = ((uint64_t)(uintptr_t)k >> 3) * 0x9E3779B97F4A7C15ULL;
+      int b = (int)(h & (uint64_t)hash_mask);
+      bucket_next[idx] = bucket_head[b];
+      bucket_head[b] = idx;
+      idx++;
+    }
+  }
+
+  int edge_cap = n * 4 + 16;
+  int edge_cnt = 0;
+  int *edge_head = (int *)malloc((size_t)n * sizeof(int));
+  int *edge_to = (int *)malloc((size_t)edge_cap * sizeof(int));
+  int *edge_next = (int *)malloc((size_t)edge_cap * sizeof(int));
+  int64_t *in_deg = (int64_t *)calloc((size_t)n, sizeof(int64_t));
+  int *self_loop = (int *)calloc((size_t)n, sizeof(int));
+  memset(edge_head, -1, (size_t)n * sizeof(int));
+
+  for (int u = 0; u < n; u++) {
+    void *k = keys[u];
+    int64_t sz = sizes[u];
+    SkinkDtor dtor = dtors[u];
+    if (dtor == Skink_slicehdr_dtor) {
+      // Slice header: only `base` owns an RC reference (`data` is an alias).
+      SkinkSliceHdr *sh = (SkinkSliceHdr *)k;
+      int v = rc_find_vertex_idx(keys, bucket_head, bucket_next, hash_mask,
+                                 sh->base);
+      if (v >= 0) {
+        if (edge_cnt >= edge_cap) {
+          edge_cap *= 2;
+          edge_to = (int *)realloc(edge_to, (size_t)edge_cap * sizeof(int));
+          edge_next = (int *)realloc(edge_next, (size_t)edge_cap * sizeof(int));
+        }
+        edge_to[edge_cnt] = v;
+        edge_next[edge_cnt] = edge_head[u];
+        edge_head[u] = edge_cnt++;
+        in_deg[v]++;
+        if (u == v)
+          self_loop[u] = 1;
+      }
+      continue;
+    }
+    if (dtor == Skink_template_box_dtor) {
+      // Template box: only slot 0 is the boxed data pointer; remaining slots
+      // are function pointers.
+      sz = (int64_t)sizeof(void *);
+    }
+    int64_t words = sz / (int64_t)sizeof(void *);
+    void **slots = (void **)k;
+    for (int64_t w = 0; w < words; w++) {
+      int v = rc_find_vertex_idx(keys, bucket_head, bucket_next, hash_mask,
+                                 slots[w]);
+      if (v >= 0) {
+        if (edge_cnt >= edge_cap) {
+          edge_cap *= 2;
+          edge_to = (int *)realloc(edge_to, (size_t)edge_cap * sizeof(int));
+          edge_next = (int *)realloc(edge_next, (size_t)edge_cap * sizeof(int));
+        }
+        edge_to[edge_cnt] = v;
+        edge_next[edge_cnt] = edge_head[u];
+        edge_head[u] = edge_cnt++;
+        in_deg[v]++;
+        if (u == v)
+          self_loop[u] = 1;
+      }
+    }
+  }
+  pthread_rwlock_unlock(&rc_lock);
+
+  // Iterative Tarjan SCC over (n, edge_head, edge_to, edge_next).
+  int *disc = (int *)malloc((size_t)n * sizeof(int));
+  int *low = (int *)malloc((size_t)n * sizeof(int));
+  int *on_stack = (int *)calloc((size_t)n, sizeof(int));
+  int *scc_stack = (int *)malloc((size_t)n * sizeof(int));
+  int *dfs_node = (int *)malloc((size_t)n * sizeof(int));
+  int *dfs_edge = (int *)malloc((size_t)n * sizeof(int));
+  int *dfs_parent = (int *)malloc((size_t)n * sizeof(int));
+  memset(disc, -1, (size_t)n * sizeof(int));
+
+  int timer = 0;
+  int scc_top = 0;
+  int64_t cyclic_groups = 0;
+  int64_t cyclic_objects = 0;
+  int64_t cyclic_bytes = 0;
+
+  for (int root = 0; root < n; root++) {
+    if (disc[root] != -1)
+      continue;
+    int dtop = 0;
+    disc[root] = low[root] = timer++;
+    scc_stack[scc_top++] = root;
+    on_stack[root] = 1;
+    dfs_node[dtop] = root;
+    dfs_edge[dtop] = edge_head[root];
+    dfs_parent[dtop] = -1;
+    dtop++;
+
+    while (dtop > 0) {
+      int u = dfs_node[dtop - 1];
+      int e = dfs_edge[dtop - 1];
+      if (e != -1) {
+        dfs_edge[dtop - 1] = edge_next[e];
+        int v = edge_to[e];
+        if (disc[v] == -1) {
+          disc[v] = low[v] = timer++;
+          scc_stack[scc_top++] = v;
+          on_stack[v] = 1;
+          dfs_node[dtop] = v;
+          dfs_edge[dtop] = edge_head[v];
+          dfs_parent[dtop] = u;
+          dtop++;
+        } else if (on_stack[v]) {
+          if (disc[v] < low[u])
+            low[u] = disc[v];
+        }
+      } else {
+        int p = dfs_parent[dtop - 1];
+        dtop--;
+        if (p != -1 && low[u] < low[p])
+          low[p] = low[u];
+        if (low[u] == disc[u]) {
+          // Pop SCC rooted at u.
+          int scc_start = scc_top;
+          while (scc_top > 0) {
+            int w = scc_stack[--scc_top];
+            on_stack[w] = 0;
+            if (w == u)
+              break;
+          }
+          int scc_len = scc_start - scc_top;
+          int is_cycle = (scc_len > 1) || (scc_len == 1 && self_loop[u]);
+          if (is_cycle) {
+            cyclic_groups++;
+            cyclic_objects += scc_len;
+            int64_t grp_bytes = 0;
+            int all_internal = 1;
+            for (int k = scc_top; k < scc_start; k++) {
+              int m = scc_stack[k];
+              grp_bytes += sizes[m];
+              if (rcs[m] > in_deg[m])
+                all_internal = 0;
+            }
+            cyclic_bytes += grp_bytes;
+            if (report) {
+              fprintf(stderr,
+                      "  cycle #%lld: %d object(s), %lld bytes (%s)\n",
+                      (long long)cyclic_groups, scc_len, (long long)grp_bytes,
+                      all_internal ? "unreachable/leaked" : "externally reachable");
+              for (int k = scc_top; k < scc_start; k++) {
+                int m = scc_stack[k];
+                fprintf(stderr,
+                        "    obj %p (size=%lldB, rc=%lld, heap_in_refs=%lld)\n",
+                        keys[m], (long long)sizes[m], (long long)rcs[m],
+                        (long long)in_deg[m]);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (report) {
+    fprintf(stderr,
+            "[skink-rc] cycle detector: %lld cyclic object(s) in %lld cycle group(s) (%lld bytes)\n",
+            (long long)cyclic_objects, (long long)cyclic_groups,
+            (long long)cyclic_bytes);
+  }
+
+  free(keys);
+  free(sizes);
+  free(dtors);
+  free(rcs);
+  free(bucket_head);
+  free(bucket_next);
+  free(edge_head);
+  free(edge_to);
+  free(edge_next);
+  free(in_deg);
+  free(self_loop);
+  free(disc);
+  free(low);
+  free(on_stack);
+  free(scc_stack);
+  free(dfs_node);
+  free(dfs_edge);
+  free(dfs_parent);
+  return cyclic_objects;
+}
+
+// Skink_rc_detect_cycles scans the live RC object graph and returns the
+// number of objects currently participating in reference cycles.
+int64_t Skink_rc_detect_cycles(void) { return rc_scan_cycles_impl(0); }
+
+// Skink_rc_report_cycles scans the live RC object graph, prints a human-
+// readable report of any reference cycles to stderr, and returns the number
+// of cyclic objects found.
+int64_t Skink_rc_report_cycles(void) { return rc_scan_cycles_impl(1); }
+
+// Automatic exit-time cycle check when SKINK_RC_DETECT_CYCLES=1 is set.
+// Setting SKINK_RC_STRICT_CYCLES=1 additionally exits with status 2 when
+// cycles are detected at process exit.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((destructor)) static void rc_exit_cycle_check(void) {
+  const char *env = getenv("SKINK_RC_DETECT_CYCLES");
+  if (env && env[0] != '\0' && strcmp(env, "0") != 0) {
+    int64_t cyc = Skink_rc_report_cycles();
+    const char *strict = getenv("SKINK_RC_STRICT_CYCLES");
+    if (cyc > 0 && strict && strict[0] != '\0' && strcmp(strict, "0") != 0) {
+      _Exit(2);
+    }
+  }
+}
+#endif

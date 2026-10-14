@@ -32,6 +32,11 @@
 #include <immintrin.h>
 #endif
 
+// Skink slice values arrive as slice-header pointers (rc_rt.c); unwrap
+// with Skink_slice_data before dereferencing elements.
+extern int64_t Skink_slice_len(void *ptr);
+extern void *Skink_slice_data(void *ptr);
+
 // Tensor represents a 2D matrix with row-major double-precision data.
 typedef struct {
   int rows;
@@ -94,6 +99,9 @@ Skink_tensor_matmul_data_row(const double *a_data, int k, const double *b_data,
 void Skink_tensor_matmul_data(const double *a_data, int m, int k,
                               const double *b_data, int n,
                               double *__restrict c_data) {
+  a_data = (const double *)Skink_slice_data((void *)a_data);
+  b_data = (const double *)Skink_slice_data((void *)b_data);
+  c_data = (double *)Skink_slice_data((void *)c_data);
   if (m * k * n > 100000000) {
 #pragma omp parallel for
     for (int i = 0; i < m; i++) {
@@ -111,6 +119,15 @@ void Skink_tensor_matmul4(int m, int k, int n, const double *a_data,
                           const double *b0, double *c0, const double *b1,
                           double *c1, const double *b2, double *c2,
                           const double *b3, double *c3) {
+  a_data = (const double *)Skink_slice_data((void *)a_data);
+  b0 = (const double *)Skink_slice_data((void *)b0);
+  c0 = (double *)Skink_slice_data((void *)c0);
+  b1 = (const double *)Skink_slice_data((void *)b1);
+  c1 = (double *)Skink_slice_data((void *)c1);
+  b2 = (const double *)Skink_slice_data((void *)b2);
+  c2 = (double *)Skink_slice_data((void *)c2);
+  b3 = (const double *)Skink_slice_data((void *)b3);
+  c3 = (double *)Skink_slice_data((void *)c3);
 #pragma omp parallel sections
   {
 #pragma omp section
@@ -241,6 +258,11 @@ lstm_matmul_block(const double *__restrict a, int a_stride,
 void Skink_lstm_forward(const double *input_data, int m, int input_size,
                         const int *sizes, int n_sizes, const double *weights,
                         const double *bias, double *h_data, int hidden_size) {
+  input_data = (const double *)Skink_slice_data((void *)input_data);
+  sizes = (const int *)Skink_slice_data((void *)sizes);
+  weights = (const double *)Skink_slice_data((void *)weights);
+  bias = (const double *)Skink_slice_data((void *)bias);
+  h_data = (double *)Skink_slice_data((void *)h_data);
   int layers = n_sizes - 2;
   double *c = calloc((size_t)m * hidden_size, sizeof(double));
   if (!c)
@@ -606,6 +628,9 @@ void *Skink_tensor_eigenvalues(void *t_ptr) {
 // Element-wise operations with SIMD and OpenMP
 void Skink_tensor_add_data(const double *a_data, const double *b_data, int n,
                            double *c_data) {
+  a_data = (const double *)Skink_slice_data((void *)a_data);
+  b_data = (const double *)Skink_slice_data((void *)b_data);
+  c_data = (double *)Skink_slice_data((void *)c_data);
   if (n > 10000) {
 #pragma omp parallel for
     for (int i = 0; i < n; i++) {
@@ -634,6 +659,9 @@ void Skink_tensor_add_data(const double *a_data, const double *b_data, int n,
 // Skink_tensor_sub_data subtracts element-wise b from a, storing the result in c.
 void Skink_tensor_sub_data(const double *a_data, const double *b_data, int n,
                            double *c_data) {
+  a_data = (const double *)Skink_slice_data((void *)a_data);
+  b_data = (const double *)Skink_slice_data((void *)b_data);
+  c_data = (double *)Skink_slice_data((void *)c_data);
   if (n > 10000) {
 #pragma omp parallel for
     for (int i = 0; i < n; i++) {
@@ -662,6 +690,9 @@ void Skink_tensor_sub_data(const double *a_data, const double *b_data, int n,
 // Skink_tensor_mul_data multiplies element-wise a by b, storing the result in c.
 void Skink_tensor_mul_data(const double *a_data, const double *b_data, int n,
                            double *c_data) {
+  a_data = (const double *)Skink_slice_data((void *)a_data);
+  b_data = (const double *)Skink_slice_data((void *)b_data);
+  c_data = (double *)Skink_slice_data((void *)c_data);
   if (n > 10000) {
 #pragma omp parallel for
     for (int i = 0; i < n; i++) {
@@ -690,6 +721,8 @@ void Skink_tensor_mul_data(const double *a_data, const double *b_data, int n,
 // Skink_tensor_scale_data scales each element of a by scalar s, storing the result in c.
 void Skink_tensor_scale_data(const double *a_data, int n, double s,
                              double *c_data) {
+  a_data = (const double *)Skink_slice_data((void *)a_data);
+  c_data = (double *)Skink_slice_data((void *)c_data);
   if (n > 10000) {
 #pragma omp parallel for
     for (int i = 0; i < n; i++) {
@@ -718,6 +751,8 @@ void Skink_tensor_scale_data(const double *a_data, int n, double s,
 // Transpose with OpenMP
 void Skink_tensor_transpose_data(const double *a_data, int rows, int cols,
                                  double *c_data) {
+  a_data = (const double *)Skink_slice_data((void *)a_data);
+  c_data = (double *)Skink_slice_data((void *)c_data);
   if (rows * cols > 10000) {
 #pragma omp parallel for
     for (int i = 0; i < rows; i++) {
@@ -735,20 +770,19 @@ void Skink_tensor_transpose_data(const double *a_data, int rows, int cols,
 }
 
 // Vector helpers for the Skink `dot`/`norm` builtins.
-// A Skink []float slice is a pointer to a double payload; Skink_slice_len
-// (rc_rt.c) returns the element count — for a plain slice the count at
-// payload-8, for a slice view the registered view length.
-extern int64_t Skink_slice_len(void *ptr);
+// A Skink []float slice value is a pointer to a slice header
+// (rc_rt.c); Skink_slice_data extracts the double payload and
+// Skink_slice_len the element count. Both are NULL-safe.
 static int64_t skink_slice_len(const void *p) {
   return Skink_slice_len((void *)p);
 }
 
 // Skink_vec_dot computes the dot product of two float64 slices.
 double Skink_vec_dot(void *a_ptr, void *b_ptr) {
-  const double *a = (const double *)a_ptr;
-  const double *b = (const double *)b_ptr;
   int64_t na = skink_slice_len(a_ptr);
   int64_t nb = skink_slice_len(b_ptr);
+  const double *a = (const double *)Skink_slice_data(a_ptr);
+  const double *b = (const double *)Skink_slice_data(b_ptr);
   int64_t n = na < nb ? na : nb;
   double sum = 0.0;
   for (int64_t i = 0; i < n; i++) {
@@ -759,8 +793,8 @@ double Skink_vec_dot(void *a_ptr, void *b_ptr) {
 
 // Skink_vec_norm computes the L2 norm of a float64 slice.
 double Skink_vec_norm(void *v_ptr) {
-  const double *v = (const double *)v_ptr;
   int64_t n = skink_slice_len(v_ptr);
+  const double *v = (const double *)Skink_slice_data(v_ptr);
   double sum = 0.0;
   for (int64_t i = 0; i < n; i++) {
     sum += v[i] * v[i];
@@ -770,6 +804,8 @@ double Skink_vec_norm(void *v_ptr) {
 
 // Activation functions with SIMD
 void Skink_tensor_relu_data(const double *a_data, int n, double *c_data) {
+  a_data = (const double *)Skink_slice_data((void *)a_data);
+  c_data = (double *)Skink_slice_data((void *)c_data);
 #ifdef __AVX2__
   __m256d zero = _mm256_setzero_pd();
   int i = 0;
@@ -790,6 +826,8 @@ void Skink_tensor_relu_data(const double *a_data, int n, double *c_data) {
 
 // Skink_tensor_sigmoid_data applies the sigmoid activation function element-wise.
 void Skink_tensor_sigmoid_data(const double *a_data, int n, double *c_data) {
+  a_data = (const double *)Skink_slice_data((void *)a_data);
+  c_data = (double *)Skink_slice_data((void *)c_data);
   for (int i = 0; i < n; i++) {
     c_data[i] = 1.0 / (1.0 + exp(-a_data[i]));
   }
@@ -797,6 +835,8 @@ void Skink_tensor_sigmoid_data(const double *a_data, int n, double *c_data) {
 
 // Skink_tensor_tanh_data applies the tanh activation function element-wise.
 void Skink_tensor_tanh_data(const double *a_data, int n, double *c_data) {
+  a_data = (const double *)Skink_slice_data((void *)a_data);
+  c_data = (double *)Skink_slice_data((void *)c_data);
   for (int i = 0; i < n; i++) {
     double x = a_data[i];
     c_data[i] = tanh(x);
@@ -806,6 +846,8 @@ void Skink_tensor_tanh_data(const double *a_data, int n, double *c_data) {
 // Softmax along last dimension
 void Skink_tensor_softmax_data(const double *a_data, int rows, int cols,
                                double *c_data) {
+  a_data = (const double *)Skink_slice_data((void *)a_data);
+  c_data = (double *)Skink_slice_data((void *)c_data);
 #pragma omp parallel for
   for (int i = 0; i < rows; i++) {
     const double *row = a_data + i * cols;
@@ -838,6 +880,9 @@ void Skink_tensor_conv2d_data(const double *input_data, int batch, int in_ch,
                               int in_h, int in_w, const double *filter_data,
                               int out_ch, int kernel, int stride,
                               double *output_data) {
+  input_data = (const double *)Skink_slice_data((void *)input_data);
+  filter_data = (const double *)Skink_slice_data((void *)filter_data);
+  output_data = (double *)Skink_slice_data((void *)output_data);
   int out_h = (in_h - kernel) / stride + 1;
   int out_w = (in_w - kernel) / stride + 1;
 
@@ -871,6 +916,8 @@ void Skink_tensor_conv2d_data(const double *input_data, int batch, int in_ch,
 void Skink_tensor_maxpool2d_data(const double *input_data, int batch,
                                  int channels, int in_h, int in_w, int kernel,
                                  int stride, double *output_data) {
+  input_data = (const double *)Skink_slice_data((void *)input_data);
+  output_data = (double *)Skink_slice_data((void *)output_data);
   int out_h = (in_h - kernel) / stride + 1;
   int out_w = (in_w - kernel) / stride + 1;
 
@@ -901,6 +948,7 @@ void Skink_tensor_maxpool2d_data(const double *input_data, int batch,
 
 // Sum all elements
 double Skink_tensor_sum_data(const double *a_data, int n) {
+  a_data = (const double *)Skink_slice_data((void *)a_data);
   double sum = 0.0;
 #ifdef __AVX2__
   __m256d sum_vec = _mm256_setzero_pd();

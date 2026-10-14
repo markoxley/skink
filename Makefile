@@ -130,9 +130,15 @@ build: stage1
 # Stage 1: Build the pure Skink compiler driver using stage 0
 stage1: $(SKINK_BIN)
 
+# Runtime sources linked into headless binaries (excludes ui_rt.c).
+BOOTSTRAP_RT := $(filter-out $(BOOTSTRAP_HOME)/runtime/ui_rt.c,$(wildcard $(BOOTSTRAP_HOME)/runtime/*.c)) $(BOOTSTRAP_HOME)/runtime/template_bridge.ll
+CLANG_LIBS   := -lpthread -ldl -lm -lssl -lcrypto -lz -lsqlite3
+
 $(SKINK_BIN): skink.skink $(STD_FILES) $(RUNTIME_FILES) $(VERSION_SKINK)
 	@echo "Building Stage 1 self-hosted skink compiler..."
-	SKINK_HOME=$(BOOTSTRAP_HOME) $(STAGE0) -o $(SKINK_BIN) skink.skink
+	SKINK_HOME=$(BOOTSTRAP_HOME) $(STAGE0) -emit-ll skink.skink > $(SKINK_BIN).ll
+	$(CLANG) -Wno-override-module -march=native -O2 -o $(SKINK_BIN) $(SKINK_BIN).ll $(BOOTSTRAP_RT) $(CLANG_LIBS)
+	@rm -f $(SKINK_BIN).ll
 	@echo "Built: $(SKINK_BIN)"
 
 # Stage 2: Compile skink.skink using the Stage 1 binary (full self-hosting verification)
@@ -140,7 +146,9 @@ stage2: bump-version | $(SKINK_BIN)
 	@echo "Regenerating version module..."
 	@$(MAKE) $(VERSION_SKINK)
 	@echo "Building Stage 2 self-hosted skink compiler with Stage 1 binary..."
-	SKINK_HOME=$(BOOTSTRAP_HOME) ./$(SKINK_BIN) -o $(SKINK_BIN)_stage2 skink.skink
+	SKINK_HOME=$(BOOTSTRAP_HOME) ./$(SKINK_BIN) -emit-ll skink.skink > $(SKINK_BIN)_stage2.ll
+	$(CLANG) -Wno-override-module -march=native -O2 -o $(SKINK_BIN)_stage2 $(SKINK_BIN)_stage2.ll $(BOOTSTRAP_RT) $(CLANG_LIBS)
+	@rm -f $(SKINK_BIN)_stage2.ll
 	@echo "Verifying Stage 2 binary..."
 	SKINK_HOME=$(BOOTSTRAP_HOME) ./$(SKINK_BIN)_stage2 -check skink.skink
 	@cp -f $(SKINK_BIN)_stage2 $(SKINK_BIN)

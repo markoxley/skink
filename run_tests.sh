@@ -91,6 +91,7 @@ for test_file in $test_files; do
             test_output=$(timeout 10 "$RESULTS_DIR/${slug}_bin" 2>&1)
         fi
         test_rc=$?
+        rm -f "$RESULTS_DIR/${slug}_bin"
         total_tests=$((total_tests + 1))
         if [ $test_rc -eq 0 ]; then
             pass=$((pass + 1))
@@ -166,6 +167,7 @@ for test_file in $test_files; do
         test_output=$(timeout 10 "$RESULTS_DIR/${slug}_bin" 2>&1)
     fi
     test_rc=$?
+    rm -f "$RESULTS_DIR/${slug}_bin" "$main_file"
 
     if [ $test_rc -eq 0 ]; then
         pass=$((pass + 1))
