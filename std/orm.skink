@@ -63,72 +63,6 @@ pub fn Open(dsn: string) -> (db.Connection, errors.Error) {
     return db.Open("sqlite3", dsn)
 }
 
-// attrArgs returns the space-joined contents of every `name(...)` group
-// in a space-joined tag string such as "column(name=x) db(pk auto)".
-fn attrArgs(tag: string, name: string) -> string {
-    needle := str.Concat(name, "(")
-    result := ""
-    rest := tag
-    idx := str.IndexOf(rest, needle)
-    for idx >= 0 {
-        inner := str.Substr(rest, idx + str.Len(needle), str.Len(rest) - idx - str.Len(needle))
-        close := str.IndexOf(inner, ")")
-        if close < 0 {
-            close = str.Len(inner)
-        }
-        args := str.Substr(inner, 0, close)
-        if str.Len(result) > 0 {
-            result = str.Concat(result, " ")
-        }
-        result = str.Concat(result, args)
-        rest = str.Substr(rest, idx + str.Len(needle) + close + 1, str.Len(rest) - idx - str.Len(needle) - close - 1)
-        idx = str.IndexOf(rest, needle)
-    }
-    return result
-}
-
-// tagFlags returns the individual flag words inside `attr(...)`, split
-// on commas and spaces — e.g. attrArgs "pk auto" -> ["pk", "auto"].
-fn tagFlags(tag: string, attr: string) -> []string {
-    args := str.Replace(attrArgs(tag, attr), ",", " ")
-    raw := str.Split(args, " ")
-    var parts []string
-    for i := 0; i < len(raw); i = i + 1 {
-        p := str.Trim(raw[i])
-        if str.Len(p) > 0 {
-            parts = append(parts, p)
-        }
-    }
-    return parts
-}
-
-// tagHasFlag reports whether `flag` appears inside `attr(...)` in the
-// tag string — e.g. tagHasFlag("db(pk auto)", "db", "pk") is true.
-fn tagHasFlag(tag: string, attr: string, flag: string) -> bool {
-    parts := tagFlags(tag, attr)
-    for i := 0; i < len(parts); i = i + 1 {
-        if str.Equal(parts[i], flag) {
-            return true
-        }
-    }
-    return false
-}
-
-// tagKey returns the value of `key=value` inside `attr(...)` in the tag
-// string — e.g. tagKey("column(name=full_name)", "column", "name") is
-// "full_name". The second return is false when the key is absent.
-fn tagKey(tag: string, attr: string, key: string) -> (string, bool) {
-    parts := tagFlags(tag, attr)
-    prefix := str.Concat(key, "=")
-    for i := 0; i < len(parts); i = i + 1 {
-        p := parts[i]
-        if str.StartsWith(p, prefix) {
-            return str.Substr(p, str.Len(prefix), str.Len(p) - str.Len(prefix)), true
-        }
-    }
-    return "", false
-}
-
 // supportedType reports whether typeName maps to a SQLite column type.
 fn supportedType(typeName: string) -> bool {
     return str.Equal(typeName, "int") || str.Equal(typeName, "int64") ||
@@ -150,10 +84,10 @@ fn columnType(typeName: string) -> string {
 // columnName resolves a field's column name: [column(name=x)] wins,
 // then [db(name=x)], otherwise the field name itself.
 fn columnName(f: reflect.Field) -> string {
-    if name, ok := tagKey(f.tag, "column", "name"); ok {
+    if name, ok := reflect.TagKey(f.tag, "column", "name"); ok {
         return name
     }
-    if name, ok := tagKey(f.tag, "db", "name"); ok {
+    if name, ok := reflect.TagKey(f.tag, "db", "name"); ok {
         return name
     }
     return f.name
@@ -186,7 +120,7 @@ pub fn TableNamed(conn: db.Connection, t: reflect.Type, name: string) -> (Table,
     n := reflect.FieldCount(t)
     for i := 0; i < n; i = i + 1 {
         f := reflect.FieldByIndex(t, i)
-        if tagHasFlag(f.tag, "db", "ignore") {
+        if reflect.TagHasFlag(f.tag, "db", "ignore") {
             continue
         }
         if supportedType(f.type_name) == false {
@@ -196,9 +130,9 @@ pub fn TableNamed(conn: db.Connection, t: reflect.Type, name: string) -> (Table,
         mapped := len(cols)
         cols = append(cols, columnName(f))
         fields = append(fields, f)
-        if tagHasFlag(f.tag, "db", "pk") || (str.Equal(f.name, "id") && pkIndex < 0) {
+        if reflect.TagHasFlag(f.tag, "db", "pk") || (str.Equal(f.name, "id") && pkIndex < 0) {
             pkIndex = mapped
-            pkAuto = tagHasFlag(f.tag, "db", "auto")
+            pkAuto = reflect.TagHasFlag(f.tag, "db", "auto")
         }
     }
     return Table{conn: conn, typ: t, name: name, typeName: typeName, cols: cols, fields: fields, pkIndex: pkIndex, pkAuto: pkAuto}, errors.None()

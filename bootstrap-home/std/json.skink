@@ -27,6 +27,7 @@ module json
 import "std/str"
 import "std/errors"
 import "std/strconv"
+import "std/reflect"
 
 // Value is a dynamic JSON value that can represent any JSON type.
 // Use the kind field (0=null, 1=bool, 2=number, 3=string, 4=array, 5=object)
@@ -721,4 +722,145 @@ pub fn UnmarshalEntries(s: string) -> ([]Entry, errors.Error) {
         entries = append(entries, e)
     }
     return entries, errors.New("")
+}
+
+// --- Struct marshal/unmarshal via reflect + [json] field tags ---
+
+// jsonScalarType reports whether typeName is a field type MarshalStruct
+// supports: int, int64, string, float, or bool.
+fn jsonScalarType(typeName: string) -> bool {
+    return str.Equal(typeName, "int") || str.Equal(typeName, "int64") ||
+        str.Equal(typeName, "string") || str.Equal(typeName, "float") ||
+        str.Equal(typeName, "bool")
+}
+
+// jsonFieldName resolves a field's JSON key: [json(name=x)] wins,
+// otherwise the field name itself.
+fn jsonFieldName(f: reflect.Field) -> string {
+    if name, ok := reflect.TagKey(f.tag, "json", "name"); ok {
+        return name
+    }
+    return f.name
+}
+
+// unsupportedFieldErr builds the field-type error shared by
+// MarshalStruct and UnmarshalInto.
+fn unsupportedFieldErr(f: reflect.Field) -> errors.Error {
+    return errors.New(str.Concat(str.Concat("json: unsupported field type \"", f.type_name), str.Concat("\" on field \"", str.Concat(f.name, "\" — only int, int64, string, float, bool are supported"))))
+}
+
+// isEmptyValue reports whether the field on the struct at ptr holds its
+// zero value — used by the [json(omitempty)] flag.
+fn isEmptyValue(ptr: int64, f: reflect.Field) -> bool {
+    if str.Equal(f.type_name, "int") {
+        return reflect.GetInt(ptr, f) == 0
+    }
+    if str.Equal(f.type_name, "int64") {
+        return reflect.GetInt64(ptr, f) == int64(0)
+    }
+    if str.Equal(f.type_name, "string") {
+        return str.Len(reflect.GetString(ptr, f)) == 0
+    }
+    if str.Equal(f.type_name, "float") {
+        return reflect.GetFloat(ptr, f) == 0.0
+    }
+    if str.Equal(f.type_name, "bool") {
+        return reflect.GetBool(ptr, f) == false
+    }
+    return false
+}
+
+// marshalField converts one scalar struct field to a JSON Value.
+fn marshalField(ptr: int64, f: reflect.Field) -> Value {
+    if str.Equal(f.type_name, "string") {
+        return FromString(reflect.GetString(ptr, f))
+    }
+    if str.Equal(f.type_name, "bool") {
+        return FromBool(reflect.GetBool(ptr, f))
+    }
+    if str.Equal(f.type_name, "int") {
+        return FromNumber(float(reflect.GetInt(ptr, f)))
+    }
+    if str.Equal(f.type_name, "int64") {
+        return FromNumber(float(reflect.GetInt64(ptr, f)))
+    }
+    return FromNumber(reflect.GetFloat(ptr, f))
+}
+
+// MarshalStruct serializes the struct at ptr (pass int64(&obj)) to a
+// JSON object string, reading fields through the reflected type t.
+// Field names map to JSON keys by name unless overridden:
+//   [json(name=x)]    rename the key to x
+//   [json(ignore)]    omit the field entirely
+//   [json(omitempty)] omit the field when it holds its zero value
+// Only scalar fields are supported (int, int64, string, float, bool);
+// a nested-struct, slice, map, or pointer field returns an error
+// naming the field.
+pub fn MarshalStruct(t: reflect.Type, ptr: int64) -> (string, errors.Error) {
+    var keys []string
+    var vals []Value
+    n := reflect.FieldCount(t)
+    for i := 0; i < n; i = i + 1 {
+        f := reflect.FieldByIndex(t, i)
+        if reflect.TagHasFlag(f.tag, "json", "ignore") {
+            continue
+        }
+        if jsonScalarType(f.type_name) == false {
+            return "", unsupportedFieldErr(f)
+        }
+        if reflect.TagHasFlag(f.tag, "json", "omitempty") && isEmptyValue(ptr, f) {
+            continue
+        }
+        keys = append(keys, jsonFieldName(f))
+        vals = append(vals, marshalField(ptr, f))
+    }
+    return MarshalValue(FromObject(keys, vals)), errors.None()
+}
+
+// unmarshalField writes one JSON value into the field on the struct at
+// ptr, converting the JSON kind to the field's declared type.
+fn unmarshalField(ptr: int64, f: reflect.Field, v: Value) {
+    if str.Equal(f.type_name, "int") {
+        reflect.SetInt(ptr, f, int(AsNumber(v)))
+    } else if str.Equal(f.type_name, "int64") {
+        reflect.SetInt64(ptr, f, int64(AsNumber(v)))
+    } else if str.Equal(f.type_name, "string") {
+        reflect.SetString(ptr, f, AsString(v))
+    } else if str.Equal(f.type_name, "float") {
+        reflect.SetFloat(ptr, f, AsNumber(v))
+    } else if str.Equal(f.type_name, "bool") {
+        reflect.SetBool(ptr, f, AsBool(v))
+    }
+}
+
+// UnmarshalInto parses s as a JSON object and writes each matching key
+// into the struct at ptr (pass int64(&obj)) using the reflected type t.
+// Keys not present in the JSON leave their fields unchanged; JSON keys
+// with no matching field are ignored. Honours [json(name=x)] and
+// [json(ignore)]; unsupported field types return an error naming the
+// field.
+pub fn UnmarshalInto(s: string, t: reflect.Type, ptr: int64) -> errors.Error {
+    v, err := Unmarshal(s)
+    if err.message != "" {
+        return err
+    }
+    if v.kind != 5 {
+        return errors.New("json: expected a JSON object")
+    }
+    n := reflect.FieldCount(t)
+    for i := 0; i < n; i = i + 1 {
+        f := reflect.FieldByIndex(t, i)
+        if reflect.TagHasFlag(f.tag, "json", "ignore") {
+            continue
+        }
+        if jsonScalarType(f.type_name) == false {
+            return unsupportedFieldErr(f)
+        }
+        fv := ObjectGet(v, jsonFieldName(f))
+        if IsNull(fv) {
+            continue
+        }
+        unmarshalField(ptr, f, fv)
+    }
+    return errors.None()
 }

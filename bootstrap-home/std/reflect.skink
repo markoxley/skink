@@ -225,3 +225,78 @@ extern fn reflect_get_float(addr: int64, offset: int) -> float
 extern fn reflect_set_float(addr: int64, offset: int, val: float)
 extern fn reflect_hash(val: string, typeName: string) -> int
 extern fn reflect_equals(a: string, b: string, typeName: string) -> bool
+
+// TagArgs returns the space-joined contents of every `name(...)` group
+// in a space-joined field-tag string such as "column(name=x) db(pk auto)".
+// Bare attributes like "[route]" have no parentheses and contribute "".
+pub fn TagArgs(tag: string, attr: string) -> string {
+    needle := str.Concat(attr, "(")
+    result := ""
+    rest := tag
+    idx := str.IndexOf(rest, needle)
+    for idx >= 0 {
+        inner := str.Substr(rest, idx + str.Len(needle), str.Len(rest) - idx - str.Len(needle))
+        close := str.IndexOf(inner, ")")
+        if close < 0 {
+            close = str.Len(inner)
+        }
+        args := str.Substr(inner, 0, close)
+        if str.Len(result) > 0 {
+            result = str.Concat(result, " ")
+        }
+        result = str.Concat(result, args)
+        rest = str.Substr(rest, idx + str.Len(needle) + close + 1, str.Len(rest) - idx - str.Len(needle) - close - 1)
+        idx = str.IndexOf(rest, needle)
+    }
+    return result
+}
+
+// TagFlags returns the individual flag words inside `attr(...)` in a
+// tag string, split on commas and spaces — e.g. "pk auto" ->
+// ["pk", "auto"]. Also matches a bare attribute: TagFlags on
+// "route" for attr "route" yields ["route"].
+pub fn TagFlags(tag: string, attr: string) -> []string {
+    args := str.Replace(TagArgs(tag, attr), ",", " ")
+    // A bare "[route]" tag has no parens: treat the whole attribute
+    // name as a single flag so TagHasFlag matches it.
+    if str.Len(args) == 0 && str.Equal(str.Trim(tag), attr) {
+        args = attr
+    }
+    raw := str.Split(args, " ")
+    var parts []string
+    for i := 0; i < len(raw); i = i + 1 {
+        p := str.Trim(raw[i])
+        if str.Len(p) > 0 {
+            parts = append(parts, p)
+        }
+    }
+    return parts
+}
+
+// TagHasFlag reports whether `flag` appears inside `attr(...)` in the
+// tag string — e.g. TagHasFlag("db(pk auto)", "db", "pk") is true, as
+// is TagHasFlag("route", "route", "route") for a bare attribute.
+pub fn TagHasFlag(tag: string, attr: string, flag: string) -> bool {
+    parts := TagFlags(tag, attr)
+    for i := 0; i < len(parts); i = i + 1 {
+        if str.Equal(parts[i], flag) {
+            return true
+        }
+    }
+    return false
+}
+
+// TagKey returns the value of `key=value` inside `attr(...)` in the
+// tag string — e.g. TagKey("column(name=full_name)", "column", "name")
+// is "full_name". The second return is false when the key is absent.
+pub fn TagKey(tag: string, attr: string, key: string) -> (string, bool) {
+    parts := TagFlags(tag, attr)
+    prefix := str.Concat(key, "=")
+    for i := 0; i < len(parts); i = i + 1 {
+        p := parts[i]
+        if str.StartsWith(p, prefix) {
+            return str.Substr(p, str.Len(prefix), str.Len(p) - str.Len(prefix)), true
+        }
+    }
+    return "", false
+}

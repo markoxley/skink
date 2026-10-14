@@ -24,6 +24,7 @@
 module json_test
 
 import "std/json"
+import "std/reflect"
 import "std/str"
 import "testing"
 
@@ -147,5 +148,142 @@ pub fn TestRoundtripObject() {
     val := json.ObjectGet(v2, "name")
     if str.Equal(json.AsString(val), "skink") == false {
         Errorf("Roundtrip object should preserve string value")
+    }
+}
+
+// --- MarshalStruct / UnmarshalInto: struct <-> JSON via [json] tags ---
+
+// TaggedUser exercises every [json] flag: rename, ignore, omitempty.
+pub struct TaggedUser {
+    [json(ignore)]
+    id: int64
+    [json(name=full_name)]
+    name: string
+    age: int
+    [json(omitempty)]
+    nickname: string
+    score: float
+    active: bool
+}
+
+// BadJSON has an unmappable field type; MarshalStruct must reject it.
+pub struct BadJSON {
+    id: int64
+    tags: []string
+}
+
+// TestMarshalStruct verifies object output honors renames and ignores.
+pub fn TestMarshalStruct() {
+    var u TaggedUser
+    u.id = int64(7)
+    u.name = "Ada"
+    u.age = 36
+    u.nickname = "ace"
+    u.score = 9.5
+    u.active = true
+    s, err := json.MarshalStruct(reflect.TypeOf<TaggedUser>(u), int64(&u))
+    if err.message != "" {
+        Errorf("MarshalStruct should succeed")
+    }
+    if str.Contains(s, "full_name") == false {
+        Errorf("[json(name=full_name)] should rename the key")
+    }
+    if str.Contains(s, "\"Ada\"") == false {
+        Errorf("marshal should include the name value")
+    }
+    if str.Contains(s, "id") {
+        Errorf("[json(ignore)] field should not appear")
+    }
+    if str.Contains(s, "nickname") == false {
+        Errorf("non-empty omitempty field should appear")
+    }
+}
+
+// TestMarshalStructOmitEmpty verifies zero-valued omitempty fields drop.
+pub fn TestMarshalStructOmitEmpty() {
+    var u TaggedUser
+    u.name = "x"
+    s, err := json.MarshalStruct(reflect.TypeOf<TaggedUser>(u), int64(&u))
+    if err.message != "" {
+        Errorf("MarshalStruct should succeed")
+    }
+    if str.Contains(s, "nickname") {
+        Errorf("empty omitempty field should be omitted")
+    }
+    if str.Contains(s, "age") == false {
+        Errorf("non-omitempty zero field should still appear")
+    }
+}
+
+// TestMarshalStructUnsupported verifies unmappable types error out.
+pub fn TestMarshalStructUnsupported() {
+    var b BadJSON
+    _, err := json.MarshalStruct(reflect.TypeOf<BadJSON>(b), int64(&b))
+    if err.message == "" {
+        Errorf("MarshalStruct should reject a slice field")
+    }
+    if str.Contains(err.message, "tags") == false {
+        Errorf("error should name the offending field")
+    }
+}
+
+// TestUnmarshalInto verifies object keys write into struct fields by
+// (renamed) name, absent keys leave fields unchanged, unknown JSON
+// keys are ignored.
+pub fn TestUnmarshalInto() {
+    var u TaggedUser
+    u.age = 99
+    err := json.UnmarshalInto("{\"full_name\":\"Grace\",\"score\":8.25,\"unknown\":1}", reflect.TypeOf<TaggedUser>(u), int64(&u))
+    if err.message != "" {
+        Errorf("UnmarshalInto should succeed")
+    }
+    if str.Equal(u.name, "Grace") == false {
+        Errorf("[json(name=full_name)] should map to the name field")
+    }
+    if u.score != 8.25 {
+        Errorf("float field should unmarshal")
+    }
+    if u.age != 99 {
+        Errorf("absent keys should leave fields unchanged")
+    }
+    if u.id != int64(0) {
+        Errorf("[json(ignore)] field should not be set")
+    }
+}
+
+// TestUnmarshalIntoBad verifies malformed and non-object input errors.
+pub fn TestUnmarshalIntoBad() {
+    var u TaggedUser
+    err := json.UnmarshalInto("not json", reflect.TypeOf<TaggedUser>(u), int64(&u))
+    if err.message == "" {
+        Errorf("malformed JSON should error")
+    }
+    err = json.UnmarshalInto("[1,2]", reflect.TypeOf<TaggedUser>(u), int64(&u))
+    if err.message == "" {
+        Errorf("non-object JSON should error")
+    }
+}
+
+// TestStructRoundTrip verifies marshal then unmarshal restores fields.
+pub fn TestStructRoundTrip() {
+    var src TaggedUser
+    src.name = "Katherine"
+    src.age = 41
+    src.score = 7.5
+    src.active = true
+    src.nickname = "kat"
+    s, err := json.MarshalStruct(reflect.TypeOf<TaggedUser>(src), int64(&src))
+    if err.message != "" {
+        Errorf("MarshalStruct should succeed")
+    }
+    var dst TaggedUser
+    err = json.UnmarshalInto(s, reflect.TypeOf<TaggedUser>(dst), int64(&dst))
+    if err.message != "" {
+        Errorf("UnmarshalInto should succeed")
+    }
+    if str.Equal(dst.name, "Katherine") == false || dst.age != 41 ||
+        dst.score != 7.5 || dst.active == false ||
+        str.Equal(dst.nickname, "kat") == false {
+        Errorf("roundtrip should preserve all mapped fields")
     }
 }
