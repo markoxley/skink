@@ -43,3 +43,32 @@ Entry format: numbered heading, severity, symptom/error message, root cause
   asserting the hint text appears.
 - **Discovered by**: orm generics probe (square-bracket typo that
   produced the confusing error).
+
+## #123 — ruleset `action: fn() { ... }` emits empty body, never runs — ✅ FIXED
+
+- **Severity**: high — invalid LLVM IR (empty function body fails `llc`),
+  and semantically the action would never execute
+- **Symptom**: a ruleset rule written as `action: fn() { ... }` (literal
+  form, as used in skink-advanced/07-ruleset-intro) compiles to
+  `define void @__skink_fnlit_N(i8* %env) {\n}` — a function with no
+  basic block — so `clang`/`llc` rejects the module with "function body
+  requires at least one basic block". The `action: { ... }` block form
+  worked fine.
+- **Root cause**: two bugs in `emitRulesetCode` (`std/emitter.skink`):
+  1. After `emitCondBranch` the `trueLabel:`/`endLabel:` were emitted
+     via raw `emitln` instead of `emitLabel`, leaving `cg.terminated`
+     stuck `true`; `emitBlockStmtRaw` inside `emitFnLit` then skipped the
+     literal's body, producing the empty define.
+  2. The parser stores `action: fn() {...}` as an `ST_EXPR` statement
+     holding the `EX_FN_LIT`; `emitStatement` merely *evaluated* the
+     literal, yielding a closure handle that was discarded — the action
+     body never ran.
+- **Fix**: emit labels via `emitLabel`/`emitBranch` (which manage
+  `terminated` correctly), and detect `ST_EXPR`/`EX_FN_LIT` actions —
+  emit the literal then `emitClosureCall` the handle.
+- **Regression test**: `std/rules_test.skink` `TestRulesetFnLitAction`
+  — fails to compile on the old emitter (invalid IR) and asserts the
+  action actually fires at runtime.
+- **Discovered by**: Phase-5 battle sweep — building
+  `skink-advanced/07-ruleset-intro` and `08-distributed-system` end to
+  end (prior validation only `-check`ed those projects).

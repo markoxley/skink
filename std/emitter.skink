@@ -15521,17 +15521,33 @@ fn emitRulesetCode(cg: *CodeGen, d: ast.Decl) {
             trueLabel := nextLabel(cg)
             endLabel = nextLabel(cg)
             emitCondBranch(cg, condReg, trueLabel, endLabel)
-            emitln(cg, str.Concat(str.Concat(trueLabel, ":"), ""))
+            // emitLabel (not a raw emitln) resets cg.terminated — a stuck
+            // flag made emitBlockStmtRaw skip the action body and left
+            // lifted action literals as empty function bodies
+            // (comp_error.md #123).
+            emitLabel(cg, trueLabel)
         }
-        // Emit action body
+        // Emit action body. `action: { ... }` parses to bare statements
+        // run inline; `action: fn() { ... }` parses to an expr statement
+        // holding a function literal — evaluating it only yields the
+        // closure handle, so it must be invoked explicitly
+        // (comp_error.md #123).
         k := 0
         for k < len(rd.ruleAction) {
-            emitStatement(cg, rd.ruleAction[k])
+            act := rd.ruleAction[k]
+            if act.kind == ast.ST_EXPR && len(act.expr) > 0 && act.expr[0].kind == ast.EX_FN_LIT {
+                handleReg := emitExpression(cg, act.expr[0])
+                emitClosureCall(cg, "void", []string{}, handleReg, []string{})
+            } else {
+                emitStatement(cg, act)
+            }
             k = k + 1
         }
         if len(rd.condition) > 0 {
-            emitln(cg, str.Concat(str.Concat("  br label %", endLabel), ""))
-            emitln(cg, str.Concat(str.Concat(endLabel, ":"), ""))
+            if !cg.terminated {
+                emitBranch(cg, endLabel)
+            }
+            emitLabel(cg, endLabel)
         }
         emitln(cg, "  ret void")
         // Splice: entry label, then buffered allocas, then the body.

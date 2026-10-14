@@ -89,6 +89,38 @@ ruleset ClimateRules {
     }
 }
 
+var fnLitFired: int = 0
+
+// FnLitRules exercises `action: fn() { ... }` — the literal must be
+// lifted to a module function AND invoked by the eval loop. Previously
+// the lifted body emitted empty (invalid LLVM: a function with no basic
+// block) and even when emitted the closure handle was discarded without
+// being called, so the action never ran (comp_error.md #123).
+ruleset FnLitRules {
+    rule trig when currentTemp > 30.0 {
+        action: fn() {
+            fnLitFired = fnLitFired + 1
+        }
+        priority: 1
+    }
+}
+
+// TestRulesetFnLitAction verifies fn-literal rule actions compile and fire.
+pub fn TestRulesetFnLitAction() {
+    fnLitFired = 0
+
+    FnLitRules.start()
+    SetTemperature(35.0)
+    time.SleepMs(50)
+    FnLitRules.stop()
+    time.SleepMs(20)
+    FnLitRules.reset()
+
+    if fnLitFired == 0 {
+        Errorf("fn-literal rule action did not fire")
+    }
+}
+
 // TestRulesetStaticRules verifies static ruleset rules fire on conditions.
 pub fn TestRulesetStaticRules() {
     staticFired = 0
