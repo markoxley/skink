@@ -24,79 +24,87 @@
 module gpio
 
 import "std/errors"
+import "std/fs"
+import "std/strconv"
+import "std/str"
 
 // Pin represents a single GPIO pin identified by its BCM number.
 //
-// The struct fields mirror the state a kernel driver would track:
 //   - number: the BCM GPIO number passed to PinFactory.
-//   - mode:   the current pin direction (INPUT or OUTPUT).
+//   - mode:   the current pin direction (INPUT, OUTPUT, or PWM_MODE).
 //   - value:  the last level written to (or read from) the pin.
+//   - hw:     true when backed by /sys/class/gpio/gpioN on a Linux board;
+//             false when running against the in-memory workstation fallback.
 pub struct Pin {
     number: int  // the number
     mode: int  // the mode
     value: int  // the value
+    hw: bool  // whether sysfs hardware backend is active
 
     // SetOutput configures the pin as a digital output.
-    //
-    // Backend behavior:
-    //   - sysfs:    write "out" to /sys/class/gpio/gpioN/direction.
-    //   - wiringPi: pinMode(self.number, OUTPUT).
     pub fn SetOutput(self: *Pin) {
         self.mode = OUTPUT
-        // Real implementation: wiringPi pinMode(self.number, OUTPUT)
-        // or sysfs: write "out" to /sys/class/gpio/gpioN/direction
+        if self.hw {
+            p := "/sys/class/gpio/gpio" + strconv.Itoa(self.number) + "/direction"
+            fs.WriteAll(p, "out")
+        }
     }
 
     // SetInput configures the pin as a digital input.
-    //
-    // Backend behavior:
-    //   - sysfs:    write "in" to /sys/class/gpio/gpioN/direction.
-    //   - wiringPi: pinMode(self.number, INPUT).
     pub fn SetInput(self: *Pin) {
         self.mode = INPUT
-        // Real implementation: wiringPi pinMode(self.number, INPUT)
-        // or sysfs: write "in" to /sys/class/gpio/gpioN/direction
+        if self.hw {
+            p := "/sys/class/gpio/gpio" + strconv.Itoa(self.number) + "/direction"
+            fs.WriteAll(p, "in")
+        }
     }
 
     // Write drives the pin to the given level (LOW or HIGH).
-    //
-    // Backend behavior:
-    //   - sysfs:    write "0"/"1" to /sys/class/gpio/gpioN/value.
-    //   - wiringPi: digitalWrite(self.number, val).
-    //
-    // In the stub build the value is recorded so a subsequent Read returns it.
     pub fn Write(self: *Pin, val: int) {
         self.value = val
-        // Real implementation: wiringPi digitalWrite(self.number, val)
-        // or sysfs: write "0"/"1" to /sys/class/gpio/gpioN/value
+        if self.hw {
+            p := "/sys/class/gpio/gpio" + strconv.Itoa(self.number) + "/value"
+            if val != 0 {
+                fs.WriteAll(p, "1")
+            } else {
+                fs.WriteAll(p, "0")
+            }
+        }
     }
 
     // Read returns the current level of the pin (LOW or HIGH).
-    //
-    // Backend behavior:
-    //   - sysfs:    read /sys/class/gpio/gpioN/value.
-    //   - wiringPi: digitalRead(self.number).
-    //
-    // In the stub build it returns the last value written (or 0 for a fresh
-    // input pin), which lets tests verify write/read round-trips without
-    // hardware.
     pub fn Read(self: Pin) -> int {
-        // Real implementation: return wiringPi digitalRead(self.number)
-        // or sysfs: read /sys/class/gpio/gpioN/value
+        if self.hw {
+            p := "/sys/class/gpio/gpio" + strconv.Itoa(self.number) + "/value"
+            s, err := fs.ReadAll(p)
+            if err.message == "" && str.Len(s) > 0 {
+                if s[0] == 49 { // '1'
+                    return HIGH
+                }
+                return LOW
+            }
+        }
         return self.value
     }
 
-    // PWM sets the duty cycle for hardware pulse-width modulation on the pin.
-    //
-    // Backend behavior:
-    //   - wiringPi: pwmWrite(self.number, duty) (range defaults to 0..1023).
-    //   - pigpio:   hardware_PWM(self.number, freq, duty*10000).
-    //
-    // sysfs does not support PWM; a real backend must be selected. The stub
-    // records nothing and is a no-op so callers can compile on any host.
+    // PWM sets the duty cycle (0..100) for hardware pulse-width modulation.
+    // When /sys/class/pwm/pwmchip0 is present on Linux, configures a 50 Hz
+    // (20,000,000 ns) frame and writes the corresponding duty_cycle in ns;
+    // otherwise records the clamped duty in self.value for simulation.
     pub fn PWM(self: *Pin, duty: int) {
-        // Real implementation: wiringPi pwmWrite(self.number, duty)
-        // or pigpio: hardware_PWM(self.number, freq, duty*10000)
+        d := duty
+        if d < 0 { d = 0 }
+        if d > 100 { d = 100 }
+        self.value = d
+        if fs.Exists("/sys/class/pwm/pwmchip0") {
+            ch := "/sys/class/pwm/pwmchip0/pwm0"
+            if !fs.Exists(ch) {
+                fs.WriteAll("/sys/class/pwm/pwmchip0/export", "0")
+            }
+            fs.WriteAll(ch + "/period", "20000000")
+            fs.WriteAll(ch + "/duty_cycle", strconv.Itoa(d * 200000))
+            fs.WriteAll(ch + "/enable", "1")
+        }
     }
 
     // Number returns the BCM GPIO number of this pin.
@@ -104,51 +112,44 @@ pub struct Pin {
         return self.number
     }
 
-    // Mode returns the current pin direction (INPUT or OUTPUT).
+    // Mode returns the current pin direction (INPUT, OUTPUT, or PWM_MODE).
     pub fn Mode(self: Pin) -> int {
         return self.mode
     }
 
     // SetMode sets the pin direction: INPUT, OUTPUT, or PWM_MODE.
-    // Convenience method matching the book's pin.SetMode(gpio.OUTPUT).
     pub fn SetMode(self: *Pin, mode: int) {
         if mode == INPUT {
             self.SetInput()
+        } else if mode == PWM_MODE {
+            self.mode = PWM_MODE
         } else {
             self.SetOutput()
         }
     }
 
-    // SetPull configures the internal pull resistor: 0=off, 1=up, 2=down.
-    // The stub backend records nothing; a real backend calls the
-    // corresponding pull-up/pull-down API.
+    // SetPull configures the internal pull resistor: 0=off, 1=down, 2=up.
     pub fn SetPull(self: *Pin, pull: int) {
-        // no-op on the stub backend
+        // sysfs does not expose pull-resistor control; retained for API compatibility.
     }
 }
 
-// Setup initializes the GPIO subsystem.
-//
-// Backend behavior:
-//   - wiringPi: wiringPiSetup() (or wiringPiSetupGpio() for BCM numbering).
-//   - sysfs:    no global setup is required; per-pin export happens on demand.
-//   - pigpio:   gpioInitialise().
-//
-// The stub build returns a nil error (empty message) so callers can run on any
-// host. A real backend should return a non-empty error message on failure.
+// Setup initializes the GPIO subsystem. Succeeds on both sysfs-equipped
+// Linux boards and workstation fallback environments.
 pub fn Setup() -> errors.Error {
-    // Real implementation: wiringPiSetup() / wiringPiSetupGpio()
-    // or pigpio: gpioInitialise()
     return errors.New("")
 }
 
-// PinFactory creates a Pin by its BCM number.
-//
-// The returned pin starts in INPUT mode with level LOW. On a sysfs backend the
-// pin would be exported via /sys/class/gpio/export at this point; on wiringPi
-// no allocation is needed until SetInput/SetOutput is called.
+// PinFactory creates a Pin by its BCM number. When /sys/class/gpio is
+// writable on the host, the pin is exported and backed by sysfs; otherwise
+// an in-memory pin is returned so code can run on any workstation.
 pub fn PinFactory(bcmNumber: int) -> Pin {
-    return Pin{number: bcmNumber, mode: INPUT, value: LOW}
+    pinDir := "/sys/class/gpio/gpio" + strconv.Itoa(bcmNumber)
+    if fs.Exists("/sys/class/gpio/export") && !fs.Exists(pinDir) {
+        fs.WriteAll("/sys/class/gpio/export", strconv.Itoa(bcmNumber))
+    }
+    hasHw := fs.Exists(pinDir + "/value")
+    return Pin{number: bcmNumber, mode: INPUT, value: LOW, hw: hasHw}
 }
 
 // Pin direction constants used by SetInput/SetOutput and Mode.

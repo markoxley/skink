@@ -99,3 +99,15 @@ pub fn TestClose() {
         Errorf("double Close should return empty error")
     }
 }
+
+// TestOpenInvalidAddr verifies out-of-range I2C addresses are rejected.
+pub fn TestOpenInvalidAddr() {
+    _, err := i2c.Open(1, 0x80)
+    if err.message == "" {
+        Errorf("Open should reject 7-bit address > 0x7f")
+    }
+    _, err2 := i2c.Open(-1, 0x48)
+    if err2.message == "" {
+        Errorf("Open should reject negative bus number")
+    }
+}

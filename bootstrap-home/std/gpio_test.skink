@@ -75,3 +75,20 @@ pub fn TestConstants() {
         Errorf("OUTPUT should be 1")
     }
 }
+
+// TestPinPWMAndMode verifies PWM duty clamping and SetMode(PWM_MODE).
+pub fn TestPinPWMAndMode() {
+    p := gpio.PinFactory(18)
+    p.SetMode(gpio.PWM_MODE)
+    if p.Mode() != gpio.PWM_MODE {
+        Errorf("Mode should be PWM_MODE")
+    }
+    p.PWM(150)
+    if p.Read() != 100 {
+        Errorf("PWM should clamp duty to 100")
+    }
+    p.PWM(-10)
+    if p.Read() != 0 {
+        Errorf("PWM should clamp negative duty to 0")
+    }
+}

@@ -90,3 +90,15 @@ pub fn TestClose() {
         Errorf("double Close should return empty error")
     }
 }
+
+// TestOpenInvalidParams verifies invalid SPI mode or speed is rejected.
+pub fn TestOpenInvalidParams() {
+    _, err := spi.Open(0, 0, 1000000, 4)
+    if err.message == "" {
+        Errorf("Open should reject mode > 3")
+    }
+    _, err2 := spi.Open(0, 0, 0, 0)
+    if err2.message == "" {
+        Errorf("Open should reject speedHz <= 0")
+    }
+}

@@ -25,70 +25,89 @@ module i2c
 
 import "std/errors"
 import "std/libc"
+import "std/strconv"
+
+extern fn open(path: string, flags: int) -> int
+extern fn read(fd: int, buf: string, count: int) -> int
+extern fn write(fd: int, buf: string, count: int) -> int
+extern fn ioctl(fd: int, request: int64, arg: int64) -> int
+extern fn Skink_close_fd(fd: int) -> int
+
+// Linux <linux/i2c-dev.h> slave-address selector ioctl.
+pub const I2C_SLAVE = 0x0703
 
 // Bus represents an I2C bus connection to a single slave device.
 //
-//   - fd:         the kernel file descriptor for /dev/i2c-N (0 when closed).
+//   - fd:         the kernel file descriptor for /dev/i2c-N (or 1 in
+//                 workstation fallback mode; 0 when closed).
 //   - deviceAddr: the 7-bit slave address selected via I2C_SLAVE.
+//   - hw:         true when fd is a live /dev/i2c-N descriptor.
 pub struct Bus {
     fd: int  // the file descriptor
     deviceAddr: int  // the device address
+    hw: bool  // whether backed by a real /dev/i2c-N descriptor
 
     // Write sends len bytes of data to the currently selected slave.
-    //
-    // Backend behavior:
-    //   - write(self.fd, data, len) returns the number of bytes written.
-    //
-    // The stub returns len unconditionally. A real backend should return the
-    // byte count from write() (which may be less than len on a short write).
     pub fn Write(self: *Bus, data: string, len: int) -> int {
-        // Real implementation: return write(self.fd, data, len)
+        if self.hw {
+            return write(self.fd, data, len)
+        }
         return len
     }
 
     // Read receives up to len bytes from the currently selected slave.
-    //
-    // Backend behavior:
-    //   - buf := libc.malloc(len + 1)
-    //   - n := read(self.fd, buf, len)
-    //   - buf[n] = 0  (NUL terminator)
-    //
     // The returned string is heap-allocated and must be freed with libc.free.
-    // The stub fills nothing but still allocates a NUL-terminated buffer so
-    // callers can exercise the ownership contract without hardware.
     pub fn Read(self: *Bus, len: int) -> (string, errors.Error) {
         buf := libc.malloc(len + 1)
-        // Real implementation: n := read(self.fd, buf, len)
+        if self.hw {
+            n := read(self.fd, buf, len)
+            if n < 0 {
+                buf[0] = 0
+                return buf, errors.New("i2c read failed")
+            }
+            buf[n] = 0
+            return buf, errors.New("")
+        }
         buf[len] = 0
         return buf, errors.New("")
     }
 
     // WriteReg writes a single byte value to an 8-bit device register.
-    //
-    // Backend behavior:
-    //   - ioctl(self.fd, I2C_SMBUS, &{write, reg, I2C_SMBUS_BYTE_DATA, val}).
-    //
-    // The stub returns a nil error. A real backend should return a non-empty
-    // error when the ioctl fails (e.g. ACK missing from the slave).
     pub fn WriteReg(self: *Bus, reg: int, val: int) -> errors.Error {
-        // Real implementation: i2c_smbus_write_byte_data(self.fd, reg, val)
+        if self.hw {
+            buf := libc.malloc(2)
+            buf[0] = reg & 255
+            buf[1] = val & 255
+            n := write(self.fd, buf, 2)
+            libc.free(buf)
+            if n != 2 {
+                return errors.New("i2c write register failed")
+            }
+        }
         return errors.New("")
     }
 
-    // ReadReg reads a single byte from an 8-bit device register.
-    //
-    // Backend behavior:
-    //   - ioctl(self.fd, I2C_SMBUS, &{read, reg, I2C_SMBUS_BYTE_DATA}).
-    //
-    // The stub returns (0, nil). A real backend should return the byte read
-    // (0..255) or a non-empty error when the ioctl fails.
+    // ReadReg writes the 8-bit register address and reads back one byte.
     pub fn ReadReg(self: *Bus, reg: int) -> (int, errors.Error) {
-        // Real implementation: return i2c_smbus_read_byte_data(self.fd, reg)
+        if self.hw {
+            buf := libc.malloc(2)
+            buf[0] = reg & 255
+            if write(self.fd, buf, 1) != 1 {
+                libc.free(buf)
+                return 0, errors.New("i2c register select failed")
+            }
+            if read(self.fd, buf, 1) != 1 {
+                libc.free(buf)
+                return 0, errors.New("i2c register read failed")
+            }
+            v := int(uint8(buf[0]))
+            libc.free(buf)
+            return v, errors.New("")
+        }
         return 0, errors.New("")
     }
 
-    // WriteRegister is an alias for WriteReg, matching the book's
-    // bus.WriteRegister(reg, val) usage.
+    // WriteRegister is an alias for WriteReg.
     pub fn WriteRegister(self: *Bus, reg: int, val: int) -> errors.Error {
         return self.WriteReg(reg, val)
     }
@@ -98,15 +117,14 @@ pub struct Bus {
         return self.ReadReg(reg)
     }
 
-    // Close releases the bus file descriptor. It is idempotent: calling Close
-    // on an already-closed Bus returns a nil error and does nothing.
-    //
-    // Backend behavior:
-    //   - close(self.fd) when fd != 0.
+    // Close releases the bus file descriptor. It is idempotent.
     pub fn Close(self: *Bus) -> errors.Error {
         if self.fd != 0 {
-            // Real implementation: close(self.fd)
+            if self.hw {
+                Skink_close_fd(self.fd)
+            }
             self.fd = 0
+            self.hw = false
         }
         return errors.New("")
     }
@@ -122,18 +140,24 @@ pub struct Bus {
     }
 }
 
-// Open opens I2C bus busNumber and selects the slave at deviceAddr.
-//
-// Backend behavior:
-//   - fd := open("/dev/i2c-{busNumber}", O_RDWR)
-//   - ioctl(fd, I2C_SLAVE, deviceAddr)
-//
-// The stub returns a Bus with a non-zero fake fd so callers can exercise the
-// API without hardware. A real backend should return fd <= 0 with a non-empty
-// error when the device node cannot be opened or the address is out of range.
+// Open opens /dev/i2c-{busNumber} and selects the slave at deviceAddr via
+// ioctl(I2C_SLAVE). When the device node is absent or inaccessible (e.g.
+// on a workstation without I2C permissions), it falls back to an in-memory
+// Bus so callers and tests can run without hardware.
 pub fn Open(busNumber: int, deviceAddr: int) -> (Bus, errors.Error) {
-    // Real implementation: open("/dev/i2c-N", O_RDWR) + ioctl(fd, I2C_SLAVE, addr)
-    return Bus{fd: 1, deviceAddr: deviceAddr}, errors.New("")
+    if busNumber < 0 || deviceAddr < 0 || deviceAddr > 0x7f {
+        return Bus{fd: 0, deviceAddr: deviceAddr, hw: false}, errors.New("invalid i2c bus or address")
+    }
+    path := "/dev/i2c-" + strconv.Itoa(busNumber)
+    fd := open(path, 2) // O_RDWR = 2
+    if fd >= 0 {
+        if ioctl(fd, int64(I2C_SLAVE), int64(deviceAddr)) < 0 {
+            Skink_close_fd(fd)
+            return Bus{fd: 0, deviceAddr: deviceAddr, hw: false}, errors.New("ioctl I2C_SLAVE failed")
+        }
+        return Bus{fd: fd, deviceAddr: deviceAddr, hw: true}, errors.New("")
+    }
+    return Bus{fd: 1, deviceAddr: deviceAddr, hw: false}, errors.New("")
 }
 
 // Standard I2C clock speeds (Hz), for documentation and future SetSpeed support.
