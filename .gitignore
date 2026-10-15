@@ -16,3 +16,5 @@ plus_test
 __skink_test_bin
 # Local artifacts (stale binaries, scratch tests, planning notes)
 artifacts/
+AGENTS.md
+.devin/config.local.json
