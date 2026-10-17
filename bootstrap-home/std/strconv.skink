@@ -328,26 +328,54 @@ pub fn FormatFloat(f: float, precision: int) -> string {
         pos = pos + 1
         f = -f
     }
-    intPart := int(f)
-    // Convert integer part.
-    intStr := Itoa(intPart)
-    intLen := int(libc.strlen(intStr))
-    libc.memcpy(string(int64(buf) + int64(pos)), intStr, intLen)
-    pos = pos + intLen
-    libc.free(intStr)
-    if precision > 0 {
-        buf[pos] = 46 // '.'
-        pos = pos + 1
-        // Extract each fractional digit by multiplying and truncating.
-        frac := f - float(intPart)
-        for i := 0; i < precision; i = i + 1 {
-            frac = frac * 10.0
-            digit := int(frac)
-            buf[pos] = 48 + digit
-            pos = pos + 1
-            frac = frac - float(digit)
+    // Scale by 10^precision and round to the nearest integer with ties to
+    // even — the same convention as fmt's %.*f formatting. Digit-extraction
+    // without rounding visibly drifts (9.9125 formatted to "9.9124999999").
+    scale := 1.0
+    for i := 0; i < precision; i = i + 1 {
+        scale = scale * 10.0
+    }
+    scaled := f * scale
+    flr := float(int64(scaled))
+    diff := scaled - flr
+    rounded := flr
+    if diff > 0.5 {
+        rounded = flr + 1.0
+    } else if diff == 0.5 {
+        if int64(flr) % 2 != 0 {
+            rounded = flr + 1.0
         }
     }
+    // Emit the rounded scaled value as integer + fractional digits, padding
+    // the fraction with leading zeros when needed.
+    digits := Itoa64(int64(rounded))
+    digLen := int(libc.strlen(digits))
+    if precision <= 0 {
+        libc.memcpy(string(int64(buf) + int64(pos)), digits, digLen)
+        pos = pos + digLen
+    } else {
+        split := digLen - precision
+        if split <= 0 {
+            buf[pos] = 48 // '0'
+            pos = pos + 1
+            buf[pos] = 46 // '.'
+            pos = pos + 1
+            for i := split; i < 0; i = i + 1 {
+                buf[pos] = 48 // '0'
+                pos = pos + 1
+            }
+            libc.memcpy(string(int64(buf) + int64(pos)), digits, digLen)
+            pos = pos + digLen
+        } else {
+            libc.memcpy(string(int64(buf) + int64(pos)), digits, split)
+            pos = pos + split
+            buf[pos] = 46 // '.'
+            pos = pos + 1
+            libc.memcpy(string(int64(buf) + int64(pos)), string(int64(digits) + int64(split)), digLen - split)
+            pos = pos + digLen - split
+        }
+    }
+    libc.free(digits)
     buf[pos] = 0
     return buf
 }

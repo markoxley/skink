@@ -526,6 +526,30 @@ struct Parser {
                 }
                 // Decode escape sequence
                 esc := self.s[self.pos]
+                if esc == 117 {
+                    // \uXXXX — decode the 4-hex-digit codepoint, combining
+                    // surrogate pairs; lone surrogates become U+FFFD.
+                    self.consume() // 'u'
+                    cp := self.readHex4()
+                    if cp >= 55296 && cp <= 56319 &&
+                       self.pos + 1 < self.len &&
+                       self.s[self.pos] == 92 && self.s[self.pos + 1] == 117 {
+                        save := self.pos
+                        self.consume()
+                        self.consume()
+                        lo := self.readHex4()
+                        if lo >= 56320 && lo <= 57343 {
+                            cp = 65536 + (cp - 55296) * 1024 + (lo - 56320)
+                        } else {
+                            self.pos = save
+                            cp = 65533
+                        }
+                    } else if cp >= 55296 && cp <= 57343 {
+                        cp = 65533
+                    }
+                    writeUtf8(&b, cp)
+                    continue
+                }
                 if esc == 34 {
                     str.WriteByte(&b, 34)
                 } else {
@@ -567,6 +591,20 @@ struct Parser {
         res := str.String(b)
         str.Free(&b)
         return FromString(res)
+    }
+
+    // readHex4 consumes up to 4 hex digits and returns their value.
+    fn readHex4(self: *Parser) -> int {
+        cp := 0
+        for k := 0; k < 4 && self.pos < self.len; k = k + 1 {
+            hv := hexVal(self.s[self.pos])
+            if hv < 0 {
+                break
+            }
+            cp = cp * 16 + hv
+            self.pos = self.pos + 1
+        }
+        return cp
     }
 
     fn parseTrue(self: *Parser) -> Value {
@@ -657,6 +695,39 @@ struct Parser {
             val = -val
         }
         return FromNumber(val)
+    }
+}
+
+// hexVal returns the value of an ASCII hex digit, or -1.
+fn hexVal(c: int) -> int {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return -1
+}
+
+// writeUtf8 appends the UTF-8 encoding of codepoint cp to b.
+fn writeUtf8(b: *str.Builder, cp: int) {
+    if cp < 128 {
+        str.WriteByte(b, cp)
+    } else if cp < 2048 {
+        str.WriteByte(b, 192 + cp / 64)
+        str.WriteByte(b, 128 + cp % 64)
+    } else if cp < 65536 {
+        str.WriteByte(b, 224 + cp / 4096)
+        str.WriteByte(b, 128 + (cp / 64) % 64)
+        str.WriteByte(b, 128 + cp % 64)
+    } else {
+        str.WriteByte(b, 240 + cp / 262144)
+        str.WriteByte(b, 128 + (cp / 4096) % 64)
+        str.WriteByte(b, 128 + (cp / 64) % 64)
+        str.WriteByte(b, 128 + cp % 64)
     }
 }
 

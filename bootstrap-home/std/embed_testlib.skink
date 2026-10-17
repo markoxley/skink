@@ -1,0 +1,13 @@
+// embed_testlib.skink — helper module for embed_test.skink: embeds the
+// same fixture tree as the test's own `embed` decl so the tests cover both
+// embeds declared in imported modules and virtual-path deduplication.
+
+module embed_testlib
+
+embed "embed_testdata"
+
+// Marker reports that this helper module is linked in; the test references
+// it so the import is not "unused" — the embed decl is the side effect.
+pub fn Marker() -> int {
+    return 1
+}

@@ -37,6 +37,7 @@ import "std/ast"
 import "std/str"
 import "std/strconv"
 import "std/checker"
+import "std/fs"
 
 // === Constants ===
 // Type kind constants are imported from checker module (checker.TK_*)
@@ -275,6 +276,11 @@ pub struct CodeGen {
     // Global variable initializers: collected during emission and
     // initialized in a _skink_global_init function called before main.
     globalInits:         []ast.Stmt
+
+    // Embed declarations (`embed "dir"`): collected during emission and
+    // baked into the binary as data globals registered by
+    // @_skink_embed_init before main runs.
+    embeds:              []embedSpec
 
     // Function literal counter for generating unique names
     fnLitCounter:        int
@@ -15338,6 +15344,14 @@ pub fn emitProgram(cg: *CodeGen, decls: []ast.Stmt) -> string {
         if d.kind == ast.ST_EXTERN || (d.kind == ast.ST_FN && d.fnIsExtern) {
             emitExternFnDecl(cg, d)
         }
+        if decls[i].kind == ast.ST_EMBED {
+            // Collect the embed spec now; the data blobs and the
+            // @_skink_embed_init registration function are emitted in
+            // emitRuntimeMain once every decl is collected.
+            srcDir := dirNameCG(decls[i].filePath)
+            spec := embedSpec{srcRoot: joinPathCG(srcDir, d.embedPath), virtRoot: cleanEmbedRoot(d.embedPath)}
+            cg.embeds = append(cg.embeds, spec)
+        }
         // Emit global variables (ST_VARDECL stores data on Stmt, not Decl)
         if decls[i].kind == ast.ST_VARDECL {
             stmt := decls[i]
@@ -15728,6 +15742,188 @@ fn emitStructDtorTrampoline(cg: *CodeGen, name: string, layout: StructLayout) {
 }
 
 // emitRuntimeMain emits the C entry point and runtime helpers for argc/argv.
+// === Embedded filesystem support ===
+
+// embedSpec records one `embed "dir"` declaration: the on-disk root
+// (resolved against the declaring source file) and the virtual root under
+// which the directory's contents become reachable through the "int:"
+// filesystem.
+struct embedSpec {
+    srcRoot:  string
+    virtRoot: string
+}
+
+// embedFile is one file captured for embedding.
+struct embedFile {
+    virt: string // the virtual path, e.g. "models/tag/en.bin"
+    src:  string // the on-disk source path
+    data: string // the raw bytes (not NUL-safe — size is authoritative)
+    size: int    // the byte count
+}
+
+// dirNameCG returns the directory portion of a path ("a/b/c" -> "a/b").
+fn dirNameCG(p: string) -> string {
+    idx := str.LastIndexOf(p, "/")
+    if idx < 0 {
+        return "."
+    }
+    return str.Substr(p, 0, idx)
+}
+
+// joinPathCG joins two path segments with a single slash.
+fn joinPathCG(a: string, b: string) -> string {
+    if str.Len(a) == 0 || str.Equal(a, ".") {
+        return b
+    }
+    if str.EndsWith(a, "/") {
+        return str.Concat(a, b)
+    }
+    return str.Concat(a, str.Concat("/", b))
+}
+
+// cleanEmbedRoot normalizes an embed path into its virtual-root form:
+// leading "./" and "/" and trailing "/" are stripped, so `embed "models"`
+// and `embed "./models/"` both mount under "models".
+fn cleanEmbedRoot(s: string) -> string {
+    for str.StartsWith(s, "./") {
+        s = str.Substr(s, 2, str.Len(s) - 2)
+    }
+    for str.StartsWith(s, "/") {
+        s = str.Substr(s, 1, str.Len(s) - 1)
+    }
+    for str.EndsWith(s, "/") {
+        s = str.Substr(s, 0, str.Len(s) - 1)
+    }
+    return s
+}
+
+// walkEmbedDir collects every regular file under srcDir, recursing into
+// subdirectories. Each file's virtual path is virtPrefix + "/" + name.
+// Unreadable inputs surface as codegen errors.
+fn walkEmbedDir(cg: *CodeGen, srcDir: string, virtPrefix: string) -> []embedFile {
+    var out []embedFile
+    entries, err := fs.ReadDir(srcDir)
+    if err.message != "" {
+        errorf(cg, str.Concat("embed: cannot read directory ", srcDir))
+        return out
+    }
+    i := 0
+    for i < len(entries) {
+        name := entries[i].Name
+        srcPath := str.Concat(srcDir, str.Concat("/", name))
+        virtPath := name
+        if str.Len(virtPrefix) > 0 {
+            virtPath = str.Concat(virtPrefix, str.Concat("/", name))
+        }
+        if entries[i].IsDir {
+            sub := walkEmbedDir(cg, srcPath, virtPath)
+            j := 0
+            for j < len(sub) {
+                out = append(out, sub[j])
+                j = j + 1
+            }
+        } else {
+            ef := embedFile{virt: virtPath, src: srcPath}
+            size := int(fs.FileSize(srcPath))
+            f, ferr := fs.Open(srcPath, "rb")
+            if size < 0 || ferr.message != "" {
+                errorf(cg, str.Concat("embed: cannot read file ", srcPath))
+            } else {
+                // Strings are writable byte buffers; fill one with fread.
+                ef.data = str.Repeat(" ", size + 1)
+                got := 0
+                if size > 0 {
+                    got = f.Read(ef.data, size)
+                }
+                if got < 0 {
+                    got = 0
+                }
+                ef.size = got
+                out = append(out, ef)
+            }
+            f.Close()
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// emitEmbedTables emits one private data global per embedded file and the
+// @_skink_embed_init function, which registers every file with the
+// embedded-filesystem table in the runtime before main runs. Virtual paths
+// are deduplicated — the first `embed` providing a path wins.
+fn emitEmbedTables(cg: *CodeGen) {
+    if len(cg.embeds) == 0 {
+        return
+    }
+    var files []embedFile
+    var seen []string
+    i := 0
+    for i < len(cg.embeds) {
+        found := walkEmbedDir(cg, cg.embeds[i].srcRoot, cg.embeds[i].virtRoot)
+        j := 0
+        for j < len(found) {
+            dup := false
+            k := 0
+            for k < len(seen) {
+                if str.Equal(seen[k], found[j].virt) {
+                    dup = true
+                    break
+                }
+                k = k + 1
+            }
+            if !dup {
+                seen = append(seen, found[j].virt)
+                files = append(files, found[j])
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // The init function is always emitted when an embed decl exists, even
+    // when it collects no files — main calls it unconditionally.
+    emitStringGlobal(cg, "declare void @Skink_embed_register(i8*, i8*, i64)\n")
+    emitln(cg, "define void @_skink_embed_init() {\n")
+    emitln(cg, "entry:\n")
+    hexDigits := "0123456789ABCDEF"
+    i = 0
+    for i < len(files) {
+        f := files[i]
+        dataGlobal := str.Concat("@__skink_embed_data_", strconv.Itoa(i))
+        dataLen := f.size + 1
+
+        // The path name global reuses the ordinary string-literal path:
+        // emitStringLiteral returns an i8* in the current function.
+        nameReg := emitStringLiteral(cg, f.virt)
+
+        // Every byte becomes a \XX hex escape so arbitrary binary content
+        // survives verbatim; a trailing \00 terminates the array.
+        b := str.NewBuilder(f.size * 4 + 32)
+        b.Write(dataGlobal)
+        b.Write(" = private constant [")
+        b.Write(strconv.Itoa(dataLen))
+        b.Write(" x i8] c\"")
+        j := 0
+        for j < f.size {
+            c := f.data[j]
+            b.WriteByte(92)
+            b.WriteByte(hexDigits[(c >> 4) & 15])
+            b.WriteByte(hexDigits[c & 15])
+            j = j + 1
+        }
+        b.Write("\\00\"\n")
+        emitStringGlobal(cg, str.BuilderValue(b))
+
+        dataLenS := strconv.Itoa(dataLen)
+        dataGEP := str.Concat("getelementptr inbounds ([", str.Concat(dataLenS, str.Concat(" x i8], [", str.Concat(dataLenS, str.Concat(" x i8]* ", str.Concat(dataGlobal, ", i64 0, i64 0)"))))))
+        emitfmt(cg, "  call void @Skink_embed_register(i8* %s, i8* %s, i64 %s)\n", []string{nameReg, dataGEP, strconv.Itoa(f.size)})
+        i = i + 1
+    }
+    emitln(cg, "  ret void\n")
+    emitln(cg, "}\n")
+}
+
 fn emitRuntimeMain(cg: *CodeGen, decls: []ast.Stmt) {
     // Find the user's main function to determine return type
     mainRetType := "void"
@@ -15850,11 +16046,19 @@ fn emitRuntimeMain(cg: *CodeGen, decls: []ast.Stmt) {
         emitln(cg, "}\n")
     }
 
+    // Emit embedded-data tables and their registration init. The init
+    // runs before global initializers so embedded files are reachable
+    // from anywhere, including module-level init code.
+    emitEmbedTables(cg)
+
     // Emit C entry point
     emitln(cg, "define i32 @main(i32 %argc, i8** %argv) {\n")
     emitln(cg, "entry:\n")
     emitln(cg, "  call void @_skink_runtime_set_argc(i32 %argc)\n")
     emitln(cg, "  call void @_skink_runtime_set_argv(i8** %argv)\n")
+    if len(cg.embeds) > 0 {
+        emitln(cg, "  call void @_skink_embed_init()\n")
+    }
     // Call global init function if there are any global var initializers
     if len(cg.globalInits) > 0 {
         emitln(cg, "  call void @_skink_global_init()\n")

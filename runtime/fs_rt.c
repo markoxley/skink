@@ -511,3 +511,110 @@ int Skink_signal_handle(int sig, void (*fn)(void)) {
 }
 
 #endif
+
+// === Embedded filesystem ===
+//
+// `embed "dir"` declarations bake file contents into the compiled binary.
+// The emitter emits @_skink_embed_init, which runs before main and calls
+// Skink_embed_register once per embedded file. std/fs routes paths with an
+// "int:" prefix to this table, so embedded data is readable through the
+// ordinary fs API with no registration step in user code.
+
+// SkinkEmbedEntry is one embedded file: its virtual path plus the byte
+// blob. The blob is emitted as an LLVM constant and is NOT NUL-terminated —
+// length is authoritative.
+typedef struct {
+  const char *path;
+  const char *data;
+  long long   len;
+} SkinkEmbedEntry;
+
+static SkinkEmbedEntry *skink_embed_entries = NULL;
+static int skink_embed_count_v = 0;
+static int skink_embed_cap_v = 0;
+
+// Skink_embed_register adds an embedded file to the table. First
+// registration of a path wins — later duplicates are ignored.
+void Skink_embed_register(const char *path, const char *data, long long len) {
+  if (!path || !data) {
+    return;
+  }
+  for (int i = 0; i < skink_embed_count_v; i++) {
+    if (strcmp(skink_embed_entries[i].path, path) == 0) {
+      return;
+    }
+  }
+  if (skink_embed_count_v >= skink_embed_cap_v) {
+    int cap = skink_embed_cap_v ? skink_embed_cap_v * 2 : 32;
+    SkinkEmbedEntry *p =
+        (SkinkEmbedEntry *)realloc(skink_embed_entries, (size_t)cap * sizeof(SkinkEmbedEntry));
+    if (!p) {
+      return;
+    }
+    skink_embed_entries = p;
+    skink_embed_cap_v = cap;
+  }
+  skink_embed_entries[skink_embed_count_v].path = path;
+  skink_embed_entries[skink_embed_count_v].data = data;
+  skink_embed_entries[skink_embed_count_v].len = len;
+  skink_embed_count_v++;
+}
+
+// Skink_embed_ptr returns the embedded bytes for path, or NULL if absent.
+const char *Skink_embed_ptr(const char *path) {
+  if (!path) {
+    return NULL;
+  }
+  for (int i = 0; i < skink_embed_count_v; i++) {
+    if (strcmp(skink_embed_entries[i].path, path) == 0) {
+      return skink_embed_entries[i].data;
+    }
+  }
+  return NULL;
+}
+
+// Skink_embed_size returns the embedded byte count for path, or -1 if absent.
+long long Skink_embed_size(const char *path) {
+  if (!path) {
+    return -1;
+  }
+  for (int i = 0; i < skink_embed_count_v; i++) {
+    if (strcmp(skink_embed_entries[i].path, path) == 0) {
+      return skink_embed_entries[i].len;
+    }
+  }
+  return -1;
+}
+
+// Skink_embed_count returns the number of registered embedded files.
+int Skink_embed_count(void) { return skink_embed_count_v; }
+
+// Skink_embed_path returns the virtual path of the index-th embedded file,
+// or NULL when index is out of range.
+const char *Skink_embed_path(int index) {
+  if (index < 0 || index >= skink_embed_count_v) {
+    return NULL;
+  }
+  return skink_embed_entries[index].path;
+}
+
+// Skink_embed_isdir reports whether path names an embedded directory —
+// i.e. any embedded file lives under path + "/". The empty string and
+// "/" name the virtual root and report a directory whenever the table
+// is non-empty.
+int Skink_embed_isdir(const char *path) {
+  if (!path) {
+    return 0;
+  }
+  size_t n = strlen(path);
+  if (n == 0 || (n == 1 && path[0] == '/')) {
+    return skink_embed_count_v > 0 ? 1 : 0;
+  }
+  for (int i = 0; i < skink_embed_count_v; i++) {
+    const char *p = skink_embed_entries[i].path;
+    if (strncmp(p, path, n) == 0 && p[n] == '/') {
+      return 1;
+    }
+  }
+  return 0;
+}

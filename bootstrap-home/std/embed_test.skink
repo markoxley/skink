@@ -1,0 +1,150 @@
+// embed_test.skink — regression tests for the `embed` directive and the
+// "int:" embedded filesystem.
+//
+// `embed "embed_testdata"` bakes the fixture tree into this test binary;
+// every assertion below reads it back through the ordinary std/fs API,
+// proving embedded data needs no registration step.
+
+module embed_test
+
+import "embed_testlib"
+import "std/fs"
+import "std/str"
+import "testing"
+
+// Two `embed "embed_testdata"` declarations (this file and the imported
+// embed_testlib module) cover both module-level embeds and virtual-path
+// deduplication — each file must appear exactly once.
+embed "embed_testdata"
+
+// TestModuleEmbed proves an `embed` decl in an imported module registers
+// its files too (and Marker keeps the import used).
+pub fn TestModuleEmbed() {
+    testing.AssertEqualInt(1, embed_testlib.Marker(), "helper linked")
+    data, err := fs.ReadAll("int:embed_testdata/hello.txt")
+    testing.AssertEqualString("", err.message, "read embedded file")
+    testing.AssertEqualString("hello embedded world", data, "contents match")
+}
+
+// TestEmbeddedReadAll checks whole-file reads through the int: scheme.
+pub fn TestEmbeddedReadAll() {
+    data, err := fs.ReadAll("int:embed_testdata/hello.txt")
+    testing.AssertEqualString("", err.message, "read embedded file")
+    testing.AssertEqualString("hello embedded world", data, "contents match")
+}
+
+// TestEmbeddedOpenRead exercises File.Open/Read/IsEOF/Close on int: paths.
+pub fn TestEmbeddedOpenRead() {
+    f, err := fs.Open("int:embed_testdata/hello.txt", "r")
+    testing.AssertEqualString("", err.message, "open embedded file")
+    buf := str.Repeat(" ", 64)
+    n := f.Read(buf, 64)
+    testing.AssertEqualInt(20, n, "read all 20 bytes")
+    testing.AssertEqualString("hello embedded world", str.Substr(buf, 0, n), "read contents")
+    testing.AssertTrue(f.IsEOF(), "at EOF")
+    testing.AssertEqualString("", f.Close().message, "close")
+}
+
+// TestEmbeddedReadChar exercises byte-at-a-time reads.
+pub fn TestEmbeddedReadChar() {
+    f, err := fs.Open("int:embed_testdata/hello.txt", "r")
+    testing.AssertEqualString("", err.message, "open")
+    c, cerr := f.ReadChar()
+    testing.AssertEqualString("", cerr.message, "first byte ok")
+    testing.AssertEqualInt(104, c, "first byte is 'h'")
+    f.Close()
+}
+
+// TestEmbeddedBinary checks binary data with NUL bytes round-trips intact.
+pub fn TestEmbeddedBinary() {
+    f, err := fs.Open("int:embed_testdata/models/sub/blob.bin", "rb")
+    testing.AssertEqualString("", err.message, "open binary")
+    buf := str.Repeat(" ", 300)
+    n := f.Read(buf, 300)
+    testing.AssertEqualInt(266, n, "read all 266 bytes")
+    testing.AssertEqualInt(0, buf[0], "byte 0")
+    testing.AssertEqualInt(255, buf[255], "byte 255")
+    testing.AssertEqualInt(0, buf[256], "byte 256 is NUL")
+    testing.AssertEqualInt(115, buf[257], "byte 257 is 's'")
+    f.Close()
+    testing.AssertEqualInt(266, int(fs.FileSize("int:embed_testdata/models/sub/blob.bin")), "binary size")
+}
+
+// TestEmbeddedFileOps checks the metadata entry points.
+pub fn TestEmbeddedFileOps() {
+    testing.AssertTrue(fs.Exists("int:embed_testdata/hello.txt"), "exists")
+    testing.AssertTrue(fs.IsFile("int:embed_testdata/hello.txt"), "is file")
+    testing.AssertTrue(fs.IsDir("int:embed_testdata/models"), "is dir")
+    testing.AssertTrue(fs.IsDir("int:embed_testdata"), "embed root is dir")
+    testing.AssertFalse(fs.IsDir("int:embed_testdata/hello.txt"), "file is not dir")
+    testing.AssertEqualInt(20, int(fs.FileSize("int:embed_testdata/hello.txt")), "size")
+
+    info, serr := fs.Stat("int:embed_testdata/hello.txt")
+    testing.AssertEqualString("", serr.message, "stat")
+    testing.AssertEqualString("hello.txt", info.Name, "stat name")
+    testing.AssertEqualInt(20, int(info.Size), "stat size")
+    testing.AssertFalse(info.IsDir, "stat not dir")
+}
+
+// TestEmbeddedReadDir lists an embedded directory.
+pub fn TestEmbeddedReadDir() {
+    entries, err := fs.ReadDir("int:embed_testdata")
+    testing.AssertEqualString("", err.message, "readdir")
+    foundFile := false
+    foundDir := false
+    for i := 0; i < len(entries); i = i + 1 {
+        if str.Equal(entries[i].Name, "hello.txt") && !entries[i].IsDir {
+            foundFile = true
+        }
+        if str.Equal(entries[i].Name, "models") && entries[i].IsDir {
+            foundDir = true
+        }
+    }
+    testing.AssertTrue(foundFile, "hello.txt listed")
+    testing.AssertTrue(foundDir, "models/ listed as dir")
+
+    sub, serr := fs.ReadDir("int:embed_testdata/models/sub")
+    testing.AssertEqualString("", serr.message, "nested readdir")
+    testing.AssertEqualInt(1, len(sub), "one nested entry")
+    testing.AssertEqualString("blob.bin", sub[0].Name, "nested entry name")
+}
+
+// TestEmbeddedMissing checks the not-found paths.
+pub fn TestEmbeddedMissing() {
+    _, err := fs.Open("int:embed_testdata/nope.txt", "r")
+    testing.AssertTrue(err.message != "", "missing open fails")
+    _, rerr := fs.ReadAll("int:nope.txt")
+    testing.AssertTrue(rerr.message != "", "missing readall fails")
+    testing.AssertFalse(fs.Exists("int:embed_testdata/nope.txt"), "missing exists")
+    testing.AssertEqualInt(-1, int(fs.FileSize("int:nope")), "missing size")
+    _, derr := fs.ReadDir("int:not-a-dir")
+    testing.AssertTrue(derr.message != "", "missing readdir fails")
+}
+
+// TestEmbeddedReadOnly checks writes into the embedded fs are rejected.
+pub fn TestEmbeddedReadOnly() {
+    _, werr := fs.Open("int:embed_testdata/hello.txt", "w")
+    testing.AssertTrue(werr.message != "", "open for write fails")
+    testing.AssertTrue(fs.WriteAll("int:x.txt", "data").message != "", "WriteAll fails")
+    testing.AssertTrue(fs.AppendAll("int:x.txt", "data").message != "", "AppendAll fails")
+    testing.AssertTrue(fs.Remove("int:x.txt").message != "", "Remove fails")
+    testing.AssertTrue(fs.Mkdir("int:d").message != "", "Mkdir fails")
+    testing.AssertTrue(fs.Rename("int:a", "int:b").message != "", "Rename fails")
+
+    f, _ := fs.Open("int:embed_testdata/hello.txt", "r")
+    testing.AssertEqualInt(-1, f.Write("x", 1), "File.Write fails")
+    testing.AssertTrue(f.WriteChar(65).message != "", "WriteChar fails")
+    f.Close()
+}
+
+// TestRealFsUnaffected proves the int: scheme leaves the disk fs alone.
+// Uses /tmp so it is independent of the test runner's working directory.
+pub fn TestRealFsUnaffected() {
+    werr := fs.WriteAll("/tmp/skink_embed_test.tmp", "x")
+    testing.AssertEqualString("", werr.message, "real write works")
+    data, _ := fs.ReadAll("/tmp/skink_embed_test.tmp")
+    testing.AssertEqualString("x", data, "real read unaffected")
+    testing.AssertTrue(fs.Exists("/tmp/skink_embed_test.tmp"), "real exists")
+    testing.AssertEqualString("", fs.Remove("/tmp/skink_embed_test.tmp").message, "real remove works")
+    testing.AssertFalse(fs.Exists("/tmp/skink_embed_test.tmp"), "removed")
+}

@@ -197,6 +197,22 @@ pub fn TestFormatFloatNoPrecision() {
     testing.AssertContains(s, "42", "FormatFloat with 0 precision should show integer")
 }
 
+// TestFormatFloatRounding guards the round-half-even regression: FormatFloat
+// previously truncated digits (9.9125 at precision 10 gave "9.9124999999",
+// and %.2f-style rounding never applied), drifting below fmt's %.*f output.
+pub fn TestFormatFloatRounding() {
+    testing.AssertEqualString(strconv.FormatFloat(9.9125, 10), "9.9125000000", "truncated digit extraction")
+    testing.AssertEqualString(strconv.FormatFloat(0.125, 2), "0.12", "half-even tie down")
+    testing.AssertEqualString(strconv.FormatFloat(0.375, 2), "0.38", "half-even tie up")
+    testing.AssertEqualString(strconv.FormatFloat(0.135, 2), "0.14", "0.135 stores above the tie")
+    testing.AssertEqualString(strconv.FormatFloat(1.005, 2), "1.00", "1.005 stores below the tie")
+    testing.AssertEqualString(strconv.FormatFloat(2.5, 0), "2", "half-even integer down")
+    testing.AssertEqualString(strconv.FormatFloat(3.5, 0), "4", "half-even integer up")
+    testing.AssertEqualString(strconv.FormatFloat(-1.235, 2), "-1.24", "negative rounding")
+    testing.AssertEqualString(strconv.FormatFloat(0.045, 2), "0.04", "leading-zero fraction")
+    testing.AssertEqualString(strconv.FormatFloat(54.0581395349, 2), "54.06", "round up last digit")
+}
+
 // TestParseInt64 verifies ParseInt64 parses values beyond the int range,
 // rejects overflow, and reports errors on malformed input. Guards the
 // 64-bit parse path added for orm int64 columns.

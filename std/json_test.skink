@@ -25,6 +25,7 @@ module json_test
 
 import "std/json"
 import "std/reflect"
+import "std/strconv"
 import "std/str"
 import "testing"
 
@@ -118,6 +119,41 @@ pub fn TestUnmarshalBool() {
     }
     if json.AsBool(v2) != false {
         Errorf("Unmarshal false should yield false")
+    }
+}
+
+// TestUnmarshalUnicodeEscape guards the \uXXXX decode regression — escape
+// sequences previously consumed 'u' and emitted the hex digits as literal
+// text ("\u2022" became "2022").
+pub fn TestUnmarshalUnicodeEscape() {
+    v, err := json.Unmarshal("\"\\u2022 \\u00e9\"")
+    if err.message != "" {
+        Errorf("Unmarshal \\u escape should not error")
+    }
+    s := json.AsString(v)
+    // U+2022 = e2 80 a2, U+00E9 = c3 a9
+    if str.Len(s) != 6 {
+        Errorf("expected 6 bytes, got " + strconv.Itoa(str.Len(s)))
+    }
+    if s[0] != 226 || s[1] != 128 || s[2] != 162 {
+        Errorf("expected U+2022 UTF-8 bytes")
+    }
+    if s[3] != 32 || s[4] != 195 || s[5] != 169 {
+        Errorf("expected space + U+00E9 UTF-8 bytes")
+    }
+
+    // Surrogate pair: \uD83D\uDE00 = U+1F600 = f0 9f 98 80
+    v2, _ := json.Unmarshal("\"\\uD83D\\uDE00\"")
+    s2 := json.AsString(v2)
+    if str.Len(s2) != 4 || s2[0] != 240 || s2[1] != 159 || s2[2] != 152 || s2[3] != 128 {
+        Errorf("expected U+1F600 surrogate-pair decode")
+    }
+
+    // Lone surrogate becomes U+FFFD = ef bf bd
+    v3, _ := json.Unmarshal("\"\\uD800x\"")
+    s3 := json.AsString(v3)
+    if str.Len(s3) != 4 || s3[0] != 239 || s3[1] != 191 || s3[2] != 189 || s3[3] != 120 {
+        Errorf("expected U+FFFD + 'x' for lone surrogate")
     }
 }
 

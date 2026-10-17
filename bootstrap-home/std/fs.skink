@@ -25,6 +25,7 @@ module fs
 
 import "std/libc"
 import "std/errors"
+import "std/str"
 
 // C stdio wrappers used by the File struct.
 // File handles are stored as int64 to match pointer size on 64-bit platforms
@@ -59,12 +60,56 @@ extern fn Skink_fs_remove(path: string) -> int
 extern fn Skink_fs_rename(old: string, new: string) -> int
 extern fn Skink_fs_access(path: string, mode: int) -> int
 
+// === Embedded filesystem ("int:" paths) ===
+//
+// `embed "dir"` declarations bake directory contents into the compiled
+// binary; the generated @_skink_embed_init registers them before main.
+// Paths prefixed with "int:" are served from that embedded table through
+// the ordinary fs API, so reading embedded data needs no registration
+// step in user code.
+extern fn Skink_embed_ptr(path: string) -> string
+extern fn Skink_embed_size(path: string) -> int64
+extern fn Skink_embed_count() -> int
+extern fn Skink_embed_path(index: int) -> string
+extern fn Skink_embed_isdir(path: string) -> int
+
+// isIntPath reports whether path addresses the embedded filesystem.
+fn isIntPath(path: string) -> bool {
+    return str.StartsWith(path, "int:")
+}
+
+// intKey strips the "int:" scheme and any leading slashes, yielding the
+// embedded table key (e.g. "int:models/x.bin" -> "models/x.bin").
+fn intKey(path: string) -> string {
+    key := str.Substr(path, 4, str.Len(path) - 4)
+    for str.StartsWith(key, "/") {
+        key = str.Substr(key, 1, str.Len(key) - 1)
+    }
+    return key
+}
+
+// readonlyErr is the shared error for writes into the embedded filesystem.
+fn readonlyErr() -> errors.Error {
+    return errors.New("embedded filesystem is read-only")
+}
+
 // File wraps a C FILE* handle and provides character-level I/O methods.
 pub struct File {
-    handle: int64 // C FILE* pointer stored as int64
+    handle:   int64  // C FILE* pointer stored as int64
+    data:     string // embedded blob pointer (set only for embedded files)
+    size:     int64  // embedded blob length
+    pos:      int64  // embedded read cursor
+    embedded: bool   // whether this File is backed by embedded data
 
     // Close closes the file and releases its resources.
     pub fn Close(self: *File) -> errors.Error {
+        if self.embedded {
+            self.embedded = false
+            self.data = ""
+            self.size = 0
+            self.pos = 0
+            return errors.New("")
+        }
         if self.handle != 0 {
             rc := fclose(self.handle)
             // Clear the handle so the file can't be used after close.
@@ -80,6 +125,14 @@ pub struct File {
     // ReadChar reads and returns the next byte from the file.
     // Returns (byte, error) where error.message == "EOF" at end of file.
     pub fn ReadChar(self: *File) -> (int, errors.Error) {
+        if self.embedded {
+            if self.pos >= self.size {
+                return -1, errors.New("EOF")
+            }
+            c := self.data[int(self.pos)]
+            self.pos = self.pos + 1
+            return c, errors.New("")
+        }
         if self.handle == 0 {
             return 0, errors.New("file not open")
         }
@@ -96,6 +149,9 @@ pub struct File {
 
     // WriteChar writes a single byte c to the file.
     pub fn WriteChar(self: *File, c: int) -> errors.Error {
+        if self.embedded {
+            return readonlyErr()
+        }
         if self.handle != 0 {
             rc := fputc(c, self.handle)
             if rc != -1 {
@@ -108,6 +164,9 @@ pub struct File {
 
     // IsEOF reports whether the end of the file has been reached.
     pub fn IsEOF(self: *File) -> bool {
+        if self.embedded {
+            return self.pos >= self.size
+        }
         if self.handle != 0 {
             r := feof(self.handle)
             return r != 0
@@ -119,6 +178,20 @@ pub struct File {
     // Reads up to len bytes into buf and returns the number of bytes read,
     // or -1 on error.
     pub fn Read(self: *File, buf: string, len: int) -> int {
+        if self.embedded {
+            avail := self.size - self.pos
+            n := int64(len)
+            if n > avail {
+                n = avail
+            }
+            if n <= 0 {
+                return 0
+            }
+            src := string(int64(self.data) + self.pos)
+            libc.memcpy(buf, src, int(n))
+            self.pos = self.pos + n
+            return int(n)
+        }
         if self.handle == 0 {
             return -1
         }
@@ -127,6 +200,9 @@ pub struct File {
 
     // Write implements the Writer template interface.
     pub fn Write(self: *File, buf: string, len: int) -> int {
+        if self.embedded {
+            return -1
+        }
         if self.handle == 0 {
             return -1
         }
@@ -137,6 +213,17 @@ pub struct File {
 
 // Open opens a file at path with the given C fopen mode (e.g. "r", "w", "a").
 pub fn Open(path: string, mode: string) -> (File, errors.Error) {
+    if isIntPath(path) {
+        if str.Len(mode) == 0 || mode[0] != 114 || str.Contains(mode, "+") {
+            return File{handle: 0}, readonlyErr()
+        }
+        key := intKey(path)
+        size := Skink_embed_size(key)
+        if size < 0 {
+            return File{handle: 0}, errors.New("open failed")
+        }
+        return File{handle: 0, data: Skink_embed_ptr(key), size: size, pos: 0, embedded: true}, errors.New("")
+    }
     h := fopen(path, mode)
     // A null handle means fopen failed.
     if h == 0 {
@@ -147,6 +234,21 @@ pub fn Open(path: string, mode: string) -> (File, errors.Error) {
 
 // ReadAll reads the entire contents of a file into a string.
 pub fn ReadAll(path: string) -> (string, errors.Error) {
+    if isIntPath(path) {
+        key := intKey(path)
+        size := Skink_embed_size(key)
+        if size < 0 {
+            return "", errors.New("open failed")
+        }
+        count := int(size)
+        buf := libc.malloc(count + 1)
+        data := Skink_embed_ptr(key)
+        if count > 0 {
+            libc.memcpy(buf, data, count)
+        }
+        buf[count] = 0
+        return buf, errors.New("")
+    }
     fp := fopen(path, "r")
     if fp == 0 {
         return "", errors.New("open failed")
@@ -175,6 +277,9 @@ pub fn ReadAll(path: string) -> (string, errors.Error) {
 
 // WriteAll writes data to a file at path, replacing any existing contents.
 pub fn WriteAll(path: string, data: string) -> errors.Error {
+    if isIntPath(path) {
+        return readonlyErr()
+    }
     fp := fopen(path, "w")
     if fp == 0 {
         return errors.New("open failed")
@@ -190,6 +295,9 @@ pub fn WriteAll(path: string, data: string) -> errors.Error {
 
 // AppendAll appends data to the end of a file at path.
 pub fn AppendAll(path: string, data: string) -> errors.Error {
+    if isIntPath(path) {
+        return readonlyErr()
+    }
     fp := fopen(path, "a")
     if fp == 0 {
         return errors.New("open failed")
@@ -205,11 +313,18 @@ pub fn AppendAll(path: string, data: string) -> errors.Error {
 
 // Exists reports whether a file or directory exists at path.
 pub fn Exists(path: string) -> bool {
+    if isIntPath(path) {
+        key := intKey(path)
+        return Skink_embed_size(key) >= 0 || Skink_embed_isdir(key) != 0
+    }
     return Skink_fs_exists(path) != 0
 }
 
 // Remove deletes the file or empty directory at path.
 pub fn Remove(path: string) -> errors.Error {
+    if isIntPath(path) {
+        return readonlyErr()
+    }
     if Skink_fs_remove(path) == 0 {
         return errors.New("")
     }
@@ -218,6 +333,9 @@ pub fn Remove(path: string) -> errors.Error {
 
 // Rename moves a file or directory from oldPath to newPath.
 pub fn Rename(oldPath: string, newPath: string) -> errors.Error {
+    if isIntPath(oldPath) || isIntPath(newPath) {
+        return readonlyErr()
+    }
     if Skink_fs_rename(oldPath, newPath) == 0 {
         return errors.New("")
     }
@@ -226,6 +344,9 @@ pub fn Rename(oldPath: string, newPath: string) -> errors.Error {
 
 // Mkdir creates a new directory at path with mode 0755.
 pub fn Mkdir(path: string) -> errors.Error {
+    if isIntPath(path) {
+        return readonlyErr()
+    }
     if Skink_fs_mkdir(path) == 0 {
         return errors.New("")
     }
@@ -243,6 +364,20 @@ pub struct FileInfo {
 // Stat returns metadata about the file at path.
 // Returns (FileInfo, error) where error.message == "" on success.
 pub fn Stat(path: string) -> (FileInfo, errors.Error) {
+    if isIntPath(path) {
+        key := intKey(path)
+        size := Skink_embed_size(key)
+        base := pathBase(key)
+        if size >= 0 {
+            // S_IFREG = 0x8000 — a regular file.
+            return FileInfo{Name: base, Size: size, Mode: 0x8000, IsDir: false}, errors.New("")
+        }
+        if Skink_embed_isdir(key) != 0 {
+            // S_IFDIR = 0x4000, matching the disk-file test below.
+            return FileInfo{Name: base, Size: 0, Mode: 0x4000, IsDir: true}, errors.New("")
+        }
+        return FileInfo{}, errors.New("stat failed")
+    }
     // Allocate out-parameters for mode, size, mtime.
     modeBuf := libc.malloc(4)
     sizeBuf := libc.malloc(8)
@@ -275,16 +410,25 @@ pub fn Stat(path: string) -> (FileInfo, errors.Error) {
 
 // IsDir reports whether the path is a directory.
 pub fn IsDir(path: string) -> bool {
+    if isIntPath(path) {
+        return Skink_embed_isdir(intKey(path)) != 0
+    }
     return Skink_fs_isdir(path) != 0
 }
 
 // IsFile reports whether the path is a regular file.
 pub fn IsFile(path: string) -> bool {
+    if isIntPath(path) {
+        return Skink_embed_size(intKey(path)) >= 0
+    }
     return Skink_fs_isfile(path) != 0
 }
 
 // FileSize returns the size of the file at path in bytes, or -1 on error.
 pub fn FileSize(path: string) -> int64 {
+    if isIntPath(path) {
+        return Skink_embed_size(intKey(path))
+    }
     return Skink_fs_filesize(path)
 }
 
@@ -298,6 +442,9 @@ pub struct DirEntry {
 // Returns (entries, error) where error.message == "" on success.
 // The entries do not include "." or "..".
 pub fn ReadDir(path: string) -> ([]DirEntry, errors.Error) {
+    if isIntPath(path) {
+        return embedReadDir(intKey(path))
+    }
     dir := Skink_fs_opendir(path)
     if dir == 0 {
         return [], errors.New("opendir failed")
@@ -354,4 +501,44 @@ fn pathBase(p: string) -> string {
     libc.memcpy(result, string(int64(p) + int64(start)), length)
     result[length] = 0
     return result
+}
+
+// embedReadDir lists the immediate entries under an embedded directory key
+// ("" lists the virtual root). Each embedded path is relative to the root,
+// so the first remaining path component names the entry.
+fn embedReadDir(key: string) -> ([]DirEntry, errors.Error) {
+    if str.Len(key) > 0 && Skink_embed_isdir(key) == 0 {
+        return [], errors.New("opendir failed")
+    }
+    var entries []DirEntry
+    n := Skink_embed_count()
+    for i := 0; i < n; i = i + 1 {
+        ep := Skink_embed_path(i)
+        rel := ep
+        if str.Len(key) > 0 {
+            prefix := str.Concat(key, "/")
+            if !str.StartsWith(ep, prefix) {
+                continue
+            }
+            rel = str.Substr(ep, str.Len(prefix), str.Len(ep) - str.Len(prefix))
+        }
+        slash := str.IndexOf(rel, "/")
+        name := rel
+        isDir := false
+        if slash >= 0 {
+            name = str.Substr(rel, 0, slash)
+            isDir = true
+        }
+        found := false
+        for j := 0; j < len(entries); j = j + 1 {
+            if str.Equal(entries[j].Name, name) {
+                found = true
+                break
+            }
+        }
+        if !found {
+            entries = append(entries, DirEntry{Name: name, IsDir: isDir})
+        }
+    }
+    return entries, errors.New("")
 }

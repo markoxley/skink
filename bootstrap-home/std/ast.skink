@@ -69,6 +69,7 @@ pub const ST_SELECT = 31    // select statement kind
 pub const ST_SWITCH = 32    // switch statement kind
 pub const ST_RULESET = 33   // ruleset statement kind
 pub const ST_SERVICE = 34   // service statement kind
+pub const ST_EMBED = 35     // embed statement kind
 
 // Expressions
 pub const EX_IDENT = 100
@@ -243,6 +244,9 @@ struct Decl {
     // Import (ST_IMPORT)
     importPath:  string
     importAlias: string // the import alias
+
+    // Embed (ST_EMBED)
+    embedPath: string // the embedded directory root, relative to the source file
 
     // Module (ST_MODULE)
     moduleName: string

@@ -370,10 +370,34 @@ fn parseDeclaration(p: *Parser) -> ast.Stmt {
     if curIs(p, lexer.T_SERVICE) {
         return parseServiceDecl(p, isPub)
     }
+    // `embed` is a contextual keyword, not a lexer token — existing code
+    // that uses `embed` as an ordinary identifier stays valid.
+    if curIs(p, lexer.T_IDENT) && str.Equal(p.curTok.literal, "embed") {
+        return parseEmbedDecl(p)
+    }
 
     errorAt(p, p.curTok, "unexpected token in declaration")
     synchronize(p)
     return ast.Stmt{}
+}
+
+// parseEmbedDecl parses `embed "dir"` — an embed declaration naming a
+// directory whose contents are baked into the compiled binary and served
+// through the "int:" virtual filesystem at runtime.
+fn parseEmbedDecl(p: *Parser) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p) // consume `embed`
+    path := ""
+    if curIs(p, lexer.T_STRING) {
+        path = p.curTok.literal
+        advance(p)
+    } else {
+        errorAt(p, p.curTok, "expected string path after embed")
+    }
+    d := ast.newDecl(ast.ST_EMBED)
+    d.embedPath = path
+    return ast.Stmt{kind: ast.ST_EMBED, line: line, col: col, decl: d}
 }
 
 // parseAttributes parses [name] or [name(args)] and returns attribute names.
