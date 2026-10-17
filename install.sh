@@ -197,6 +197,8 @@ tar -xzf "$ARCHIVE_PATH" -C "$STAGING"
 #   skink              (compiler binary)
 #   skink-lsp          (LSP binary)
 #   skinkfmt           (source formatter binary)
+#   scales             (package manager binary)
+#   skinkjs            (JavaScript transpiler binary)
 #   skink_test.sh      (test runner invoked by `skink -t`)
 #   skink_bench.sh     (benchmark runner invoked by `skink -b`)
 #   std/               (standard library .skink files)
@@ -224,6 +226,18 @@ if [[ -f "${STAGING}/skinkfmt" ]]; then
     cp -f "${STAGING}/skinkfmt" "${SKINK_PREFIX}/bin/"
     chmod 755 "${SKINK_PREFIX}/bin/skinkfmt"
     info "  Installed: bin/skinkfmt"
+fi
+
+if [[ -f "${STAGING}/scales" ]]; then
+    cp -f "${STAGING}/scales" "${SKINK_PREFIX}/bin/"
+    chmod 755 "${SKINK_PREFIX}/bin/scales"
+    info "  Installed: bin/scales"
+fi
+
+if [[ -f "${STAGING}/skinkjs" ]]; then
+    cp -f "${STAGING}/skinkjs" "${SKINK_PREFIX}/bin/"
+    chmod 755 "${SKINK_PREFIX}/bin/skinkjs"
+    info "  Installed: bin/skinkjs"
 fi
 
 for harness in skink_test.sh skink_bench.sh; do
@@ -333,6 +347,15 @@ echo ""
 echo "  Binary:     ${SKINK_BIN_DIR}/skink"
 if [[ -f "${SKINK_BIN_DIR}/skink-lsp" ]]; then
     echo "  LSP:        ${SKINK_BIN_DIR}/skink-lsp"
+fi
+if [[ -f "${SKINK_BIN_DIR}/skinkfmt" ]]; then
+    echo "  Formatter:  ${SKINK_BIN_DIR}/skinkfmt"
+fi
+if [[ -f "${SKINK_BIN_DIR}/scales" ]]; then
+    echo "  Scales:     ${SKINK_BIN_DIR}/scales"
+fi
+if [[ -f "${SKINK_BIN_DIR}/skinkjs" ]]; then
+    echo "  SkinkJS:    ${SKINK_BIN_DIR}/skinkjs"
 fi
 echo "  Stdlib:     ${SKINK_HOME_DIR}"
 echo "  Runtime:    ${SKINK_HOME_DIR}/runtime"

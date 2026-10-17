@@ -12,7 +12,8 @@ Install the latest release from GitHub:
 curl -fsSL https://raw.githubusercontent.com/markoxley/skink/main/install.sh | bash
 ```
 
-This downloads the `skink` compiler, `skink-lsp` language server, and the
+This downloads the `skink` compiler, `skink-lsp` language server, `skinkfmt`
+formatter, `scales` package manager, `skinkjs` JavaScript transpiler, and the
 standard library to `~/.local/skink/`, then updates your shell config
 (`.bashrc`, `.zshrc`, etc.) to add them to `PATH` and set `SKINK_HOME`.
 
@@ -68,10 +69,10 @@ make install-only   # installs pre-built binaries without rebuilding
 make uninstall      # removes the toolset and stdlib
 ```
 
-This installs `skink`, `skink-lsp`, `skinkfmt`, `skink_test.sh`, and
-`skink_bench.sh` to `~/.local/skink/bin/`, plus the standard library and
-C runtime to `~/.local/skink/std/` — the same layout `install.sh` uses.
-Override the root with `make SKINK_PREFIX=/opt/skink install`.
+This installs `skink`, `skink-lsp`, `skinkfmt`, `scales`, `skinkjs`,
+`skink_test.sh`, and `skink_bench.sh` to `~/.local/skink/bin/`, plus the
+standard library and C runtime to `~/.local/skink/std/` — the same layout
+`install.sh` uses. Override the root with `make SKINK_PREFIX=/opt/skink install`.
 
 ## Creating a Release
 
@@ -81,7 +82,8 @@ Override the root with `make SKINK_PREFIX=/opt/skink install`.
 ./release.sh --cross linux-arm64  # cross-compile target
 ```
 
-This builds the compiler and LSP, packages them with the standard library into
+This builds the compiler, LSP, formatter, `scales` package manager, and
+`skinkjs` transpiler, packages them with the standard library into
 `dist/skink-<version>-<os>-<arch>.tar.gz`, and generates a SHA256 checksum.
 
 Upload to GitHub:

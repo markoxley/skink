@@ -1,0 +1,232 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR and ECMAScript/JavaScript via skinkjs.
+//
+// File:    std/js.skink
+// Purpose: Universal JavaScript interop module for Skink programs transpiled
+//          with skinkjs, providing type-checked access to globalThis, arbitrary
+//          JS objects, properties, methods, constructors, arrays, and callbacks.
+// Author:  Mark Oxley
+// Created: 2026
+
+module js
+
+// Value wraps an arbitrary JavaScript runtime value (object, function, array,
+// DOM node, or primitive) when running under skinkjs.
+pub struct Value {
+    handle: int64
+
+    // Get retrieves property `prop` from this JS object.
+    pub fn Get(self: Value, prop: string) -> Value {
+        return Value{handle: self.handle}
+    }
+
+    // Set assigns a `js.Value` to property `prop` on this JS object.
+    pub fn Set(self: Value, prop: string, val: Value) {
+    }
+
+    // SetString assigns a string to property `prop` on this JS object.
+    pub fn SetString(self: Value, prop: string, val: string) {
+    }
+
+    // SetInt assigns an integer to property `prop` on this JS object.
+    pub fn SetInt(self: Value, prop: string, val: int) {
+    }
+
+    // SetFloat assigns a float to property `prop` on this JS object.
+    pub fn SetFloat(self: Value, prop: string, val: float) {
+    }
+
+    // SetBool assigns a boolean to property `prop` on this JS object.
+    pub fn SetBool(self: Value, prop: string, val: bool) {
+    }
+
+    // Has reports whether property `prop` exists on this JS object (`prop in obj`).
+    pub fn Has(self: Value, prop: string) -> bool {
+        return false
+    }
+
+    // Delete removes property `prop` from this JS object (`delete obj[prop]`).
+    pub fn Delete(self: Value, prop: string) {
+    }
+
+    // Index retrieves element `i` from a JS array or array-like object.
+    pub fn Index(self: Value, i: int) -> Value {
+        return Value{handle: 0}
+    }
+
+    // SetIndex assigns `val` at index `i` on a JS array.
+    pub fn SetIndex(self: Value, i: int, val: Value) {
+    }
+
+    // Length returns the `.length` property of a JS array or string.
+    pub fn Length(self: Value) -> int {
+        return 0
+    }
+
+    // Push appends `val` to a JS array (`arr.push(val)`).
+    pub fn Push(self: Value, val: Value) {
+    }
+
+    // Call0 invokes zero-argument method `method` on this JS object.
+    pub fn Call0(self: Value, method: string) -> Value {
+        return Value{handle: 0}
+    }
+
+    // Call1 invokes single-argument method `method` on this JS object.
+    pub fn Call1(self: Value, method: string, a1: Value) -> Value {
+        return Value{handle: 0}
+    }
+
+    // Call2 invokes two-argument method `method` on this JS object.
+    pub fn Call2(self: Value, method: string, a1: Value, a2: Value) -> Value {
+        return Value{handle: 0}
+    }
+
+    // Call3 invokes three-argument method `method` on this JS object.
+    pub fn Call3(self: Value, method: string, a1: Value, a2: Value, a3: Value) -> Value {
+        return Value{handle: 0}
+    }
+
+    // Call invokes method `method` on this JS object with a slice of arguments.
+    pub fn Call(self: Value, method: string, args: []Value) -> Value {
+        return Value{handle: 0}
+    }
+
+    // Invoke calls this JS function value directly with a slice of arguments.
+    pub fn Invoke(self: Value, args: []Value) -> Value {
+        return Value{handle: 0}
+    }
+
+    // On registers an event listener `addEventListener(event, handler)` on this JS object.
+    pub fn On(self: Value, event: string, handler: fn(Value)) {
+    }
+
+    // TypeOf returns the JavaScript `typeof` string for this value.
+    pub fn TypeOf(self: Value) -> string {
+        return "undefined"
+    }
+
+    // IsNull reports whether this JS value is `null`.
+    pub fn IsNull(self: Value) -> bool {
+        return true
+    }
+
+    // IsUndefined reports whether this JS value is `undefined`.
+    pub fn IsUndefined(self: Value) -> bool {
+        return true
+    }
+
+    // IsTruthy reports whether this JS value is truthy (`Boolean(v)`).
+    pub fn IsTruthy(self: Value) -> bool {
+        return false
+    }
+
+    // String converts or extracts this JS value as a string.
+    pub fn String(self: Value) -> string {
+        return ""
+    }
+
+    // Int converts or extracts this JS value as an int.
+    pub fn Int(self: Value) -> int {
+        return 0
+    }
+
+    // Float converts or extracts this JS value as a float.
+    pub fn Float(self: Value) -> float {
+        return 0.0
+    }
+
+    // Bool converts or extracts this JS value as a bool.
+    pub fn Bool(self: Value) -> bool {
+        return false
+    }
+}
+
+// Global returns the JavaScript `globalThis` object wrapped as a `js.Value`.
+pub fn Global() -> Value {
+    return Value{handle: 1}
+}
+
+// Window returns the browser `window` object wrapped as a `js.Value`.
+pub fn Window() -> Value {
+    return Value{handle: 1}
+}
+
+// Document returns the browser `document` object wrapped as a `js.Value`.
+pub fn Document() -> Value {
+    return Value{handle: 1}
+}
+
+// Null returns the JavaScript `null` value.
+pub fn Null() -> Value {
+    return Value{handle: 0}
+}
+
+// Undefined returns the JavaScript `undefined` value.
+pub fn Undefined() -> Value {
+    return Value{handle: 0}
+}
+
+// FromInt wraps a Skink `int` as a `js.Value`.
+pub fn FromInt(v: int) -> Value {
+    return Value{handle: int64(v)}
+}
+
+// FromFloat wraps a Skink `float` as a `js.Value`.
+pub fn FromFloat(v: float) -> Value {
+    return Value{handle: int64(v)}
+}
+
+// FromString wraps a Skink `string` as a `js.Value`.
+pub fn FromString(v: string) -> Value {
+    return Value{handle: 1}
+}
+
+// FromBool wraps a Skink `bool` as a `js.Value`.
+pub fn FromBool(v: bool) -> Value {
+    return Value{handle: 1}
+}
+
+// NewObject creates a new empty JavaScript object (`{}`).
+pub fn NewObject() -> Value {
+    return Value{handle: 1}
+}
+
+// NewArray creates a new empty JavaScript array (`[]`).
+pub fn NewArray() -> Value {
+    return Value{handle: 1}
+}
+
+// New instantiates a global JavaScript constructor `new globalThis[ctorName](...args)`.
+pub fn New(ctorName: string, args: []Value) -> Value {
+    return Value{handle: 1}
+}
+
+// Eval evaluates a JavaScript expression string and returns the resulting `js.Value`.
+pub fn Eval(code: string) -> Value {
+    return Value{handle: 1}
+}
+
+// ParseJSON parses a JSON string using `JSON.parse` and returns a `js.Value`.
+pub fn ParseJSON(s: string) -> Value {
+    return Value{handle: 1}
+}
+
+// StringifyJSON serializes a `js.Value` using `JSON.stringify`.
+pub fn StringifyJSON(v: Value) -> string {
+    return "{}"
+}
+
+// Log writes a message to `console.log`.
+pub fn Log(msg: string) {
+}
+
+// Warn writes a warning to `console.warn`.
+pub fn Warn(msg: string) {
+}
+
+// Error writes an error message to `console.error`.
+pub fn Error(msg: string) {
+}

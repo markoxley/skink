@@ -35,6 +35,11 @@ extern fn fclose(fp: int64) -> int
 extern fn fread(buf: string, size: int, count: int, fp: int64) -> int
 extern fn fseek(fp: int64, offset: int64, whence: int) -> int
 extern fn ftell(fp: int64) -> int64
+extern fn getenv(name: string) -> string
+extern fn Skink_fs_isdir(path: string) -> int
+extern fn Skink_fs_opendir(path: string) -> int64
+extern fn Skink_fs_readdir(dir: int64, buf: string, bufSize: int, isDir: string) -> int
+extern fn Skink_fs_closedir(dir: int64) -> int
 
 // FileInfo holds the parsed contents of a single resolved source file.
 struct FileInfo {
@@ -48,6 +53,7 @@ struct FileInfo {
 struct Resolver {
     files: []FileInfo  // the files
     states: map[string]int  // the states
+    fileModules: map[string]string  // normalized file path -> declared module name
     errors: []string  // the errors
     searchRoot: string  // the search root
 }
@@ -200,12 +206,517 @@ fn tryPath(base: string, importPath: string) -> string {
     return ""
 }
 
+// dirExists reports whether a directory exists at the given path.
+fn dirExists(p: string) -> bool {
+    return Skink_fs_isdir(p) != 0
+}
+
+// listDirNames returns the entry names inside directory p.
+// If dirsOnly is true, only subdirectories are returned; otherwise only files.
+fn listDirNames(p: string, dirsOnly: bool) -> []string {
+    var result []string
+    dir := Skink_fs_opendir(p)
+    if dir == 0 {
+        return result
+    }
+    nameBuf := str.Repeat(" ", 260)
+    isDirBuf := str.Repeat(" ", 8)
+    for {
+        rc := Skink_fs_readdir(dir, nameBuf, 256, isDirBuf)
+        if rc <= 0 {
+            break
+        }
+        n := str.Len(nameBuf)
+        if n == 0 {
+            continue
+        }
+        name := str.Substr(nameBuf, 0, n)
+        if str.StartsWith(name, ".") {
+            continue
+        }
+        isDir := int(isDirBuf[0]) != 0
+        if dirsOnly && isDir {
+            result = append(result, name)
+        } else if !dirsOnly && !isDir {
+            result = append(result, name)
+        }
+    }
+    Skink_fs_closedir(dir)
+    return result
+}
+
+// parsePositiveInt parses a non-negative decimal integer string, returning -1 on error.
+fn parsePositiveInt(s: string) -> int {
+    t := str.Trim(s)
+    n := str.Len(t)
+    if n == 0 {
+        return -1
+    }
+    val := 0
+    for i := 0; i < n; i = i + 1 {
+        c := int(t[i])
+        if c < 48 || c > 57 {
+            return -1
+        }
+        val = val * 10 + (c - 48)
+    }
+    return val
+}
+
+// parseSemverParts extracts (major, minor, patch, preRelease, valid) from a version string.
+fn parseSemverParts(raw: string) -> (int, int, int, string, bool) {
+    s := str.Trim(raw)
+    if str.StartsWith(s, "v") || str.StartsWith(s, "V") {
+        s = str.Substr(s, 1, str.Len(s) - 1)
+    }
+    plusIdx := str.IndexOf(s, "+")
+    if plusIdx >= 0 {
+        s = str.Substr(s, 0, plusIdx)
+    }
+    pre := ""
+    dashIdx := str.IndexOf(s, "-")
+    if dashIdx >= 0 {
+        pre = str.Substr(s, dashIdx + 1, str.Len(s) - dashIdx - 1)
+        s = str.Substr(s, 0, dashIdx)
+    }
+    parts := str.Split(s, ".")
+    if len(parts) < 1 || len(parts) > 3 {
+        return 0, 0, 0, pre, false
+    }
+    maj := parsePositiveInt(parts[0])
+    if maj < 0 {
+        return 0, 0, 0, pre, false
+    }
+    min := 0
+    if len(parts) >= 2 {
+        min = parsePositiveInt(parts[1])
+        if min < 0 {
+            return 0, 0, 0, pre, false
+        }
+    }
+    pat := 0
+    if len(parts) == 3 {
+        pat = parsePositiveInt(parts[2])
+        if pat < 0 {
+            return 0, 0, 0, pre, false
+        }
+    }
+    return maj, min, pat, pre, true
+}
+
+// compareVersions compares two version strings according to SemVer precedence.
+fn compareVersions(a: string, b: string) -> int {
+    amaj, amin, apat, apre, aok := parseSemverParts(a)
+    bmaj, bmin, bpat, bpre, bok := parseSemverParts(b)
+    if aok && !bok {
+        return 1
+    }
+    if !aok && bok {
+        return -1
+    }
+    if !aok && !bok {
+        return str.Compare(a, b)
+    }
+    if amaj != bmaj {
+        if amaj < bmaj { return -1 }
+        return 1
+    }
+    if amin != bmin {
+        if amin < bmin { return -1 }
+        return 1
+    }
+    if apat != bpat {
+        if apat < bpat { return -1 }
+        return 1
+    }
+    if str.Len(apre) == 0 && str.Len(bpre) == 0 {
+        return 0
+    }
+    if str.Len(apre) == 0 {
+        return 1
+    }
+    if str.Len(bpre) == 0 {
+        return -1
+    }
+    return str.Compare(apre, bpre)
+}
+
+// matchesConstraint checks whether candidate satisfies a version constraint
+// from an import specifier or skink.toml.
+fn matchesConstraint(candidate: string, constraint: string) -> bool {
+    c := str.Trim(constraint)
+    if str.Len(c) == 0 || str.Equal(c, "*") || str.Equal(c, "latest") {
+        return true
+    }
+    cmaj, cmin, cpat, _, cok := parseSemverParts(candidate)
+    if !cok {
+        return str.Equal(candidate, c)
+    }
+    if str.StartsWith(c, "^") {
+        tmaj, tmin, tpat, _, tok := parseSemverParts(str.Substr(c, 1, str.Len(c) - 1))
+        if !tok || compareVersions(candidate, str.Substr(c, 1, str.Len(c) - 1)) < 0 {
+            return false
+        }
+        if tmaj > 0 { return cmaj == tmaj }
+        if tmin > 0 { return cmaj == 0 && cmin == tmin }
+        return cmaj == 0 && cmin == 0 && cpat == tpat
+    }
+    if str.StartsWith(c, "~") {
+        tmaj, tmin, _, _, tok := parseSemverParts(str.Substr(c, 1, str.Len(c) - 1))
+        if !tok || compareVersions(candidate, str.Substr(c, 1, str.Len(c) - 1)) < 0 {
+            return false
+        }
+        return cmaj == tmaj && cmin == tmin
+    }
+    if str.StartsWith(c, ">=") {
+        return compareVersions(candidate, str.Substr(c, 2, str.Len(c) - 2)) >= 0
+    }
+    if str.StartsWith(c, "<=") {
+        return compareVersions(candidate, str.Substr(c, 2, str.Len(c) - 2)) <= 0
+    }
+    if str.StartsWith(c, ">") {
+        return compareVersions(candidate, str.Substr(c, 1, str.Len(c) - 1)) > 0
+    }
+    if str.StartsWith(c, "<") {
+        return compareVersions(candidate, str.Substr(c, 1, str.Len(c) - 1)) < 0
+    }
+    if str.StartsWith(c, "=") {
+        return compareVersions(candidate, str.Substr(c, 1, str.Len(c) - 1)) == 0
+    }
+    return compareVersions(candidate, c) == 0
+}
+
+// unquoteToml strips surrounding quotes from a TOML string literal.
+fn unquoteToml(s: string) -> string {
+    t := str.Trim(s)
+    n := str.Len(t)
+    if n >= 2 && ((t[0] == 34 && t[n - 1] == 34) || (t[0] == 39 && t[n - 1] == 39)) {
+        return str.Substr(t, 1, n - 2)
+    }
+    return t
+}
+
+// lookupManifestVersion walks up from baseDir looking for skink.lock or
+// skink.toml (or skink.mod) to find a pinned or constrained version for
+// mod/<owner>/<repo>, plus any manifest entry file when inspecting a package dir.
+fn lookupManifestVersion(baseDir: string, owner: string, repo: string) -> string {
+    modKey := str.Concat("mod/", str.Concat(owner, str.Concat("/", repo)))
+    shortKey := str.Concat(owner, str.Concat("/", repo))
+    cur := baseDir
+    for {
+        // 1. Check skink.lock first for an exact pinned version.
+        lockPath := joinPath(cur, "skink.lock")
+        if fileExists(lockPath) {
+            lockSrc := readFile(lockPath)
+            lines := str.Split(lockSrc, "\n")
+            curName := ""
+            curVer := ""
+            for i := 0; i < len(lines); i = i + 1 {
+                line := str.Trim(str.Replace(lines[i], "\r", ""))
+                if str.Equal(line, "[[package]]") {
+                    if (str.Equal(curName, modKey) || str.Equal(curName, shortKey)) && str.Len(curVer) > 0 {
+                        return curVer
+                    }
+                    curName = ""
+                    curVer = ""
+                } else {
+                    eq := str.IndexOf(line, "=")
+                    if eq > 0 {
+                        k := unquoteToml(str.Substr(line, 0, eq))
+                        v := unquoteToml(str.Substr(line, eq + 1, str.Len(line) - eq - 1))
+                        if str.Equal(k, "name") || str.Equal(k, "key") {
+                            curName = v
+                        } else if str.Equal(k, "version") {
+                            curVer = v
+                        }
+                    }
+                }
+            }
+            if (str.Equal(curName, modKey) || str.Equal(curName, shortKey)) && str.Len(curVer) > 0 {
+                return curVer
+            }
+        }
+        // 2. Check skink.toml [dependencies] section.
+        tomlPath := joinPath(cur, "skink.toml")
+        if fileExists(tomlPath) {
+            tomlSrc := readFile(tomlPath)
+            lines := str.Split(tomlSrc, "\n")
+            inDeps := false
+            for i := 0; i < len(lines); i = i + 1 {
+                line := str.Trim(str.Replace(lines[i], "\r", ""))
+                if str.StartsWith(line, "#") || str.Len(line) == 0 {
+                    continue
+                }
+                if str.StartsWith(line, "[") && str.EndsWith(line, "]") {
+                    sec := str.Trim(str.Substr(line, 1, str.Len(line) - 2))
+                    inDeps = str.Equal(sec, "dependencies")
+                    continue
+                }
+                if inDeps {
+                    eq := str.IndexOf(line, "=")
+                    if eq > 0 {
+                        k := unquoteToml(str.Substr(line, 0, eq))
+                        v := str.Trim(str.Substr(line, eq + 1, str.Len(line) - eq - 1))
+                        if str.Equal(k, modKey) || str.Equal(k, shortKey) {
+                            if str.StartsWith(v, "{") {
+                                vIdx := str.IndexOf(v, "version")
+                                if vIdx >= 0 {
+                                    rest := str.Substr(v, vIdx + 7, str.Len(v) - vIdx - 7)
+                                    veq := str.IndexOf(rest, "=")
+                                    if veq >= 0 {
+                                        afterEq := str.Substr(rest, veq + 1, str.Len(rest) - veq - 1)
+                                        comma := str.IndexOf(afterEq, ",")
+                                        if comma >= 0 {
+                                            afterEq = str.Substr(afterEq, 0, comma)
+                                        }
+                                        brace := str.IndexOf(afterEq, "}")
+                                        if brace >= 0 {
+                                            afterEq = str.Substr(afterEq, 0, brace)
+                                        }
+                                        return unquoteToml(afterEq)
+                                    }
+                                }
+                            } else {
+                                return unquoteToml(v)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        parent := dirName(cur)
+        if str.Equal(parent, cur) {
+            break
+        }
+        cur = parent
+    }
+    return ""
+}
+
+// readPackageEntryField reads the optional `entry = "..."` field from
+// `<pkgDir>/skink.toml` if present.
+fn readPackageEntryField(pkgDir: string) -> string {
+    tomlPath := joinPath(pkgDir, "skink.toml")
+    if !fileExists(tomlPath) {
+        return ""
+    }
+    tomlSrc := readFile(tomlPath)
+    lines := str.Split(tomlSrc, "\n")
+    inPkg := false
+    for i := 0; i < len(lines); i = i + 1 {
+        line := str.Trim(str.Replace(lines[i], "\r", ""))
+        if str.StartsWith(line, "[") && str.EndsWith(line, "]") {
+            sec := str.Trim(str.Substr(line, 1, str.Len(line) - 2))
+            inPkg = str.Equal(sec, "package")
+            continue
+        }
+        if inPkg {
+            eq := str.IndexOf(line, "=")
+            if eq > 0 {
+                k := unquoteToml(str.Substr(line, 0, eq))
+                if str.Equal(k, "entry") {
+                    return unquoteToml(str.Substr(line, eq + 1, str.Len(line) - eq - 1))
+                }
+            }
+        }
+    }
+    return ""
+}
+
+// resolvePackageEntryFile locates the .skink entry file inside an extracted
+// package directory (and optional subpath).
+fn resolvePackageEntryFile(pkgDir: string, repo: string, subpath: string) -> string {
+    targetDir := pkgDir
+    if str.Len(subpath) > 0 {
+        direct := tryPath(pkgDir, subpath)
+        if str.Len(direct) > 0 {
+            return direct
+        }
+        targetDir = joinPath(pkgDir, subpath)
+    } else {
+        entryField := readPackageEntryField(pkgDir)
+        if str.Len(entryField) > 0 {
+            entryPath := joinPath(pkgDir, entryField)
+            if fileExists(entryPath) {
+                return entryPath
+            }
+        }
+    }
+
+    // 1. <repo>.skink
+    c1 := joinPath(targetDir, str.Concat(repo, ".skink"))
+    if fileExists(c1) {
+        return c1
+    }
+    // 2. Sanitized <repo_underscore>.skink
+    sanitized := str.Replace(str.Replace(repo, "-", "_"), ".", "_")
+    c2 := joinPath(targetDir, str.Concat(sanitized, ".skink"))
+    if fileExists(c2) {
+        return c2
+    }
+    // 3. Stripped "skink-" prefix (e.g. "skink-orm" -> "orm.skink")
+    if str.StartsWith(repo, "skink-") && str.Len(repo) > 6 {
+        shortName := str.Substr(repo, 6, str.Len(repo) - 6)
+        c3 := joinPath(targetDir, str.Concat(shortName, ".skink"))
+        if fileExists(c3) {
+            return c3
+        }
+    }
+    // 4. lib.skink or main.skink
+    c4 := joinPath(targetDir, "lib.skink")
+    if fileExists(c4) {
+        return c4
+    }
+    c5 := joinPath(targetDir, "main.skink")
+    if fileExists(c5) {
+        return c5
+    }
+    // 5. src/ subdirectory
+    srcDir := joinPath(targetDir, "src")
+    if dirExists(srcDir) {
+        s1 := joinPath(srcDir, str.Concat(repo, ".skink"))
+        if fileExists(s1) { return s1 }
+        s2 := joinPath(srcDir, str.Concat(sanitized, ".skink"))
+        if fileExists(s2) { return s2 }
+        s3 := joinPath(srcDir, "lib.skink")
+        if fileExists(s3) { return s3 }
+        s4 := joinPath(srcDir, "main.skink")
+        if fileExists(s4) { return s4 }
+    }
+    // 6. First non-test .skink file in targetDir
+    files := listDirNames(targetDir, false)
+    for i := 0; i < len(files); i = i + 1 {
+        f := files[i]
+        if str.EndsWith(f, ".skink") && !str.EndsWith(f, "_test.skink") {
+            return joinPath(targetDir, f)
+        }
+    }
+    return ""
+}
+
+// resolveModImport resolves a third-party package import of the form
+// `import "mod/<github_owner>/<repo_name>[@version][/<subpath>]"` against
+// the project's skink.toml / skink.lock and the local scales package cache.
+fn resolveModImport(r: *Resolver, importPath: string, baseDir: string) -> string {
+    normImp := str.Replace(importPath, "\\", "/")
+    if !str.StartsWith(normImp, "mod/") {
+        return ""
+    }
+    rest := str.Substr(normImp, 4, str.Len(normImp) - 4)
+    parts := str.Split(rest, "/")
+    if len(parts) < 2 {
+        return ""
+    }
+    owner := parts[0]
+    repoAndVer := parts[1]
+    repo := repoAndVer
+    version := ""
+    atIdx := str.IndexOf(repoAndVer, "@")
+    if atIdx >= 0 {
+        repo = str.Substr(repoAndVer, 0, atIdx)
+        version = str.Substr(repoAndVer, atIdx + 1, str.Len(repoAndVer) - atIdx - 1)
+    }
+    var subParts []string
+    for i := 2; i < len(parts); i = i + 1 {
+        seg := parts[i]
+        if i == len(parts) - 1 && str.Len(version) == 0 {
+            segAt := str.IndexOf(seg, "@")
+            if segAt >= 0 {
+                version = str.Substr(seg, segAt + 1, str.Len(seg) - segAt - 1)
+                seg = str.Substr(seg, 0, segAt)
+            }
+        }
+        if str.Len(seg) > 0 {
+            subParts = append(subParts, seg)
+        }
+    }
+    subpath := str.Join(subParts, "/")
+    if str.Len(owner) == 0 || str.Len(repo) == 0 {
+        return ""
+    }
+
+    // If @version was omitted in source code, check skink.lock / skink.toml.
+    constraint := version
+    if str.Len(constraint) == 0 {
+        constraint = lookupManifestVersion(baseDir, owner, repo)
+    }
+    if str.Len(constraint) == 0 {
+        constraint = "latest"
+    }
+
+    // Collect candidate scales cache roots in priority order.
+    var cacheRoots []string
+    envCache := getenv("SCALES_CACHE_DIR")
+    if int64(envCache) != 0 && str.Len(envCache) > 0 {
+        cacheRoots = append(cacheRoots, str.Replace(envCache, "\\", "/"))
+    }
+    envPrefix := getenv("SKINK_PREFIX")
+    if int64(envPrefix) != 0 && str.Len(envPrefix) > 0 {
+        cacheRoots = append(cacheRoots, joinPath(str.Replace(envPrefix, "\\", "/"), "scales"))
+    }
+    if str.Len(r.searchRoot) > 0 {
+        cacheRoots = append(cacheRoots, joinPath(dirName(r.searchRoot), "scales"))
+    }
+    home := getenv("HOME")
+    if int64(home) != 0 && str.Len(home) > 0 {
+        cacheRoots = append(cacheRoots, joinPath(str.Replace(home, "\\", "/"), ".local/skink/scales"))
+    }
+    userProfile := getenv("USERPROFILE")
+    if int64(userProfile) != 0 && str.Len(userProfile) > 0 {
+        cacheRoots = append(cacheRoots, joinPath(str.Replace(userProfile, "\\", "/"), ".local/skink/scales"))
+    }
+
+    for ri := 0; ri < len(cacheRoots); ri = ri + 1 {
+        repoDir := joinPath(joinPath(joinPath(cacheRoots[ri], "packages"), owner), repo)
+        if !dirExists(repoDir) {
+            continue
+        }
+        vers := listDirNames(repoDir, true)
+        if len(vers) == 0 {
+            continue
+        }
+        // Sort cached versions descending (newest first) and pick the highest
+        // version satisfying the constraint.
+        for a := 0; a < len(vers); a = a + 1 {
+            for b := a + 1; b < len(vers); b = b + 1 {
+                if compareVersions(vers[b], vers[a]) > 0 {
+                    tmp := vers[a]
+                    vers[a] = vers[b]
+                    vers[b] = tmp
+                }
+            }
+        }
+        for vi := 0; vi < len(vers); vi = vi + 1 {
+            if matchesConstraint(vers[vi], constraint) {
+                pkgDir := joinPath(repoDir, vers[vi])
+                entry := resolvePackageEntryFile(pkgDir, repo, subpath)
+                if str.Len(entry) > 0 {
+                    return entry
+                }
+            }
+        }
+    }
+    return ""
+}
+
 // resolveImport searches for the physical file backing an import path,
-// walking up the directory tree and checking vendor, cache, and std dirs.
+// walking up the directory tree and checking vendor, cache, scales, and std dirs.
 fn resolveImport(r: *Resolver, importPath: string, baseDir: string) -> string {
     // C: imports are special C-linkage declarations, not Skink files.
     if str.StartsWith(importPath, "C:") {
         return ""
+    }
+    // Resolve third-party `mod/<owner>/<repo>[@version]` imports via scales cache.
+    if str.StartsWith(importPath, "mod/") {
+        modCandidate := resolveModImport(r, importPath, baseDir)
+        if str.Len(modCandidate) > 0 {
+            return modCandidate
+        }
+        // Also strip @version when falling back to local vendor/ or .skink/cache/ directories.
+        atIdx := str.IndexOf(importPath, "@")
+        if atIdx >= 0 {
+            importPath = str.Substr(importPath, 0, atIdx)
+        }
     }
     // Rewrite the bare "testing" import to its canonical std path.
     if str.Equal(importPath, "testing") {
@@ -360,30 +871,44 @@ fn loadFile(r: *Resolver, filePath: string) {
 
     // Extract the module name and import list from the parsed declarations.
     moduleName := "main"
-    imports := []string{}
     for i := 0; i < len(declarations); i = i + 1 {
         stmt := declarations[i]
         if stmt.kind == ast.ST_MODULE {
             moduleName = stmt.decl.moduleName
-        } else if stmt.kind == ast.ST_IMPORT {
-            imports = append(imports, stmt.decl.importPath)
         }
     }
     if str.Len(moduleName) == 0 {
         moduleName = "main"
     }
+    r.fileModules[filePath] = moduleName
 
     // Recursively resolve and load every imported module.
     baseDir := dirName(filePath)
-    for i := 0; i < len(imports); i = i + 1 {
-        imported := resolveImport(r, imports[i], baseDir)
+    for i := 0; i < len(declarations); i = i + 1 {
+        stmt := declarations[i]
+        if stmt.kind != ast.ST_IMPORT {
+            continue
+        }
+        impPath := stmt.decl.importPath
+        imported := resolveImport(r, impPath, baseDir)
         if str.Len(imported) == 0 {
             // Suppress errors for C: imports since they are not Skink files.
-            if !str.StartsWith(imports[i], "C:") {
-                addError(r, str.Concat(str.Concat(filePath, " 0:0: cannot resolve import \""), str.Concat(imports[i], "\"")))
+            if !str.StartsWith(impPath, "C:") {
+                addError(r, str.Concat(str.Concat(filePath, " 0:0: cannot resolve import \""), str.Concat(impPath, "\"")))
             }
         } else {
-            loadFile(r, imported)
+            normImp := normalizePath(imported)
+            loadFile(r, normImp)
+            targetMod := r.fileModules[normImp]
+            // Rewrite third-party `mod/<owner>/<repo>[@version]` import paths
+            // so the trailing segment matches the resolved module's declared
+            // module name for the checker and emitter.
+            if (str.StartsWith(impPath, "mod/") || str.Contains(impPath, "@")) && str.Len(targetMod) > 0 && !str.Equal(targetMod, "main") {
+                d := stmt.decl
+                d.importPath = str.Concat("mod/", targetMod)
+                stmt.decl = d
+                declarations[i] = stmt
+            }
         }
     }
 
@@ -405,6 +930,7 @@ pub fn Resolve(entry: string, searchRoot: string) -> ([]ast.Stmt, []string) {
     r := Resolver{}
     r.files = []FileInfo{}
     r.states = make(map[string]int)
+    r.fileModules = make(map[string]string)
     r.errors = []string{}
     r.searchRoot = searchRoot
     if str.Len(entry) == 0 {

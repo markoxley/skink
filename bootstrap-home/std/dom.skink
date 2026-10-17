@@ -1,0 +1,701 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR and ECMAScript/JavaScript via skinkjs.
+//
+// File:    std/dom.skink
+// Purpose: Comprehensive browser DOM, Event, Window, History, Storage, Fetch,
+//          WebSocket, and Canvas 2D API for building web applications in Skink.
+// Author:  Mark Oxley
+// Created: 2026
+
+module dom
+
+// Rect represents the bounding client rectangle of a DOM element (`getBoundingClientRect()`).
+pub struct Rect {
+    X:      float
+    Y:      float
+    Width:  float
+    Height: float
+    Top:    float
+    Right:  float
+    Bottom: float
+    Left:   float
+}
+
+// Event wraps a browser DOM `Event` (`MouseEvent`, `KeyboardEvent`, `InputEvent`, etc.).
+pub struct Event {
+    handle: int64
+
+    // Type returns the event type name (e.g. "click", "input", "keydown").
+    pub fn Type(self: Event) -> string {
+        return ""
+    }
+
+    // Target returns the DOM `Element` that dispatched the event (`event.target`).
+    pub fn Target(self: Event) -> Element {
+        return Element{handle: 0}
+    }
+
+    // CurrentTarget returns the DOM `Element` to which the event handler is attached.
+    pub fn CurrentTarget(self: Event) -> Element {
+        return Element{handle: 0}
+    }
+
+    // Value returns `event.target.value` for input/select/textarea events.
+    pub fn Value(self: Event) -> string {
+        return ""
+    }
+
+    // Key returns the key value for keyboard events (e.g. "Enter", "Escape", "a").
+    pub fn Key(self: Event) -> string {
+        return ""
+    }
+
+    // Code returns the physical key code for keyboard events (e.g. "KeyA", "Space").
+    pub fn Code(self: Event) -> string {
+        return ""
+    }
+
+    // KeyCode returns the numeric key code for keyboard events.
+    pub fn KeyCode(self: Event) -> int {
+        return 0
+    }
+
+    // ClientX returns the horizontal mouse coordinate relative to the viewport.
+    pub fn ClientX(self: Event) -> float {
+        return 0.0
+    }
+
+    // ClientY returns the vertical mouse coordinate relative to the viewport.
+    pub fn ClientY(self: Event) -> float {
+        return 0.0
+    }
+
+    // OffsetX returns the horizontal mouse coordinate relative to the target element.
+    pub fn OffsetX(self: Event) -> float {
+        return 0.0
+    }
+
+    // OffsetY returns the vertical mouse coordinate relative to the target element.
+    pub fn OffsetY(self: Event) -> float {
+        return 0.0
+    }
+
+    // Button returns the mouse button index (0 = primary/left, 1 = middle, 2 = secondary/right).
+    pub fn Button(self: Event) -> int {
+        return 0
+    }
+
+    // AltKey reports whether the Alt modifier key was pressed when the event fired.
+    pub fn AltKey(self: Event) -> bool {
+        return false
+    }
+
+    // CtrlKey reports whether the Ctrl modifier key was pressed when the event fired.
+    pub fn CtrlKey(self: Event) -> bool {
+        return false
+    }
+
+    // ShiftKey reports whether the Shift modifier key was pressed when the event fired.
+    pub fn ShiftKey(self: Event) -> bool {
+        return false
+    }
+
+    // MetaKey reports whether the Meta/Command modifier key was pressed when the event fired.
+    pub fn MetaKey(self: Event) -> bool {
+        return false
+    }
+
+    // PreventDefault cancels the browser's default action for this event.
+    pub fn PreventDefault(self: Event) {
+    }
+
+    // StopPropagation stops the event from bubbling up the DOM tree.
+    pub fn StopPropagation(self: Event) {
+    }
+}
+
+// Element wraps a browser DOM `HTMLElement` / `Element` node.
+pub struct Element {
+    handle: int64
+
+    // Exists reports whether this Element wraps a non-null DOM node.
+    pub fn Exists(self: Element) -> bool {
+        return self.handle != 0
+    }
+
+    // TagName returns the element's lowercase tag name (e.g. "div", "button").
+    pub fn TagName(self: Element) -> string {
+        return ""
+    }
+
+    // Id returns the element's `id` property.
+    pub fn Id(self: Element) -> string {
+        return ""
+    }
+
+    // SetId sets the element's `id` property.
+    pub fn SetId(self: Element, id: string) {
+    }
+
+    // Text returns the element's `textContent`.
+    pub fn Text(self: Element) -> string {
+        return ""
+    }
+
+    // SetText sets the element's `textContent`.
+    pub fn SetText(self: Element, text: string) {
+    }
+
+    // HTML returns the element's `innerHTML`.
+    pub fn HTML(self: Element) -> string {
+        return ""
+    }
+
+    // SetHTML sets the element's `innerHTML`.
+    pub fn SetHTML(self: Element, html: string) {
+    }
+
+    // Value returns the `.value` property of an `<input>`, `<textarea>`, or `<select>` element.
+    pub fn Value(self: Element) -> string {
+        return ""
+    }
+
+    // SetValue sets the `.value` property of an `<input>`, `<textarea>`, or `<select>` element.
+    pub fn SetValue(self: Element, val: string) {
+    }
+
+    // Checked reports whether a checkbox or radio `<input>` is checked.
+    pub fn Checked(self: Element) -> bool {
+        return false
+    }
+
+    // SetChecked sets the `.checked` state of a checkbox or radio `<input>`.
+    pub fn SetChecked(self: Element, checked: bool) {
+    }
+
+    // Disabled reports whether the element is disabled.
+    pub fn Disabled(self: Element) -> bool {
+        return false
+    }
+
+    // SetDisabled sets the `.disabled` state of the element.
+    pub fn SetDisabled(self: Element, disabled: bool) {
+    }
+
+    // Attr returns the value of attribute `name`, or `""` if not present.
+    pub fn Attr(self: Element, name: string) -> string {
+        return ""
+    }
+
+    // SetAttr sets attribute `name` to `val` (`el.setAttribute(name, val)`).
+    pub fn SetAttr(self: Element, name: string, val: string) {
+    }
+
+    // RemoveAttr removes attribute `name` (`el.removeAttribute(name)`).
+    pub fn RemoveAttr(self: Element, name: string) {
+    }
+
+    // HasAttr reports whether attribute `name` is present on the element.
+    pub fn HasAttr(self: Element, name: string) -> bool {
+        return false
+    }
+
+    // Data reads `data-<key>` from `el.dataset[key]`.
+    pub fn Data(self: Element, key: string) -> string {
+        return ""
+    }
+
+    // SetData sets `data-<key>` via `el.dataset[key] = val`.
+    pub fn SetData(self: Element, key: string, val: string) {
+    }
+
+    // ClassName returns the element's full `className` string.
+    pub fn ClassName(self: Element) -> string {
+        return ""
+    }
+
+    // SetClassName replaces the element's `className` string.
+    pub fn SetClassName(self: Element, cls: string) {
+    }
+
+    // AddClass adds a CSS class to `el.classList`.
+    pub fn AddClass(self: Element, cls: string) {
+    }
+
+    // RemoveClass removes a CSS class from `el.classList`.
+    pub fn RemoveClass(self: Element, cls: string) {
+    }
+
+    // ToggleClass toggles a CSS class in `el.classList` and returns whether it is now present.
+    pub fn ToggleClass(self: Element, cls: string) -> bool {
+        return false
+    }
+
+    // HasClass reports whether `el.classList` contains `cls`.
+    pub fn HasClass(self: Element, cls: string) -> bool {
+        return false
+    }
+
+    // Style returns the inline style property `prop` (`el.style[prop]`).
+    pub fn Style(self: Element, prop: string) -> string {
+        return ""
+    }
+
+    // SetStyle sets inline CSS property `prop` (`el.style[prop] = val`).
+    pub fn SetStyle(self: Element, prop: string, val: string) {
+    }
+
+    // Show clears `display: none` on the element (`el.style.display = ""`).
+    pub fn Show(self: Element) {
+    }
+
+    // Hide sets `el.style.display = "none"`.
+    pub fn Hide(self: Element) {
+    }
+
+    // Append appends `child` as the last child of this element (`el.appendChild(child)`).
+    pub fn Append(self: Element, child: Element) {
+    }
+
+    // Prepend inserts `child` as the first child of this element (`el.prepend(child)`).
+    pub fn Prepend(self: Element, child: Element) {
+    }
+
+    // InsertBefore inserts `newNode` before `refNode` inside this element.
+    pub fn InsertBefore(self: Element, newNode: Element, refNode: Element) {
+    }
+
+    // ReplaceWith replaces this element in its parent with `other`.
+    pub fn ReplaceWith(self: Element, other: Element) {
+    }
+
+    // Remove detaches this element from the DOM (`el.remove()`).
+    pub fn Remove(self: Element) {
+    }
+
+    // Clear removes all child nodes from this element (`el.innerHTML = ""`).
+    pub fn Clear(self: Element) {
+    }
+
+    // Clone clones this element (`el.cloneNode(deep)`).
+    pub fn Clone(self: Element, deep: bool) -> Element {
+        return Element{handle: self.handle}
+    }
+
+    // Query finds the first descendant matching CSS `selector` (`el.querySelector(selector)`).
+    pub fn Query(self: Element, selector: string) -> Element {
+        return Element{handle: 0}
+    }
+
+    // QueryAll returns all descendants matching CSS `selector` (`el.querySelectorAll(selector)`).
+    pub fn QueryAll(self: Element, selector: string) -> []Element {
+        var out []Element
+        return out
+    }
+
+    // Children returns all direct child elements (`Array.from(el.children)`).
+    pub fn Children(self: Element) -> []Element {
+        var out []Element
+        return out
+    }
+
+    // Parent returns the parent element (`el.parentElement`).
+    pub fn Parent(self: Element) -> Element {
+        return Element{handle: 0}
+    }
+
+    // FirstChild returns the first child element (`el.firstElementChild`).
+    pub fn FirstChild(self: Element) -> Element {
+        return Element{handle: 0}
+    }
+
+    // NextSibling returns the next sibling element (`el.nextElementSibling`).
+    pub fn NextSibling(self: Element) -> Element {
+        return Element{handle: 0}
+    }
+
+    // Focus focuses this element (`el.focus()`).
+    pub fn Focus(self: Element) {
+    }
+
+    // Blur removes focus from this element (`el.blur()`).
+    pub fn Blur(self: Element) {
+    }
+
+    // Click programmatically triggers a click on this element (`el.click()`).
+    pub fn Click(self: Element) {
+    }
+
+    // ScrollIntoView scrolls the page so this element is visible (`el.scrollIntoView()`).
+    pub fn ScrollIntoView(self: Element) {
+    }
+
+    // Rect returns the element's bounding client rectangle (`el.getBoundingClientRect()`).
+    pub fn Rect(self: Element) -> Rect {
+        return Rect{}
+    }
+
+    // ClientWidth returns `el.clientWidth`.
+    pub fn ClientWidth(self: Element) -> int {
+        return 0
+    }
+
+    // ClientHeight returns `el.clientHeight`.
+    pub fn ClientHeight(self: Element) -> int {
+        return 0
+    }
+
+    // On attaches an event listener for `eventType` (`el.addEventListener(eventType, handler)`).
+    pub fn On(self: Element, eventType: string, handler: fn(Event)) {
+    }
+
+    // Once attaches a one-time event listener for `eventType`.
+    pub fn Once(self: Element, eventType: string, handler: fn(Event)) {
+    }
+
+    // OnClick attaches a `"click"` event listener.
+    pub fn OnClick(self: Element, handler: fn(Event)) {
+    }
+
+    // OnInput attaches an `"input"` event listener.
+    pub fn OnInput(self: Element, handler: fn(Event)) {
+    }
+
+    // OnChange attaches a `"change"` event listener.
+    pub fn OnChange(self: Element, handler: fn(Event)) {
+    }
+
+    // OnSubmit attaches a `"submit"` event listener.
+    pub fn OnSubmit(self: Element, handler: fn(Event)) {
+    }
+
+    // OnKeyDown attaches a `"keydown"` event listener.
+    pub fn OnKeyDown(self: Element, handler: fn(Event)) {
+    }
+
+    // OnKeyUp attaches a `"keyup"` event listener.
+    pub fn OnKeyUp(self: Element, handler: fn(Event)) {
+    }
+}
+
+// Canvas2D wraps an HTML5 `CanvasRenderingContext2D` for 2D graphics and games.
+pub struct Canvas2D {
+    handle: int64
+
+    // ClearRect clears the specified rectangular area to transparent black.
+    pub fn ClearRect(self: Canvas2D, x: float, y: float, w: float, h: float) {
+    }
+
+    // FillRect draws a filled rectangle.
+    pub fn FillRect(self: Canvas2D, x: float, y: float, w: float, h: float) {
+    }
+
+    // StrokeRect draws a rectangular outline.
+    pub fn StrokeRect(self: Canvas2D, x: float, y: float, w: float, h: float) {
+    }
+
+    // SetFillStyle sets the fill color/gradient (`ctx.fillStyle = color`).
+    pub fn SetFillStyle(self: Canvas2D, color: string) {
+    }
+
+    // SetStrokeStyle sets the stroke color/gradient (`ctx.strokeStyle = color`).
+    pub fn SetStrokeStyle(self: Canvas2D, color: string) {
+    }
+
+    // SetLineWidth sets the stroke width (`ctx.lineWidth = w`).
+    pub fn SetLineWidth(self: Canvas2D, w: float) {
+    }
+
+    // SetFont sets the current text font (`ctx.font = font`).
+    pub fn SetFont(self: Canvas2D, font: string) {
+    }
+
+    // FillText draws filled text at `(x, y)`.
+    pub fn FillText(self: Canvas2D, text: string, x: float, y: float) {
+    }
+
+    // StrokeText draws outlined text at `(x, y)`.
+    pub fn StrokeText(self: Canvas2D, text: string, x: float, y: float) {
+    }
+
+    // BeginPath starts a new drawing path.
+    pub fn BeginPath(self: Canvas2D) {
+    }
+
+    // ClosePath closes the current subpath.
+    pub fn ClosePath(self: Canvas2D) {
+    }
+
+    // MoveTo moves the current subpath start point to `(x, y)`.
+    pub fn MoveTo(self: Canvas2D, x: float, y: float) {
+    }
+
+    // LineTo connects the last point in the subpath to `(x, y)` with a straight line.
+    pub fn LineTo(self: Canvas2D, x: float, y: float) {
+    }
+
+    // Arc adds a circular arc centered at `(x, y)` with radius `r`.
+    pub fn Arc(self: Canvas2D, x: float, y: float, r: float, startAngle: float, endAngle: float) {
+    }
+
+    // Fill fills the current path.
+    pub fn Fill(self: Canvas2D) {
+    }
+
+    // Stroke strokes the current path.
+    pub fn Stroke(self: Canvas2D) {
+    }
+
+    // Save pushes the current drawing state onto the canvas state stack.
+    pub fn Save(self: Canvas2D) {
+    }
+
+    // Restore pops the top state on the canvas state stack.
+    pub fn Restore(self: Canvas2D) {
+    }
+
+    // Translate translates the canvas origin by `(x, y)`.
+    pub fn Translate(self: Canvas2D, x: float, y: float) {
+    }
+
+    // Rotate rotates the canvas coordinate system by `angle` radians.
+    pub fn Rotate(self: Canvas2D, angle: float) {
+    }
+
+    // Scale scales the canvas units by `(sx, sy)`.
+    pub fn Scale(self: Canvas2D, sx: float, sy: float) {
+    }
+}
+
+// WebSocket wraps a browser `WebSocket` connection.
+pub struct WebSocket {
+    handle: int64
+
+    // Send transmits `data` over the WebSocket connection.
+    pub fn Send(self: WebSocket, data: string) {
+    }
+
+    // Close closes the WebSocket connection.
+    pub fn Close(self: WebSocket) {
+    }
+}
+
+// === Document Query & Element Creation ===
+
+// GetElementById returns the element with the specified `id` (`document.getElementById(id)`).
+pub fn GetElementById(id: string) -> Element {
+    return Element{handle: 1}
+}
+
+// Query returns the first element matching CSS `selector` (`document.querySelector(selector)`).
+pub fn Query(selector: string) -> Element {
+    return Element{handle: 1}
+}
+
+// QueryAll returns all elements matching CSS `selector` (`document.querySelectorAll(selector)`).
+pub fn QueryAll(selector: string) -> []Element {
+    var out []Element
+    return out
+}
+
+// Body returns `document.body`.
+pub fn Body() -> Element {
+    return Element{handle: 1}
+}
+
+// Head returns `document.head`.
+pub fn Head() -> Element {
+    return Element{handle: 1}
+}
+
+// DocumentElement returns `document.documentElement` (`<html>`).
+pub fn DocumentElement() -> Element {
+    return Element{handle: 1}
+}
+
+// CreateElement creates a new HTML element with tag name `tag` (`document.createElement(tag)`).
+pub fn CreateElement(tag: string) -> Element {
+    return Element{handle: 1}
+}
+
+// CreateElementWithText creates a new element with `tag` and initializes its `textContent`.
+pub fn CreateElementWithText(tag: string, text: string) -> Element {
+    return Element{handle: 1}
+}
+
+// CreateElementWithClass creates a new element with `tag` and initializes its `className`.
+pub fn CreateElementWithClass(tag: string, cls: string) -> Element {
+    return Element{handle: 1}
+}
+
+// Title returns `document.title`.
+pub fn Title() -> string {
+    return ""
+}
+
+// SetTitle sets `document.title = title`.
+pub fn SetTitle(title: string) {
+}
+
+// OnReady runs `handler` when the DOM is ready (`DOMContentLoaded` or immediately if already interactive/complete).
+pub fn OnReady(handler: fn()) {
+}
+
+// OnWindowEvent registers an event listener on `window` (`window.addEventListener(eventType, handler)`).
+pub fn OnWindowEvent(eventType: string, handler: fn(Event)) {
+}
+
+// === Window, Timers, Dialogs, Location & History ===
+
+// WindowWidth returns `window.innerWidth`.
+pub fn WindowWidth() -> int {
+    return 1024
+}
+
+// WindowHeight returns `window.innerHeight`.
+pub fn WindowHeight() -> int {
+    return 768
+}
+
+// ScrollTo scrolls the window to `(x, y)` (`window.scrollTo(x, y)`).
+pub fn ScrollTo(x: int, y: int) {
+}
+
+// SetTimeout schedules `handler` to run after `delayMs` milliseconds and returns the timer ID.
+pub fn SetTimeout(handler: fn(), delayMs: int) -> int {
+    return 1
+}
+
+// ClearTimeout cancels a timeout created by `SetTimeout`.
+pub fn ClearTimeout(id: int) {
+}
+
+// SetInterval schedules `handler` to run repeatedly every `intervalMs` milliseconds and returns the timer ID.
+pub fn SetInterval(handler: fn(), intervalMs: int) -> int {
+    return 1
+}
+
+// ClearInterval cancels a repeating timer created by `SetInterval`.
+pub fn ClearInterval(id: int) {
+}
+
+// RequestAnimationFrame schedules `handler` for the next repaint frame (`window.requestAnimationFrame`).
+pub fn RequestAnimationFrame(handler: fn(float)) -> int {
+    return 1
+}
+
+// CancelAnimationFrame cancels a scheduled animation frame request.
+pub fn CancelAnimationFrame(id: int) {
+}
+
+// Alert displays a browser alert dialog (`window.alert(msg)`).
+pub fn Alert(msg: string) {
+}
+
+// Confirm displays a browser confirmation dialog (`window.confirm(msg)`).
+pub fn Confirm(msg: string) -> bool {
+    return true
+}
+
+// Prompt displays a browser prompt dialog (`window.prompt(msg, defaultVal)`).
+pub fn Prompt(msg: string, defaultVal: string) -> string {
+    return defaultVal
+}
+
+// Href returns `window.location.href`.
+pub fn Href() -> string {
+    return ""
+}
+
+// SetHref navigates to `url` (`window.location.href = url`).
+pub fn SetHref(url: string) {
+}
+
+// Pathname returns `window.location.pathname`.
+pub fn Pathname() -> string {
+    return "/"
+}
+
+// Search returns `window.location.search`.
+pub fn Search() -> string {
+    return ""
+}
+
+// Hash returns `window.location.hash`.
+pub fn Hash() -> string {
+    return ""
+}
+
+// SetHash sets `window.location.hash = hash`.
+pub fn SetHash(hash: string) {
+}
+
+// Reload reloads the current page (`window.location.reload()`).
+pub fn Reload() {
+}
+
+// PushState pushes a new URL entry onto the browser history stack (`history.pushState(null, "", url)`).
+pub fn PushState(url: string) {
+}
+
+// ReplaceState replaces the current browser history entry (`history.replaceState(null, "", url)`).
+pub fn ReplaceState(url: string) {
+}
+
+// OnPopState registers a listener for the browser `"popstate"` navigation event.
+pub fn OnPopState(handler: fn(Event)) {
+}
+
+// === Web Storage (localStorage & sessionStorage) ===
+
+// LocalStorageGet reads `key` from `window.localStorage` (returns `""` if absent).
+pub fn LocalStorageGet(key: string) -> string {
+    return ""
+}
+
+// LocalStorageSet writes `key = val` to `window.localStorage`.
+pub fn LocalStorageSet(key: string, val: string) {
+}
+
+// LocalStorageRemove deletes `key` from `window.localStorage`.
+pub fn LocalStorageRemove(key: string) {
+}
+
+// LocalStorageClear clears all entries in `window.localStorage`.
+pub fn LocalStorageClear() {
+}
+
+// SessionStorageGet reads `key` from `window.sessionStorage` (returns `""` if absent).
+pub fn SessionStorageGet(key: string) -> string {
+    return ""
+}
+
+// SessionStorageSet writes `key = val` to `window.sessionStorage`.
+pub fn SessionStorageSet(key: string, val: string) {
+}
+
+// SessionStorageRemove deletes `key` from `window.sessionStorage`.
+pub fn SessionStorageRemove(key: string) {
+}
+
+// === Fetch, WebSocket & Canvas2D ===
+
+// FetchText performs an asynchronous HTTP GET `fetch(url)` and invokes `onSuccess(body)` or `onError(errMsg)`.
+pub fn FetchText(url: string, onSuccess: fn(string), onError: fn(string)) {
+}
+
+// FetchJSON performs an asynchronous HTTP `fetch(url, { method, headers, body })` and invokes `onSuccess(responseText, statusCode)` or `onError(errMsg)`.
+pub fn FetchJSON(url: string, method: string, body: string, onSuccess: fn(string, int), onError: fn(string)) {
+}
+
+// ConnectWebSocket opens a browser `WebSocket` connection to `url` and wires lifecycle callbacks.
+pub fn ConnectWebSocket(url: string, onOpen: fn(), onMessage: fn(string), onClose: fn()) -> WebSocket {
+    return WebSocket{handle: 1}
+}
+
+// GetCanvas2D obtains the 2D rendering context (`canvas.getContext("2d")`) for a `<canvas>` element.
+pub fn GetCanvas2D(canvasEl: Element) -> Canvas2D {
+    return Canvas2D{handle: 1}
+}

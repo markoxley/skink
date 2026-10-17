@@ -4,9 +4,9 @@
 # build_windows.sh — Cross-compile the Skink compiler for Windows x86_64.
 #
 # This script:
-#   1. Emits LLVM IR from skink.skink using the host (Linux) Skink compiler
-#   2. Cross-compiles the IR + runtime C files to a Windows .exe using clang
-#   3. Bundles the .exe with std/, runtime/, DLLs, and install.ps1 into a ZIP
+#   1. Emits LLVM IR from skink.skink, scales.skink, and skinkjs.skink using the host Skink compiler
+#   2. Cross-compiles the IR + runtime C files to Windows .exe binaries using clang
+#   3. Bundles skink.exe, scales.exe, skinkjs.exe, std/, runtime/, DLLs, and install.ps1 into a ZIP
 #
 # Requirements (Fedora):
 #   sudo dnf install -y mingw64-gcc mingw64-headers mingw64-winpthreads \
@@ -20,6 +20,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCALES_DIR="${SCRIPT_DIR}/../scales"
+SKINKJS_DIR="${SCRIPT_DIR}/../skinkjs"
 cd "$SCRIPT_DIR"
 
 # Version
@@ -131,6 +133,7 @@ if [[ -n "$GCC_LIB" ]]; then
 fi
 
 clang "${CROSS_FLAGS[@]}" || fail "Cross-compilation failed"
+rm -f "${STAGING_DIR}/skink.ll"
 
 # Verify the output
 if ! file "${STAGING_DIR}/skink.exe" | grep -q "PE32+"; then
@@ -138,6 +141,100 @@ if ! file "${STAGING_DIR}/skink.exe" | grep -q "PE32+"; then
 fi
 
 info "  Built: skink.exe ($(du -h "${STAGING_DIR}/skink.exe" | cut -f1))"
+
+# ============================================================================
+# Step 3b: Emit LLVM IR and cross-compile scales.exe
+# ============================================================================
+
+if [[ -d "$SCALES_DIR" ]] && [[ -f "${SCALES_DIR}/scales.skink" ]]; then
+    info "Emitting LLVM IR from scales.skink..."
+    (
+        cd "$SCALES_DIR"
+        SKINK_HOME="${SCRIPT_DIR}/std" "${SCRIPT_DIR}/skink" -emit-ll scales.skink > "${STAGING_DIR}/scales.ll" 2>/dev/null
+    )
+    [[ -s "${STAGING_DIR}/scales.ll" ]] || fail "Failed to emit LLVM IR for scales"
+
+    info "Cross-compiling scales.exe..."
+    SCALES_CROSS_FLAGS=(
+        --target=$TARGET
+        -Wno-override-module
+        -O2
+        -I"$MINGW_SYSROOT/include"
+        -I"${SCRIPT_DIR}/std/runtime"
+        -L"$MINGW_SYSROOT/lib"
+        -o "${STAGING_DIR}/scales.exe"
+        "${STAGING_DIR}/scales.ll"
+        ${RUNTIME_FILES}
+        -lwinpthread
+        -lws2_32
+        -lssl
+        -lcrypto
+        -lz
+        -lsqlite3
+        -lbcrypt
+    )
+    if [[ -n "$GCC_LIB" ]]; then
+        SCALES_CROSS_FLAGS+=(-L"$GCC_LIB")
+    fi
+
+    clang "${SCALES_CROSS_FLAGS[@]}" || fail "scales.exe cross-compilation failed"
+    rm -f "${STAGING_DIR}/scales.ll"
+
+    if ! file "${STAGING_DIR}/scales.exe" | grep -q "PE32+"; then
+        fail "scales.exe is not a Windows PE32+ executable: $(file "${STAGING_DIR}/scales.exe")"
+    fi
+
+    info "  Built: scales.exe ($(du -h "${STAGING_DIR}/scales.exe" | cut -f1))"
+else
+    warn "scales directory not found at ${SCALES_DIR}, skipping scales.exe"
+fi
+
+# ============================================================================
+# Step 3c: Emit LLVM IR and cross-compile skinkjs.exe
+# ============================================================================
+
+if [[ -d "$SKINKJS_DIR" ]] && [[ -f "${SKINKJS_DIR}/skinkjs.skink" ]]; then
+    info "Emitting LLVM IR from skinkjs.skink..."
+    (
+        cd "$SKINKJS_DIR"
+        SKINK_HOME="${SCRIPT_DIR}/std" "${SCRIPT_DIR}/skink" -emit-ll skinkjs.skink > "${STAGING_DIR}/skinkjs.ll" 2>/dev/null
+    )
+    [[ -s "${STAGING_DIR}/skinkjs.ll" ]] || fail "Failed to emit LLVM IR for skinkjs"
+
+    info "Cross-compiling skinkjs.exe..."
+    SKINKJS_CROSS_FLAGS=(
+        --target=$TARGET
+        -Wno-override-module
+        -O2
+        -I"$MINGW_SYSROOT/include"
+        -I"${SCRIPT_DIR}/std/runtime"
+        -L"$MINGW_SYSROOT/lib"
+        -o "${STAGING_DIR}/skinkjs.exe"
+        "${STAGING_DIR}/skinkjs.ll"
+        ${RUNTIME_FILES}
+        -lwinpthread
+        -lws2_32
+        -lssl
+        -lcrypto
+        -lz
+        -lsqlite3
+        -lbcrypt
+    )
+    if [[ -n "$GCC_LIB" ]]; then
+        SKINKJS_CROSS_FLAGS+=(-L"$GCC_LIB")
+    fi
+
+    clang "${SKINKJS_CROSS_FLAGS[@]}" || fail "skinkjs.exe cross-compilation failed"
+    rm -f "${STAGING_DIR}/skinkjs.ll"
+
+    if ! file "${STAGING_DIR}/skinkjs.exe" | grep -q "PE32+"; then
+        fail "skinkjs.exe is not a Windows PE32+ executable: $(file "${STAGING_DIR}/skinkjs.exe")"
+    fi
+
+    info "  Built: skinkjs.exe ($(du -h "${STAGING_DIR}/skinkjs.exe" | cut -f1))"
+else
+    warn "skinkjs directory not found at ${SKINKJS_DIR}, skipping skinkjs.exe"
+fi
 
 # ============================================================================
 # Step 4: Bundle DLLs
@@ -216,10 +313,18 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 New-Item -ItemType Directory -Force -Path $StdDir | Out-Null
 
-# Copy skink.exe and DLLs to bin/
+# Copy skink.exe, scales.exe, and DLLs to bin/
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Copy-Item "$ScriptDir\skink.exe" $BinDir -Force
 Write-Host "  Installed: bin\skink.exe"
+if (Test-Path "$ScriptDir\scales.exe") {
+    Copy-Item "$ScriptDir\scales.exe" $BinDir -Force
+    Write-Host "  Installed: bin\scales.exe"
+}
+if (Test-Path "$ScriptDir\skinkjs.exe") {
+    Copy-Item "$ScriptDir\skinkjs.exe" $BinDir -Force
+    Write-Host "  Installed: bin\skinkjs.exe"
+}
 
 # Copy DLLs
 Get-ChildItem "$ScriptDir\*.dll" | ForEach-Object {
@@ -256,6 +361,12 @@ Write-Host ""
 Write-Host "Skink installed successfully!" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Binary:  $BinDir\skink.exe"
+if (Test-Path "$BinDir\scales.exe") {
+    Write-Host "  Scales:  $BinDir\scales.exe"
+}
+if (Test-Path "$BinDir\skinkjs.exe") {
+    Write-Host "  SkinkJS: $BinDir\skinkjs.exe"
+}
 Write-Host "  Stdlib:  $StdDir"
 Write-Host "  Runtime: $RuntimeDir"
 Write-Host ""
@@ -281,6 +392,8 @@ Skink Compiler v${VERSION} for Windows x86_64
 
 Contents:
   skink.exe       — The Skink compiler binary
+  scales.exe      — The Skink package manager and module resolver
+  skinkjs.exe     — The Skink to ECMAScript/JavaScript transpiler
   *.dll           — Required runtime DLLs (winpthread, OpenSSL, zlib, SQLite)
   std/            — Standard library (.skink source modules)
   std/runtime/    — C runtime source files (compiled into every Skink program)

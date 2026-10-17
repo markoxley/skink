@@ -2107,6 +2107,11 @@ pub fn checkProgram(c: *Checker, decls: []ast.Stmt) -> bool {
                 realName = str.Substr(realName, lastSlash + 1, str.Len(realName) - lastSlash - 1)
             }
             realName = str.Replace(realName, ".skink", "")
+            atIdx := str.IndexOf(realName, "@")
+            if atIdx >= 0 {
+                realName = str.Substr(realName, 0, atIdx)
+            }
+            realName = str.Replace(realName, "-", "_")
             alias := d.importAlias
             if str.Len(alias) == 0 {
                 alias = realName

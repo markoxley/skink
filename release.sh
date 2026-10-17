@@ -25,9 +25,9 @@
 #
 # release.sh — Build and package a Skink release archive for GitHub
 #
-# This script builds the skink compiler and skink-lsp, then packages them
-# with the standard library and C runtime into a tarball ready for upload
-# to GitHub releases.
+# This script builds the skink compiler, skink-lsp, skinkfmt, scales, and
+# skinkjs, then packages them with the standard library and C runtime into a
+# tarball ready for upload to GitHub releases.
 #
 # Usage:
 #   ./release.sh                    # uses version from version.txt
@@ -44,6 +44,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKINK_HOME_DIR="${SCRIPT_DIR}/std"
 LSP_DIR="${SCRIPT_DIR}/../skink-lsp"
+SCALES_DIR="${SCRIPT_DIR}/../scales"
+SKINKJS_DIR="${SCRIPT_DIR}/../skinkjs"
 
 # Version
 VERSION=""
@@ -158,9 +160,9 @@ if [[ -d "$LSP_DIR" ]]; then
     (
         cd "$LSP_DIR"
         make clean
-        # Build against this repo's stdlib, not any ambient SKINK_HOME
+        # Build against this repo's compiler and stdlib, not any ambient SKINK_HOME
         # (a stale /usr/local/lib/skink export would ship old sources).
-        SKINK_HOME="$SKINK_HOME_DIR" make build
+        SKINK="$COMPILER_BIN" SKINK_HOME="$SKINK_HOME_DIR" make build
     )
     LSP_BIN="${LSP_DIR}/skink-lsp"
     [[ -f "$LSP_BIN" ]] || fail "LSP build failed"
@@ -171,6 +173,46 @@ if [[ -d "$LSP_DIR" ]]; then
     echo "" | timeout 2 "$LSP_BIN" 2>/dev/null || true
 else
     warn "skink-lsp directory not found at ${LSP_DIR}, skipping LSP"
+fi
+
+# ============================================================================
+# Build scales
+# ============================================================================
+
+SCALES_BIN=""
+if [[ -d "$SCALES_DIR" ]]; then
+    info "Building scales..."
+    (
+        cd "$SCALES_DIR"
+        make clean
+        SKINK="$COMPILER_BIN" SKINK_HOME="$SKINK_HOME_DIR" make build
+    )
+    SCALES_BIN="${SCALES_DIR}/scales"
+    [[ -f "$SCALES_BIN" ]] || fail "scales build failed"
+    info "Verifying scales..."
+    "$SCALES_BIN" -v || fail "scales verification failed"
+else
+    warn "scales directory not found at ${SCALES_DIR}, skipping scales"
+fi
+
+# ============================================================================
+# Build skinkjs
+# ============================================================================
+
+SKINKJS_BIN=""
+if [[ -d "$SKINKJS_DIR" ]]; then
+    info "Building skinkjs..."
+    (
+        cd "$SKINKJS_DIR"
+        make clean
+        SKINK="$COMPILER_BIN" SKINK_HOME="$SKINK_HOME_DIR" make build
+    )
+    SKINKJS_BIN="${SKINKJS_DIR}/skinkjs"
+    [[ -f "$SKINKJS_BIN" ]] || fail "skinkjs build failed"
+    info "Verifying skinkjs..."
+    "$SKINKJS_BIN" -v || fail "skinkjs verification failed"
+else
+    warn "skinkjs directory not found at ${SKINKJS_DIR}, skipping skinkjs"
 fi
 
 # ============================================================================
@@ -195,6 +237,16 @@ fi
 if [[ -n "$FMT_BIN" ]] && [[ -f "$FMT_BIN" ]]; then
     cp "$FMT_BIN" "${STAGING_DIR}/skinkfmt"
     chmod 755 "${STAGING_DIR}/skinkfmt"
+fi
+
+if [[ -n "$SCALES_BIN" ]] && [[ -f "$SCALES_BIN" ]]; then
+    cp "$SCALES_BIN" "${STAGING_DIR}/scales"
+    chmod 755 "${STAGING_DIR}/scales"
+fi
+
+if [[ -n "$SKINKJS_BIN" ]] && [[ -f "$SKINKJS_BIN" ]]; then
+    cp "$SKINKJS_BIN" "${STAGING_DIR}/skinkjs"
+    chmod 755 "${STAGING_DIR}/skinkjs"
 fi
 
 # skink -t / -b resolve their harness scripts relative to argv[0], so they

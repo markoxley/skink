@@ -11,14 +11,16 @@
 # Installation directories (override with make SKINK_PREFIX=/custom/path).
 # The default matches install.sh's layout so `make install` and the curl
 # installer land in the same place:
-#   $SKINK_PREFIX/bin/{skink, skink-lsp, skinkfmt, skink_test.sh, skink_bench.sh}
+#   $SKINK_PREFIX/bin/{skink, skink-lsp, skinkfmt, scales, skinkjs, skink_test.sh, skink_bench.sh}
 #   $SKINK_PREFIX/std/    (stdlib sources + runtime/ C support, as in the
 #                          release archive — SKINK_HOME points here)
 SKINK_PREFIX ?= $(HOME)/.local/skink
 BINDIR       ?= $(SKINK_PREFIX)/bin
 STDLIB_DIR   ?= $(SKINK_PREFIX)/std
-# Sibling repo that supplies the LSP + formatter binaries
+# Sibling repos that supply the LSP + formatter, scales package manager, and skinkjs transpiler binaries
 LSP_DIR      ?= $(abspath ../skink-lsp)
+SCALES_DIR   ?= $(abspath ../scales)
+SKINKJS_DIR  ?= $(abspath ../skinkjs)
 
 # Compiler and tool settings
 SKINK_BIN   := skink
@@ -95,7 +97,7 @@ $(VERSION_SKINK): $(VERSION_FILE)
 bump-version: $(VERSION_FILE)
 	@awk -F. '{print $$1"."$$2"."($$3+1)}' $(VERSION_FILE) > $(VERSION_FILE).tmp && mv $(VERSION_FILE).tmp $(VERSION_FILE)
 
-.PHONY: all build stage1 stage2 lsp-build install install-only install-files install-deps uninstall clean help release dist check-bootstrap-sync sync-bootstrap
+.PHONY: all build stage1 stage2 lsp-build scales-build skinkjs-build install install-only install-files install-deps uninstall clean help release dist check-bootstrap-sync sync-bootstrap
 
 # Default target: build stage 1 self-hosted compiler
 all: build
@@ -156,18 +158,34 @@ stage2: bump-version | $(SKINK_BIN)
 	@echo "Stage 2 self-hosted compiler verified and updated: $(SKINK_BIN)"
 
 # Build the LSP and formatter if the sibling skink-lsp repo is present.
-# Built against this repo's stdlib — never an ambient SKINK_HOME.
-lsp-build:
+# Built against this repo's compiler and stdlib — never an ambient SKINK_HOME.
+lsp-build: | $(SKINK_BIN)
 ifneq ($(wildcard $(LSP_DIR)/Makefile),)
-	@$(MAKE) -C $(LSP_DIR) SKINK_HOME=$(CURDIR)/std build
+	@$(MAKE) -C $(LSP_DIR) SKINK=$(CURDIR)/$(SKINK_BIN) SKINK_HOME=$(CURDIR)/std build
 else
 	@echo "skink-lsp not found at $(LSP_DIR), skipping LSP build"
 endif
 
-# Install the whole toolset — compiler, LSP, formatter, harness scripts,
+# Build the scales package manager if the sibling scales repo is present.
+scales-build: | $(SKINK_BIN)
+ifneq ($(wildcard $(SCALES_DIR)/Makefile),)
+	@$(MAKE) -C $(SCALES_DIR) SKINK=$(CURDIR)/$(SKINK_BIN) SKINK_HOME=$(CURDIR)/std build
+else
+	@echo "scales not found at $(SCALES_DIR), skipping scales build"
+endif
+
+# Build the skinkjs transpiler if the sibling skinkjs repo is present.
+skinkjs-build: | $(SKINK_BIN)
+ifneq ($(wildcard $(SKINKJS_DIR)/Makefile),)
+	@$(MAKE) -C $(SKINKJS_DIR) SKINK=$(CURDIR)/$(SKINK_BIN) SKINK_HOME=$(CURDIR)/std build
+else
+	@echo "skinkjs not found at $(SKINKJS_DIR), skipping skinkjs build"
+endif
+
+# Install the whole toolset — compiler, LSP, formatter, scales, skinkjs, harness scripts,
 # stdlib, and C runtime — into the same $SKINK_PREFIX layout install.sh
-# uses, so `skink`, `skink-lsp`, and `skinkfmt` all live in one bin dir.
-install: build lsp-build install-files
+# uses, so `skink`, `skink-lsp`, `skinkfmt`, `scales`, and `skinkjs` all live in one bin dir.
+install: build lsp-build scales-build skinkjs-build install-files
 	@echo ""
 	@echo "Installation complete: toolset in $(BINDIR), stdlib in $(STDLIB_DIR)."
 	@echo "Point SKINK_HOME at $(STDLIB_DIR) (install.sh-style export does this)."
@@ -197,6 +215,18 @@ install-files:
 	    echo "  installed skinkfmt"; \
 	else \
 	    echo "  (skinkfmt binary not found at $(LSP_DIR), skipped)"; \
+	fi
+	@if [ -f "$(SCALES_DIR)/scales" ]; then \
+	    cp -f "$(SCALES_DIR)/scales" $(BINDIR)/ && chmod 755 $(BINDIR)/scales; \
+	    echo "  installed scales"; \
+	else \
+	    echo "  (scales binary not found at $(SCALES_DIR), skipped)"; \
+	fi
+	@if [ -f "$(SKINKJS_DIR)/skinkjs" ]; then \
+	    cp -f "$(SKINKJS_DIR)/skinkjs" $(BINDIR)/ && chmod 755 $(BINDIR)/skinkjs; \
+	    echo "  installed skinkjs"; \
+	else \
+	    echo "  (skinkjs binary not found at $(SKINKJS_DIR), skipped)"; \
 	fi
 	@echo "Installing standard library to $(STDLIB_DIR)..."
 	rm -rf $(STDLIB_DIR)
@@ -229,6 +259,8 @@ uninstall:
 	rm -f $(BINDIR)/skink_bench.sh
 	rm -f $(BINDIR)/skink-lsp
 	rm -f $(BINDIR)/skinkfmt
+	rm -f $(BINDIR)/scales
+	rm -f $(BINDIR)/skinkjs
 	@echo "Removing $(STDLIB_DIR)..."
 	rm -rf $(STDLIB_DIR)
 	@echo "Uninstall complete."

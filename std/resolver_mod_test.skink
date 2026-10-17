@@ -1,0 +1,160 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/resolver_mod_test.skink
+// Purpose: Unit tests for scales third-party module resolution
+//          (`import "mod/<owner>/<repo>[@version]"`) in std/resolver.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module resolver_mod_test
+
+import "testing"
+import "std/resolver"
+import "std/fs"
+import "std/os"
+import "std/str"
+import "std/ast"
+
+// mkdirTree creates nested directories for test fixtures.
+fn mkdirTree(p: string) {
+    parts := str.Split(p, "/")
+    cur := ""
+    if str.StartsWith(p, "/") {
+        cur = "/"
+    }
+    for i := 0; i < len(parts); i = i + 1 {
+        if str.Len(parts[i]) == 0 {
+            continue
+        }
+        if str.Equal(cur, "/") {
+            cur = str.Concat("/", parts[i])
+        } else if str.Len(cur) == 0 {
+            cur = parts[i]
+        } else {
+            cur = str.Concat(cur, str.Concat("/", parts[i]))
+        }
+        if !fs.IsDir(cur) {
+            fs.Mkdir(cur)
+        }
+    }
+}
+
+// TestResolveExplicitVersion verifies that `import "mod/markoxley/skink-orm@v1.0.2"`
+// resolves to the exact v1.0.2 package in the local scales cache even when a
+// newer v1.1.0 version is also cached.
+pub fn TestResolveExplicitVersion() {
+    testRoot := "/tmp/skink_resolver_mod_test_explicit"
+    cacheDir := str.Concat(testRoot, "/cache")
+    projDir := str.Concat(testRoot, "/proj")
+    v102Dir := str.Concat(cacheDir, "/packages/markoxley/skink-orm/v1.0.2")
+    v110Dir := str.Concat(cacheDir, "/packages/markoxley/skink-orm/v1.1.0")
+    mkdirTree(v102Dir)
+    mkdirTree(v110Dir)
+    mkdirTree(projDir)
+
+    fs.WriteAll(str.Concat(v102Dir, "/orm.skink"), "module orm\n\npub fn VersionTag() -> string {\n    return \"v1.0.2\"\n}\n")
+    fs.WriteAll(str.Concat(v110Dir, "/orm.skink"), "module orm\n\npub fn VersionTag() -> string {\n    return \"v1.1.0\"\n}\n")
+
+    appFile := str.Concat(projDir, "/main.skink")
+    fs.WriteAll(appFile, "module main\n\nimport \"mod/markoxley/skink-orm@v1.0.2\"\n\nfn main() -> int {\n    println(orm.VersionTag())\n    return 0\n}\n")
+
+    os.Setenv("SCALES_CACHE_DIR", cacheDir)
+    decls, errs := resolver.Resolve(appFile, "")
+    testing.AssertEqualInt(0, len(errs), "explicit @v1.0.2 import should resolve without errors")
+    testing.AssertTrue(len(decls) > 0, "resolved declarations should be non-empty")
+
+    foundFn := false
+    for i := 0; i < len(decls); i = i + 1 {
+        if decls[i].kind == ast.ST_FN && str.Equal(decls[i].decl.fnName, "orm.VersionTag") {
+            foundFn = true
+            testing.AssertTrue(str.Contains(decls[i].filePath, "v1.0.2"), "should load from v1.0.2 directory")
+        }
+    }
+    testing.AssertTrue(foundFn, "orm.VersionTag declaration should be loaded and qualified")
+}
+
+// TestResolveLatestWhenVersionOmitted verifies that `import "mod/markoxley/skink-orm"`
+// without `@version` resolves to the highest cached semantic version when no
+// skink.toml constraint pins an older version.
+pub fn TestResolveLatestWhenVersionOmitted() {
+    testRoot := "/tmp/skink_resolver_mod_test_latest"
+    cacheDir := str.Concat(testRoot, "/cache")
+    projDir := str.Concat(testRoot, "/proj")
+    v102Dir := str.Concat(cacheDir, "/packages/markoxley/skink-orm/v1.0.2")
+    v120Dir := str.Concat(cacheDir, "/packages/markoxley/skink-orm/v1.2.0")
+    mkdirTree(v102Dir)
+    mkdirTree(v120Dir)
+    mkdirTree(projDir)
+
+    fs.WriteAll(str.Concat(v102Dir, "/orm.skink"), "module orm\n\npub fn Tag() -> string { return \"1.0.2\" }\n")
+    fs.WriteAll(str.Concat(v120Dir, "/orm.skink"), "module orm\n\npub fn Tag() -> string { return \"1.2.0\" }\n")
+
+    appFile := str.Concat(projDir, "/main.skink")
+    fs.WriteAll(appFile, "module main\n\nimport \"mod/markoxley/skink-orm\"\n\nfn main() -> int {\n    println(orm.Tag())\n    return 0\n}\n")
+
+    os.Setenv("SCALES_CACHE_DIR", cacheDir)
+    decls, errs := resolver.Resolve(appFile, "")
+    testing.AssertEqualInt(0, len(errs), "omitted @version should resolve to latest cached version")
+
+    foundLatest := false
+    for i := 0; i < len(decls); i = i + 1 {
+        if decls[i].kind == ast.ST_FN && str.Equal(decls[i].decl.fnName, "orm.Tag") {
+            if str.Contains(decls[i].filePath, "v1.2.0") {
+                foundLatest = true
+            }
+        }
+    }
+    testing.AssertTrue(foundLatest, "omitted @version should select highest semver v1.2.0")
+}
+
+// TestResolveFromManifestConstraint verifies that when `@version` is omitted
+// in source code, the resolver honours the version constraint in `skink.toml`.
+pub fn TestResolveFromManifestConstraint() {
+    testRoot := "/tmp/skink_resolver_mod_test_manifest"
+    cacheDir := str.Concat(testRoot, "/cache")
+    projDir := str.Concat(testRoot, "/proj")
+    v102Dir := str.Concat(cacheDir, "/packages/markoxley/skink-orm/v1.0.2")
+    v200Dir := str.Concat(cacheDir, "/packages/markoxley/skink-orm/v2.0.0")
+    mkdirTree(v102Dir)
+    mkdirTree(v200Dir)
+    mkdirTree(projDir)
+
+    fs.WriteAll(str.Concat(v102Dir, "/orm.skink"), "module orm\n\npub fn Tag() -> string { return \"1.0.2\" }\n")
+    fs.WriteAll(str.Concat(v200Dir, "/orm.skink"), "module orm\n\npub fn Tag() -> string { return \"2.0.0\" }\n")
+
+    tomlContent := "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nauthor = \"mark\"\n\n[dependencies]\n\"mod/markoxley/skink-orm\" = \"^1.0.0\"\n"
+    fs.WriteAll(str.Concat(projDir, "/skink.toml"), tomlContent)
+
+    appFile := str.Concat(projDir, "/main.skink")
+    fs.WriteAll(appFile, "module main\n\nimport \"mod/markoxley/skink-orm\"\n\nfn main() -> int {\n    println(orm.Tag())\n    return 0\n}\n")
+
+    os.Setenv("SCALES_CACHE_DIR", cacheDir)
+    decls, errs := resolver.Resolve(appFile, "")
+    testing.AssertEqualInt(0, len(errs), "manifest-constrained import should resolve without errors")
+
+    foundV1 := false
+    for i := 0; i < len(decls); i = i + 1 {
+        if decls[i].kind == ast.ST_FN && str.Equal(decls[i].decl.fnName, "orm.Tag") {
+            if str.Contains(decls[i].filePath, "v1.0.2") {
+                foundV1 = true
+            }
+        }
+    }
+    testing.AssertTrue(foundV1, "^1.0.0 constraint in skink.toml should select v1.0.2 instead of v2.0.0")
+}
