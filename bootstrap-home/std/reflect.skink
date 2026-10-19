@@ -134,11 +134,21 @@ pub fn IsPointer(f: Field) -> bool {
     return str.StartsWith(f.type_name, "*")
 }
 
-// ElemType returns the pointee type name for a pointer field (stripping one
-// leading "*"), or f.type_name unchanged when f is not a pointer field.
+// IsSlice reports whether the field described by f has a slice type
+// (its reflected type_name begins with "[]").
+pub fn IsSlice(f: Field) -> bool {
+    return str.StartsWith(f.type_name, "[]")
+}
+
+// ElemType returns the pointee or element type name for a pointer or slice
+// field (stripping one leading "*" or "[]"), or f.type_name unchanged when
+// f is neither a pointer nor a slice field.
 pub fn ElemType(f: Field) -> string {
     if str.StartsWith(f.type_name, "*") {
         return str.Substr(f.type_name, 1, str.Len(f.type_name) - 1)
+    }
+    if str.StartsWith(f.type_name, "[]") {
+        return str.Substr(f.type_name, 2, str.Len(f.type_name) - 2)
     }
     return f.type_name
 }

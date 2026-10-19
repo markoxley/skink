@@ -340,3 +340,57 @@ pub fn TestPointerVsValueStructFields() {
         Errorf("ElemType(pint) should be int, got " + reflect.ElemType(fIntPtr))
     }
 }
+
+struct SliceVsPtrStruct {
+    strs: []string
+    pstr: *string
+    ints: []int
+    pint: *int
+    inners: []InnerStructField
+    pinner: *InnerStructField
+    pinners: []*InnerStructField
+}
+
+// TestSliceVsPointerFields guards comp_error.md #137: reflect.Field.type_name
+// must distinguish slice fields ([]T) from pointer fields (*T) even though
+// both lower to elemLL* in LLVM IR.
+pub fn TestSliceVsPointerFields() {
+    var val SliceVsPtrStruct
+    t := reflect.TypeOf<SliceVsPtrStruct>(val)
+
+    fStrs := reflect.FieldByName(t, "strs")
+    fPstr := reflect.FieldByName(t, "pstr")
+    fInts := reflect.FieldByName(t, "ints")
+    fPint := reflect.FieldByName(t, "pint")
+    fInners := reflect.FieldByName(t, "inners")
+    fPinner := reflect.FieldByName(t, "pinner")
+    fPinners := reflect.FieldByName(t, "pinners")
+
+    if str.Equal(fStrs.type_name, "[]string") == false || reflect.IsSlice(fStrs) == false || reflect.IsPointer(fStrs) {
+        Errorf("strs should be slice []string, got " + fStrs.type_name)
+    }
+    if str.Equal(fPstr.type_name, "*string") == false || reflect.IsPointer(fPstr) == false || reflect.IsSlice(fPstr) {
+        Errorf("pstr should be pointer *string, got " + fPstr.type_name)
+    }
+    if str.Equal(fInts.type_name, "[]int") == false || reflect.IsSlice(fInts) == false || reflect.IsPointer(fInts) {
+        Errorf("ints should be slice []int, got " + fInts.type_name)
+    }
+    if str.Equal(fPint.type_name, "*int") == false || reflect.IsPointer(fPint) == false || reflect.IsSlice(fPint) {
+        Errorf("pint should be pointer *int, got " + fPint.type_name)
+    }
+    if reflect.IsSlice(fInners) == false || reflect.IsPointer(fInners) {
+        Errorf("inners should be slice, got " + fInners.type_name)
+    }
+    if reflect.IsPointer(fPinner) == false || reflect.IsSlice(fPinner) {
+        Errorf("pinner should be pointer, got " + fPinner.type_name)
+    }
+    if str.Equal(reflect.ElemType(fInners), reflect.ElemType(fPinner)) == false {
+        Errorf("ElemType(inners) should match ElemType(pinner), got " + reflect.ElemType(fInners) + " vs " + reflect.ElemType(fPinner))
+    }
+    if reflect.IsSlice(fPinners) == false || reflect.IsPointer(fPinners) {
+        Errorf("pinners should be slice of pointers, got " + fPinners.type_name)
+    }
+    if str.Equal(reflect.ElemType(fPinners), fPinner.type_name) == false {
+        Errorf("ElemType(pinners) should be " + fPinner.type_name + ", got " + reflect.ElemType(fPinners))
+    }
+}

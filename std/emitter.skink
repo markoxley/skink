@@ -53,15 +53,16 @@ pub struct ArrayMeta {
 
 // StructLayout maps a struct's field names to their LLVM struct indices and types.
 pub struct StructLayout {
-    llType:      string  // the LLVM type
-    fields:      []string  // the fields
-    fieldTypes:  []string  // the field types
-    fieldTags:   []string  // the field tags ([attr] annotations, space-joined)
-    isUnsigned:  []bool  // whether unsigned
-    size:        int  // the size
-    alignment:   int  // the alignment
-    offsets:     []int  // the offsets
-    dtorFn:      string  // the destructor function
+    llType:          string  // the LLVM type
+    fields:          []string  // the fields
+    fieldTypes:      []string  // the field types
+    fieldSkinkTypes: []string  // the Skink field type names (preserves []T vs *T)
+    fieldTags:       []string  // the field tags ([attr] annotations, space-joined)
+    isUnsigned:      []bool  // whether unsigned
+    size:            int  // the size
+    alignment:       int  // the alignment
+    offsets:         []int  // the offsets
+    dtorFn:          string  // the destructor function
 }
 
 // LoopLabel holds the LLVM basic-block labels a loop uses for break and continue.
@@ -2091,9 +2092,16 @@ fn builtinLLType(name: string) -> string {
     return "i8*"
 }
 
-// setLLType returns the LLVM pointer type for a set of the given element type.
+// setLLType returns the LLVM pointer type for a set of the given element type,
+// ensuring the %set.<elem> struct type declaration is emitted in the module
+// header (comp_error.md #138).
 fn setLLType(cg: *CodeGen, elemLL: string) -> string {
-    return str.Concat("%", str.Concat(setTypeName(elemLL), "*"))
+    if str.Len(elemLL) == 0 || str.Equal(elemLL, "void") {
+        elemLL = "i8*"
+    }
+    name := setTypeName(elemLL)
+    emitSetTypeDecl(cg, name, elemLL)
+    return str.Concat("%", str.Concat(name, "*"))
 }
 
 // setTypeName returns the LLVM struct name for a set of the given element type.
@@ -2119,9 +2127,19 @@ fn emitSetTypeDecl(cg: *CodeGen, name: string, elemLL: string) {
     emitHeader(cg, concatMany(parts))
 }
 
-// mapLLType returns the LLVM pointer type for a map with the given key/value types.
+// mapLLType returns the LLVM pointer type for a map with the given key/value
+// types, ensuring the %map_<key>__<val> struct type declaration is emitted in
+// the module header (comp_error.md #138).
 fn mapLLType(cg: *CodeGen, keyLL: string, valLL: string) -> string {
-    return str.Concat("%", str.Concat(mapTypeName(keyLL, valLL), "*"))
+    if str.Len(keyLL) == 0 || str.Equal(keyLL, "void") {
+        keyLL = "i8*"
+    }
+    if str.Len(valLL) == 0 || str.Equal(valLL, "void") {
+        valLL = "i8*"
+    }
+    name := mapTypeName(keyLL, valLL)
+    emitMapTypeDecl(cg, name, keyLL, valLL)
+    return str.Concat("%", str.Concat(name, "*"))
 }
 
 // namedLLType resolves a named type to its LLVM type string.
@@ -2531,6 +2549,37 @@ fn llTypeToSkinkName(llType: string) -> string {
     return llType
 }
 
+// skinkTypeName formats a semantic checker type into the Skink type name
+// reported by reflect.Field.type_name, preserving the distinction between
+// slices ([]T) and pointers (*T) that both lower to elemLL* in LLVM IR
+// (comp_error.md #137).
+fn skinkTypeName(cg: *CodeGen, ft: checker.TType, fLL: string) -> string {
+    resolved := resolveAliasCG(cg, ft)
+    if resolved.kind != ft.kind {
+        ft = resolved
+    }
+    if ft.kind == checker.TK_ARRAY {
+        elemT := checker.typeOptT(ft.elem)
+        elemLL := llvmType(cg, elemT)
+        return str.Concat("[]", skinkTypeName(cg, elemT, elemLL))
+    }
+    if ft.kind == checker.TK_POINTER {
+        elemT := checker.typeOptT(ft.elem)
+        elemLL := llvmType(cg, elemT)
+        return str.Concat("*", skinkTypeName(cg, elemT, elemLL))
+    }
+    if ft.kind == checker.TK_MAP {
+        keyT := checker.typeOptT(ft.keyType)
+        valT := checker.typeOptT(ft.elem)
+        return str.Concat("map[", str.Concat(skinkTypeName(cg, keyT, llvmType(cg, keyT)), str.Concat("]", skinkTypeName(cg, valT, llvmType(cg, valT)))))
+    }
+    if ft.kind == checker.TK_SET {
+        elemT := checker.typeOptT(ft.elem)
+        return str.Concat("set<", str.Concat(skinkTypeName(cg, elemT, llvmType(cg, elemT)), ">"))
+    }
+    return llTypeToSkinkName(fLL)
+}
+
 // emitReflectTypeOf generates inline type info for reflect.TypeOf<T>(arg).
 // It creates a reflect.Type struct with the correct name, size, and fields
 // based on the generic type argument T.
@@ -2626,6 +2675,9 @@ fn emitReflectTypeOf(cg: *CodeGen, e: ast.Expr) -> string {
         for fi < numFields {
             fieldName := layout.fields[fi]
             fieldType := llTypeToSkinkName(layout.fieldTypes[fi])
+            if fi < len(layout.fieldSkinkTypes) && str.Len(layout.fieldSkinkTypes[fi]) > 0 {
+                fieldType = layout.fieldSkinkTypes[fi]
+            }
             fieldOffset := layout.offsets[fi]
             fiStr := strconv.Itoa(fi)
 
@@ -4720,6 +4772,7 @@ fn computeStructLayout(cg: *CodeGen, name: string, d: ast.Decl) -> StructLayout 
     layout.llType = str.Concat("%struct.", sanitizeName(name))
     layout.fields = []string{}
     layout.fieldTypes = []string{}
+    layout.fieldSkinkTypes = []string{}
     layout.fieldTags = []string{}
     layout.isUnsigned = []bool{}
     layout.offsets = []int{}
@@ -4731,6 +4784,8 @@ fn computeStructLayout(cg: *CodeGen, name: string, d: ast.Decl) -> StructLayout 
     for i < len(d.structFields) {
         field := d.structFields[i]
         ft := checker.unknownType()
+        fLL := "i32"
+        fSkinkType := ""
         if len(field.typ) > 0 {
             // Set the checker's currentModule to the struct's module so
             // that unqualified type names in field declarations resolve
@@ -4745,15 +4800,20 @@ fn computeStructLayout(cg: *CodeGen, name: string, d: ast.Decl) -> StructLayout 
                 cg.currentModule = str.Substr(name, 0, dotIdx)
             }
             ft = checker.astTypeToType(cg.checker, field.typ[0])
+            fLL = llvmType(cg, ft)
+            fSkinkType = skinkTypeName(cg, ft, fLL)
             cg.checker.currentModule = savedModule
             cg.currentModule = savedCgModule
+        } else {
+            fLL = llvmType(cg, ft)
+            fSkinkType = skinkTypeName(cg, ft, fLL)
         }
-        fLL := llvmType(cg, ft)
         fSize, fAlign := typeSizeAndAlign(cg, ft)
 
         offset = alignUp(offset, fAlign)
         layout.fields = append(layout.fields, field.name)
         layout.fieldTypes = append(layout.fieldTypes, fLL)
+        layout.fieldSkinkTypes = append(layout.fieldSkinkTypes, fSkinkType)
         layout.fieldTags = append(layout.fieldTags, str.Join(field.tags, " "))
         layout.isUnsigned = append(layout.isUnsigned, false)
         layout.offsets = append(layout.offsets, offset)
@@ -10559,8 +10619,13 @@ fn emitLenCallRaw(cg: *CodeGen, target: string, leftType: string, expr: ast.Expr
     // Set
     if str.StartsWith(leftType, "%set.") && str.EndsWith(leftType, "*") && !str.EndsWith(leftType, "**") {
         setType := str.Substr(leftType, 0, str.Len(leftType) - 1)
+        zeroSet := emitAlloca(cg, setType)
+        isNullSet := nextReg(cg)
+        emitfmt(cg, "  %s = icmp eq %s %s, null\n", []string{isNullSet, leftType, target})
+        safeSet := nextReg(cg)
+        emitfmt(cg, "  %s = select i1 %s, %s %s, %s %s\n", []string{safeSet, isNullSet, leftType, zeroSet, leftType, target})
         lenField := nextReg(cg)
-        emitfmt(cg, "  %s = getelementptr inbounds %s, %s %s, i32 0, i32 1\n", []string{lenField, setType, leftType, target})
+        emitfmt(cg, "  %s = getelementptr inbounds %s, %s %s, i32 0, i32 1\n", []string{lenField, setType, leftType, safeSet})
         lenReg := nextReg(cg)
         emitfmt(cg, "  %s = load i32, i32* %s\n", []string{lenReg, lenField})
         return lenReg

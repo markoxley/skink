@@ -1887,3 +1887,29 @@ pub fn TestPrintMultiArg() {
         "print emits every argument in order")
     fs.Remove(path)
 }
+
+struct MapAndSetFieldHolder {
+    scores: map[string]int16
+    flags: set<int16>
+    unusedMap: map[string]int8
+    unusedSet: set<int8>
+    label: string
+}
+
+// TestStructMapAndSetFields guards comp_error.md #138: structs containing
+// map[K]V or set<T> fields must emit the corresponding %map_... and %set....
+// LLVM struct declarations even when the map/set type only appears as a
+// struct field.
+pub fn TestStructMapAndSetFields() {
+    var h MapAndSetFieldHolder
+    h.label = "ok"
+    testing.AssertEqualString("ok", h.label, "struct with map and set fields")
+    testing.AssertEqualInt(0, len(h.scores), "uninitialized map struct field len")
+    testing.AssertEqualInt(0, len(h.flags), "uninitialized set struct field len")
+    h.scores = make(map[string]int16)
+    h.scores["alpha"] = int16(10)
+    h.scores["beta"] = int16(25)
+    testing.AssertEqualInt(2, len(h.scores), "populated map struct field len")
+    testing.AssertEqualInt(10, int(h.scores["alpha"]), "map struct field alpha")
+    testing.AssertEqualInt(25, int(h.scores["beta"]), "map struct field beta")
+}
