@@ -1,0 +1,8 @@
+// expect: main must take no parameters or a single []string parameter
+// comp_error.md #139 — a main whose parameter is not []string would
+// compile but receive an undefined value, so the checker rejects it.
+module main
+
+fn main(n: int) -> int {
+    return n
+}

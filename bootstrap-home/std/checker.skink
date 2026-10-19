@@ -2535,6 +2535,34 @@ fn checkTemplateDecl(c: *Checker, d: ast.Decl) {
 
 // checkFnDecl type-checks a function body, including params and return paths.
 fn checkFnDecl(c: *Checker, fnDecl: ast.Decl) {
+    // The program entry point accepts no parameters or a single
+    // []string parameter (command-line arguments, populated from argv).
+    // Any other signature would compile but receive undefined values,
+    // so reject it here (comp_error.md #139). A `fn main` on a receiver
+    // or in a non-main module is an ordinary function, not the entry
+    // point.
+    if str.Equal(c.currentModule, "main") && len(fnDecl.fnReceiver) == 0 &&
+       !fnDecl.fnIsExtern {
+        shortName := fnDecl.fnName
+        dot := str.LastIndexOf(fnDecl.fnName, ".")
+        if dot >= 0 {
+            shortName = str.Substr(fnDecl.fnName, dot + 1, str.Len(fnDecl.fnName) - dot - 1)
+        }
+        if str.Equal(shortName, "main") && len(fnDecl.fnParams) > 0 {
+            validSig := false
+            if len(fnDecl.fnParams) == 1 && len(fnDecl.fnParams[0].typ) == 1 {
+                pt := fnDecl.fnParams[0].typ[0]
+                if pt.kind == ast.TY_ARRAY && len(pt.elem) > 0 &&
+                   pt.elem[0].kind == ast.TY_NAMED &&
+                   str.Equal(pt.elem[0].name, "string") {
+                    validSig = true
+                }
+            }
+            if !validSig {
+                report(c, "main must take no parameters or a single []string parameter for command-line arguments (see os.Args() for other uses)")
+            }
+        }
+    }
     fnType := fnTypeFromDecl(c, fnDecl)
     oldFn := c.currentFn
     c.currentFn = singleTType(fnType)

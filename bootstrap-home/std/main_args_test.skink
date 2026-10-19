@@ -1,0 +1,72 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/main_args_test.skink
+// Purpose: Regression test for comp_error.md #139 — a `main` that
+//          declares `fn main(args: []string)` must receive the process
+//          argv (identical to os.Args()). Previously the emitted C
+//          entry point called @_skink_main() with no arguments, so the
+//          parameter was always an empty slice. The parent process
+//          verifies len(args) == 1 (argv[0] only) and then re-execs
+//          itself with extra arguments to prove argv flows through;
+//          an env marker selects the child path so the check cannot
+//          recurse if the parameter is left unpopulated again.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/os"
+import "std/str"
+
+// main asserts the []string entry-point parameter is populated from
+// argv. With no arguments it must equal os.Args() (just argv[0]); when
+// re-executed as a child it echoes its arguments back for the parent
+// to verify. Returns 0 on success, 1 on failure.
+fn main(args: []string) -> int {
+    if str.Equal(os.Getenv("SKINK_MAIN_ARGS_CHILD"), "1") {
+        // Child: print each argument after argv[0] and return the
+        // count as the exit code for the parent to assert on.
+        for i := 1; i < len(args); i = i + 1 {
+            println(args[i])
+        }
+        return len(args) - 1
+    }
+    // Parent: the test harness runs this binary with no arguments, so
+    // args must hold exactly argv[0] and match os.Args() element-wise.
+    if len(args) != len(os.Args()) {
+        return 1
+    }
+    if len(args) != 1 || str.Len(args[0]) == 0 {
+        return 1
+    }
+    if !str.Equal(args[0], os.Args()[0]) {
+        return 1
+    }
+    // Re-exec self with extra arguments; the env marker picks the
+    // child path above so a broken args parameter cannot recurse.
+    os.Setenv("SKINK_MAIN_ARGS_CHILD", "1")
+    out, rc := os.ExecWithOutput([]string{args[0], "alpha", "beta"})
+    if rc != 2 {
+        return 1
+    }
+    if !str.Contains(out, "alpha") || !str.Contains(out, "beta") {
+        return 1
+    }
+    return 0
+}

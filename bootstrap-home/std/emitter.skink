@@ -15993,11 +15993,22 @@ fn emitEmbedTables(cg: *CodeGen) {
     emitln(cg, "}\n")
 }
 
+// isStringSliceAstType reports whether an AST type is `[]string`, the
+// only parameter type the program entry point may declare (#139).
+fn isStringSliceAstType(t: ast.Type) -> bool {
+    if t.kind != ast.TY_ARRAY || len(t.elem) == 0 {
+        return false
+    }
+    e := t.elem[0]
+    return e.kind == ast.TY_NAMED && str.Equal(e.name, "string")
+}
+
 fn emitRuntimeMain(cg: *CodeGen, decls: []ast.Stmt) {
     // Find the user's main function to determine return type
     mainRetType := "void"
     mainFound := false
     mainName := ""
+    mainArgv := false // whether main declares a single []string argv parameter
     i := 0
     for i < len(decls) {
         d := decls[i].decl
@@ -16014,6 +16025,9 @@ fn emitRuntimeMain(cg: *CodeGen, decls: []ast.Stmt) {
                 if len(d.fnRetTypes) > 0 {
                     t := checker.astTypeToType(cg.checker, d.fnRetTypes[0])
                     mainRetType = llvmType(cg, t)
+                }
+                if len(d.fnParams) == 1 && len(d.fnParams[0].typ) == 1 {
+                    mainArgv = isStringSliceAstType(d.fnParams[0].typ[0])
                 }
                 break
             }
@@ -16132,14 +16146,21 @@ fn emitRuntimeMain(cg: *CodeGen, decls: []ast.Stmt) {
     if len(cg.globalInits) > 0 {
         emitln(cg, "  call void @_skink_global_init()\n")
     }
+    // `fn main(args: []string)` receives the process argv as a slice,
+    // identical to os.Args() (comp_error.md #139).
+    mainArgStr := ""
+    if mainArgv {
+        emitln(cg, "  %__argv = call i8** @_skink_runtime_get_argv()\n")
+        mainArgStr = "i8** %__argv"
+    }
     if str.Equal(mainRetType, "void") {
-        emitln(cg, "  call void @_skink_main()\n")
+        emitln(cg, str.Concat("  call void @_skink_main(", str.Concat(mainArgStr, ")\n")))
         emitln(cg, "  ret i32 0\n")
     } else if str.Equal(mainRetType, "i32") {
-        emitln(cg, "  %r = call i32 @_skink_main()\n")
+        emitln(cg, str.Concat("  %r = call i32 @_skink_main(", str.Concat(mainArgStr, ")\n")))
         emitln(cg, "  ret i32 %r\n")
     } else {
-        emitln(cg, "  call void @_skink_main()\n")
+        emitln(cg, str.Concat("  call void @_skink_main(", str.Concat(mainArgStr, ")\n")))
         emitln(cg, "  ret i32 0\n")
     }
     emitln(cg, "}\n")

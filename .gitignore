@@ -18,4 +18,3 @@ __skink_test_bin
 artifacts/
 AGENTS.md
 .devin/config.local.json
-comp_error.md
