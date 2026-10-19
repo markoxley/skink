@@ -43,9 +43,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKINK_HOME_DIR="${SCRIPT_DIR}/std"
-LSP_DIR="${SCRIPT_DIR}/../skink-lsp"
-SCALES_DIR="${SCRIPT_DIR}/../scales"
-SKINKJS_DIR="${SCRIPT_DIR}/../skinkjs"
+LSP_DIR="${SCRIPT_DIR}/../tools/skink-lsp"
+SCALES_DIR="${SCRIPT_DIR}/../tools/scales"
+SKINKJS_DIR="${SCRIPT_DIR}/../tools/skinkjs"
 
 # Version
 VERSION=""

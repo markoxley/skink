@@ -2384,8 +2384,33 @@ fn parseInterpolatedString(p: *Parser, tok: lexer.Token) -> ast.Expr {
             }
             exprSource := str.Substr(literal, i + 1, j - i - 1)
 
+            // Compute the source line and column of exprSource[0] (offset
+            // i + 1 inside literal, whose opening quote is at tok.line,
+            // tok.col) so sub-lexed tokens carry true file positions for
+            // diagnostics (comp_error.md #136).
+            baseLine := tok.line
+            baseCol := tok.col + 1
+            for k := 0; k <= i; k = k + 1 {
+                if literal[k] == 10 {
+                    baseLine = baseLine + 1
+                    baseCol = 1
+                } else {
+                    baseCol = baseCol + 1
+                }
+            }
+
             // Sub-lex and sub-parse the expression
             exprTokens := lexer.Tokenize(exprSource)
+            for ti := 0; ti < len(exprTokens); ti = ti + 1 {
+                et := exprTokens[ti]
+                if et.line <= 1 {
+                    et.line = baseLine
+                    et.col = baseCol + et.col - 1
+                } else {
+                    et.line = baseLine + et.line - 1
+                }
+                exprTokens[ti] = et
+            }
             subParser := New(exprTokens)
             exprAST := parseExpression(&subParser, PREC_LOWEST)
 

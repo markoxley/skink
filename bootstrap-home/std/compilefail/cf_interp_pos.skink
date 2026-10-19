@@ -1,0 +1,8 @@
+// expect: 6:19: undefined variable: badInterpVar
+module main
+
+fn main() {
+    ok := 1
+    s := "prefix {badInterpVar} {ok}"
+    println(s)
+}

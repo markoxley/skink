@@ -299,3 +299,44 @@ pub fn TestFieldTags() {
         Errorf("FieldByIndex(99).tag should be empty")
     }
 }
+
+struct InnerStructField {
+    x: int
+}
+
+struct OuterPtrAndValueStruct {
+    inner: InnerStructField
+    pinner: *InnerStructField
+    pint: *int
+}
+
+// TestPointerVsValueStructFields guards comp_error.md #135: reflect.TypeOf
+// must preserve the leading "*" on pointer-to-struct field type names so
+// callers can distinguish an inline struct field (T) from a pointer field (*T).
+pub fn TestPointerVsValueStructFields() {
+    var val OuterPtrAndValueStruct
+    t := reflect.TypeOf<OuterPtrAndValueStruct>(val)
+
+    fVal := reflect.FieldByName(t, "inner")
+    fPtr := reflect.FieldByName(t, "pinner")
+    fIntPtr := reflect.FieldByName(t, "pint")
+
+    if reflect.IsPointer(fVal) {
+        Errorf("value struct field 'inner' must not be reported as pointer, got " + fVal.type_name)
+    }
+    if reflect.IsPointer(fPtr) == false {
+        Errorf("pointer struct field 'pinner' must have leading '*' in type_name, got " + fPtr.type_name)
+    }
+    if str.Equal(fVal.type_name, fPtr.type_name) {
+        Errorf("value and pointer struct fields must have distinct type_name, both got " + fVal.type_name)
+    }
+    if str.Equal(reflect.ElemType(fPtr), fVal.type_name) == false {
+        Errorf("ElemType(pinner) should equal inner.type_name, got " + reflect.ElemType(fPtr) + " vs " + fVal.type_name)
+    }
+    if str.Equal(fIntPtr.type_name, "*int") == false || reflect.IsPointer(fIntPtr) == false {
+        Errorf("pointer int field 'pint' should have type_name *int, got " + fIntPtr.type_name)
+    }
+    if str.Equal(reflect.ElemType(fIntPtr), "int") == false {
+        Errorf("ElemType(pint) should be int, got " + reflect.ElemType(fIntPtr))
+    }
+}

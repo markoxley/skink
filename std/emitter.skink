@@ -2510,19 +2510,23 @@ fn llTypeToSkinkName(llType: string) -> string {
     if str.Equal(llType, "i64") { return "int64" }
     if str.Equal(llType, "double") { return "float" }
     if str.Equal(llType, "i8*") { return "string" }
+    if str.Equal(llType, "i1*") { return "*bool" }
+    if str.Equal(llType, "i16*") { return "*int16" }
     if str.Equal(llType, "i32*") { return "*int" }
     if str.Equal(llType, "i64*") { return "*int64" }
     if str.Equal(llType, "double*") { return "*float" }
-    // Struct types: strip the %struct. prefix and any module qualifier
+    if str.Equal(llType, "i8**") { return "*string" }
+    // Struct types: strip the %struct. prefix and convert trailing *
+    // indirections into leading * prefixes so *T ("*Inner") is distinct
+    // from inline T ("Inner") in reflect.Field.type_name (comp_error.md #135).
     if str.StartsWith(llType, "%struct.") {
         name := str.Substr(llType, str.Len("%struct."), str.Len(llType) - str.Len("%struct."))
-        // Strip trailing * (pointer to struct)
-        if str.EndsWith(name, "*") {
+        stars := ""
+        for str.EndsWith(name, "*") {
+            stars = str.Concat(stars, "*")
             name = str.Substr(name, 0, str.Len(name) - 1)
         }
-        // Strip module qualifier (e.g. "reflect_test_TestStruct" -> "TestStruct")
-        // Actually, keep the full name as-is for now
-        return name
+        return str.Concat(stars, name)
     }
     return llType
 }

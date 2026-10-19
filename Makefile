@@ -18,9 +18,9 @@ SKINK_PREFIX ?= $(HOME)/.local/skink
 BINDIR       ?= $(SKINK_PREFIX)/bin
 STDLIB_DIR   ?= $(SKINK_PREFIX)/std
 # Sibling repos that supply the LSP + formatter, scales package manager, and skinkjs transpiler binaries
-LSP_DIR      ?= $(abspath ../skink-lsp)
-SCALES_DIR   ?= $(abspath ../scales)
-SKINKJS_DIR  ?= $(abspath ../skinkjs)
+LSP_DIR      ?= $(abspath ../tools/skink-lsp)
+SCALES_DIR   ?= $(abspath ../tools/scales)
+SKINKJS_DIR  ?= $(abspath ../tools/skinkjs)
 
 # Compiler and tool settings
 SKINK_BIN   := skink

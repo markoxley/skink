@@ -20,8 +20,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCALES_DIR="${SCRIPT_DIR}/../scales"
-SKINKJS_DIR="${SCRIPT_DIR}/../skinkjs"
+SCALES_DIR="${SCRIPT_DIR}/../tools/scales"
+SKINKJS_DIR="${SCRIPT_DIR}/../tools/skinkjs"
 cd "$SCRIPT_DIR"
 
 # Version
