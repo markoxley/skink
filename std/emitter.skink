@@ -3440,6 +3440,17 @@ fn emitSetInOp(cg: *CodeGen, e: ast.Expr) -> string {
     setLLType := exprLLType(cg, e.infixRight[0])
     elemLL := exprLLType(cg, e.infixLeft[0])
 
+    // A null set (e.g. an uninitialized `set<T>` struct field) contains no
+    // elements — skip the scan and leave the result false rather than
+    // dereferencing null (comp_error.md #140, mirroring the len() guard
+    // added for #138).
+    endLabel := nextLabel(cg)
+    nonNullLabel := nextLabel(cg)
+    isNullSet := nextReg(cg)
+    emitfmt(cg, "  %s = icmp eq %s %s, null\n", []string{isNullSet, setLLType, setReg})
+    emitCondBranch(cg, isNullSet, endLabel, nonNullLabel)
+    emitLabel(cg, nonNullLabel)
+
     // Load set count (field 1).
     setType := str.Substr(setLLType, 0, str.Len(setLLType) - 1)
     countField := nextReg(cg)
@@ -3465,7 +3476,6 @@ fn emitSetInOp(cg: *CodeGen, e: ast.Expr) -> string {
 
     loopLabel := nextLabel(cg)
     checkLabel := nextLabel(cg)
-    endLabel := nextLabel(cg)
     emitBranch(cg, loopLabel)
 
     emitLabel(cg, loopLabel)
@@ -13929,6 +13939,16 @@ fn emitForInMapStmt(cg: *CodeGen, stmt: ast.Stmt, mapReg: string, mapLLType: str
 fn emitForInSetStmt(cg: *CodeGen, stmt: ast.Stmt, setReg: string, setLLType: string, elemLL: string) {
     setStructType := str.Substr(setLLType, 0, str.Len(setLLType) - 1)
 
+    // A null set (e.g. an uninitialized `set<T>` struct field) iterates
+    // zero elements — branch straight to the end instead of dereferencing
+    // null (comp_error.md #140).
+    endLabel := nextLabel(cg)
+    proceedLabel := nextLabel(cg)
+    isNullSet := nextReg(cg)
+    emitfmt(cg, "  %s = icmp eq %s %s, null\n", []string{isNullSet, setLLType, setReg})
+    emitCondBranch(cg, isNullSet, endLabel, proceedLabel)
+    emitLabel(cg, proceedLabel)
+
     // Load data pointer (field 0).
     dataField := nextReg(cg)
     emitfmt(cg, "  %s = getelementptr inbounds %s, %s %s, i32 0, i32 0\n", []string{dataField, setStructType, setLLType, setReg})
@@ -13951,7 +13971,6 @@ fn emitForInSetStmt(cg: *CodeGen, stmt: ast.Stmt, setReg: string, setLLType: str
     condLabel := nextLabel(cg)
     bodyLabel := nextLabel(cg)
     postLabel := nextLabel(cg)
-    endLabel := nextLabel(cg)
     pushLoopLabel(cg, postLabel, endLabel)
 
     emitBranch(cg, condLabel)

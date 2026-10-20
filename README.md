@@ -74,28 +74,6 @@ This installs `skink`, `skink-lsp`, `skinkfmt`, `scales`, `skinkjs`,
 standard library and C runtime to `~/.local/skink/std/` — the same layout
 `install.sh` uses. Override the root with `make SKINK_PREFIX=/opt/skink install`.
 
-## Creating a Release
-
-```bash
-./release.sh                    # uses version from version.txt
-./release.sh 0.2.0              # explicit version
-./release.sh --cross linux-arm64  # cross-compile target
-```
-
-This builds the compiler, LSP, formatter, `scales` package manager, and
-`skinkjs` transpiler, packages them with the standard library into
-`dist/skink-<version>-<os>-<arch>.tar.gz`, and generates a SHA256 checksum.
-
-Upload to GitHub:
-
-```bash
-gh release create v0.2.0 \
-  dist/skink-0.2.0-linux-x86_64.tar.gz \
-  dist/skink-0.2.0-linux-x86_64.tar.gz.sha256 \
-  --title "Skink v0.2.0" \
-  --notes "Release v0.2.0"
-```
-
 ## Project Layout
 
 ```
