@@ -1755,12 +1755,14 @@ struct litStack112<T> {
 // TestGenericStructLitSubst verifies generic struct literals type-check
 // when field values use the concrete instantiated type — previously the
 // checker compared the field value against raw `[]T` (comp_error.md #112).
+// Uses string elements: instantiating a []T field with a non-pointer-sized
+// T is rejected by the erased-composite guard (comp_error.md #142).
 pub fn TestGenericStructLitSubst() {
-    s := litStack112<int>{items: []int{}}
-    s.push(7)
-    s.push(9)
+    s := litStack112<string>{items: []string{}}
+    s.push("a")
+    s.push("b")
     testing.AssertEqualInt(2, len(s.items), "generic struct literal field type")
-    testing.AssertEqualInt(9, s.items[1], "generic struct literal value")
+    testing.AssertEqualString("b", s.items[1], "generic struct literal value")
 }
 
 // litChan112 exercises a chan<T> field in a generic struct literal

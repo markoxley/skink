@@ -55,8 +55,12 @@ static int skink_is_mapped(const void *p) {
   uintptr_t page_mask = ~((uintptr_t)ps - 1);
   void *page = (void *)((uintptr_t)p & page_mask);
   // 1-entry cache to avoid redundant syscalls for same-page accesses.
-  static void *cached_page = NULL;
-  static int cached_result = 0;
+  // Kept in thread-local storage: spawn routines call reflect_hash /
+  // reflect_equals concurrently, and a shared static pair would race
+  // (a thread could observe cached_page from another thread's update
+  // while reading its own stale cached_result).
+  static __thread void *cached_page = NULL;
+  static __thread int cached_result = 0;
   if (page == cached_page)
     return cached_result;
   unsigned char vec;

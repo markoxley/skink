@@ -45,9 +45,12 @@ STD_DIR        ?= ./std
 RUNTIME_DIR    ?= ./std/runtime
 
 # Standard library files to install (test files and test fixtures are
-# excluded, matching release.sh)
+# excluded, matching release.sh). The glob is '*_test*.skink' — the same
+# pattern run_tests.sh uses to discover suites — so stray duplicates like
+# "x_test (2).skink" are excluded too (their embedded spaces would
+# otherwise split into bogus prerequisites and break the build).
 STD_FILES     := $(shell find $(STD_DIR) -maxdepth 2 -name '*.skink' \
-    ! -name '*_test.skink' ! -name 'regress_helper.skink' \
+    ! -name '*_test*.skink' ! -name 'regress_helper.skink' \
     ! -path '$(STD_DIR)/runtime/*' ! -path '$(STD_DIR)/compilefail/*' \
     ! -path '$(STD_DIR)/diamond/*' ! -path '$(STD_DIR)/fixture_libmain/*')
 RUNTIME_FILES := $(wildcard $(RUNTIME_DIR)/*.c)

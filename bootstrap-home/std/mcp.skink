@@ -30,8 +30,8 @@ import "std/libc"
 import "std/buf"
 import "std/net"
 
-extern fn read(fd: int, buf: string, count: int) -> int
-extern fn write(fd: int, buf: string, count: int) -> int
+extern fn read(fd: int, buf: string, count: int64) -> int
+extern fn write(fd: int, buf: string, count: int64) -> int
 
 // ToolInfo holds the metadata for a registered MCP tool.
 pub struct ToolInfo {

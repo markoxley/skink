@@ -221,6 +221,90 @@ pub fn TestGenericFunction() {
     testing.AssertEqualInt(-1, MaxInt(-1, -5), "Max(-1, -5)")
 }
 
+// TestGenericStructFieldAccess guards comp_error.md #142: a field access
+// on an instantiated generic struct (GenWrap<int>) previously reported the
+// erased declared slot type, so a scalar T field read its raw inttoptr
+// box as a pointer instead of unboxing the integer value.
+pub fn TestGenericStructFieldAccess() {
+    w := GenWrap<int>{v: 5}
+    testing.AssertEqualInt(5, w.v, "GenWrap<int>.v unboxes scalar field")
+    ws := GenWrap<string>{v: "hi"}
+    testing.AssertEqualString("hi", ws.v, "GenWrap<string>.v")
+}
+
+// TestGenericStructFieldWrite also guards comp_error.md #142 on the write
+// side: plain and compound scalar assignment must box/unbox through the
+// erased i8* slot correctly.
+pub fn TestGenericStructFieldWrite() {
+    w := GenWrap<int>{v: 0}
+    w.v = 42
+    testing.AssertEqualInt(42, w.v, "w.v = 42")
+    w.v += 8
+    testing.AssertEqualInt(50, w.v, "w.v += 8")
+    ws := GenWrap<string>{v: "a"}
+    ws.v = "b"
+    testing.AssertEqualString("b", ws.v, "ws.v = \"b\"")
+}
+
+// TestGenericStructSliceField verifies a []T field on an instantiated
+// generic struct. Pointer-sized elements (string) are the legal
+// instantiation under the erased-composite guard — index, append, len,
+// and for-in must all see the substituted element type.
+pub fn TestGenericStructSliceField() {
+    w := GenSliceBox<string>{elems: []string{"a", "b"}}
+    testing.AssertEqualString("a", w.elems[0], "GenSliceBox<string>.elems[0]")
+    testing.AssertEqualInt(2, len(w.elems), "len(GenSliceBox<string>.elems)")
+    w.elems[0] = "z"
+    testing.AssertEqualString("z", w.elems[0], "w.elems[0] = \"z\"")
+    w.elems = append(w.elems, "c")
+    testing.AssertEqualInt(3, len(w.elems), "len after append to w.elems")
+    n := 0
+    for _ := range w.elems {
+        n = n + 1
+    }
+    testing.AssertEqualInt(3, n, "for-in over w.elems")
+}
+
+// TestGenericStructNestedFields checks substitution through a nested
+// generic struct field (Outer<int>.inner.val).
+pub fn TestGenericStructNestedFields() {
+    o := GenOuter<int>{inner: GenInner<int>{val: 77}}
+    testing.AssertEqualInt(77, o.inner.val, "GenOuter<int>.inner.val")
+}
+
+// TestGenericMapScalarKeys guards comp_error.md #141 (map side): builtin
+// map[K]V operations inside generic code hashed every erased i8* key with
+// Skink_str_hash and compared with strcmp, so Skink_str_hash(inttoptr(7))
+// dereferenced a non-pointer and segfaulted. Erased keys now route through
+// reflect_hash/reflect_equals. (map[K]V may not appear in signatures
+// instantiated with scalar K/V, so the map is built inside the generic
+// function — the same erased-key code path.)
+pub fn TestGenericMapScalarKeys() {
+    testing.AssertEqualInt(42, genMapRoundTrip<int, int>(7, 42), "generic map put/get int key")
+    testing.AssertFalse(genMapProbe<int, int>(7, 9), "generic map missing int key")
+    testing.AssertEqualInt(2, genMapSize<int, int>(3, 5), "generic map len after puts")
+    testing.AssertEqualInt(0, genMapAfterDelete<int, int>(6), "generic map delete")
+    testing.AssertEqualInt(2, genMapKeyCount<int, int>(4, 8), "generic map key iteration")
+}
+
+// TestGenericMapStringKeys checks that erased string keys still hash and
+// compare by content through the reflect path, not by pointer identity.
+pub fn TestGenericMapStringKeys() {
+    testing.AssertEqualInt(10, genMapRoundTrip<string, int>("k", 10), "generic map put/get string key")
+    testing.AssertEqualInt(10, genMapLookup<string, int>("k", "k", 10), "generic map string key by content")
+}
+
+// TestGenericErasedEquality guards the == / != portion of comp_error.md
+// #141: comparing two erased i8* values with strcmp crashed on scalar
+// operands. Comparisons now route through reflect_equals.
+pub fn TestGenericErasedEquality() {
+    testing.AssertTrue(genEq<int>(7, 7), "genEq int equal")
+    testing.AssertFalse(genEq<int>(7, 8), "genEq int unequal")
+    testing.AssertTrue(genNe<int>(7, 8), "genNe int unequal")
+    testing.AssertTrue(genEq<string>("x", "x"), "genEq string equal")
+    testing.AssertFalse(genEq<string>("x", "y"), "genEq string unequal")
+}
+
 // === Functions: Multiple Returns ===
 
 // TestMultipleReturn verifies function with multiple return values.
@@ -395,6 +479,95 @@ fn fib(n: int) -> int {
         return n
     }
     return fib(n - 1) + fib(n - 2)
+}
+
+// GenWrap is a generic struct exercising scalar field-type substitution
+// on instantiated receivers (comp_error.md #142).
+struct GenWrap<T> {
+    v: T
+}
+
+// GenSliceBox exercises a []T field — only legal with pointer-sized
+// instantiations under the erased-composite guard (comp_error.md #142).
+struct GenSliceBox<T> {
+    elems: []T
+}
+
+// GenInner/GenOuter exercise substitution through nested generic fields.
+struct GenInner<T> {
+    val: T
+}
+
+struct GenOuter<T> {
+    inner: GenInner<T>
+}
+
+// genMapRoundTrip builds a builtin map[K]V inside generic code, stores
+// k:v and reads it back — exercises erased-key hashing and comparison
+// (comp_error.md #141).
+fn genMapRoundTrip<K, V>(k: K, v: V) -> V {
+    m := make(map[K]V)
+    m[k] = v
+    return m[k]
+}
+
+// genMapLookup stores want:v then reads back a second (equal-by-content)
+// key — verifies erased string keys compare by content, not identity.
+fn genMapLookup<K, V>(want: K, probe: K, v: V) -> V {
+    m := make(map[K]V)
+    m[want] = v
+    return m[probe]
+}
+
+// genMapProbe stores at key `have` then two-value probes `want`, reporting
+// whether the lookup found it — exercises the emitMapIndexOk path on
+// erased keys (comp_error.md #141).
+fn genMapProbe<K, V>(have: K, want: K) -> bool {
+    m := make(map[K]V)
+    var zero V
+    m[have] = zero
+    _, ok := m[want]
+    return ok
+}
+
+// genMapSize returns len() of a generic map after two distinct puts.
+fn genMapSize<K, V>(a: K, b: K) -> int {
+    m := make(map[K]V)
+    var zero V
+    m[a] = zero
+    m[b] = zero
+    return len(m)
+}
+
+// genMapAfterDelete inserts and deletes a key inside generic code.
+fn genMapAfterDelete<K, V>(k: K) -> int {
+    m := make(map[K]V)
+    var zero V
+    m[k] = zero
+    delete(m, k)
+    return len(m)
+}
+
+// genMapKeyCount iterates a generic map's keys (comp_error.md #141).
+fn genMapKeyCount<K, V>(a: K, b: K) -> int {
+    m := make(map[K]V)
+    var zero V
+    m[a] = zero
+    m[b] = zero
+    n := 0
+    for _ := range m {
+        n = n + 1
+    }
+    return n
+}
+
+// genEq/genNe compare erased generic values (comp_error.md #141).
+fn genEq<T>(a: T, b: T) -> bool {
+    return a == b
+}
+
+fn genNe<T>(a: T, b: T) -> bool {
+    return a != b
 }
 
 fn setArrVal(arr: []int, val: int) {

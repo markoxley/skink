@@ -1,0 +1,283 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/sets_test.skink
+// Purpose: Test suite for the std/sets module — Set<T> mutators and
+//          queries, set algebra (union/intersection/difference/symmetric
+//          difference), predicates, and conversion between the mutable
+//          Set<T> and the built-in immutable set<T> literal type.
+//          Also guards the null-set regressions from comp_error.md #140
+//          (for-in over an uninitialized set field and `x in` it
+//          segfaulted; len() was already covered by #138).
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// Implementation note: the tests collect Set<int> elements through
+// Each(fn(int)) into concrete []int slices. Generic functions cannot
+// return []T instantiated with a scalar T (erased elements are
+// pointer-sized while []int uses a 4-byte stride), so the module exposes
+// Each as the iteration escape hatch instead of a ToSlice method.
+module sets_test
+
+import "std/sets"
+import "std/testing"
+
+// mkIntSet builds a Set<int> from a concrete slice. A concrete []int
+// parameter is fine here — only generic []T signatures reject scalar
+// element types.
+fn mkIntSet(items: []int) -> sets.Set<int> {
+    s := sets.New<int>()
+    i := 0
+    for i < len(items) {
+        s.Add(items[i])
+        i = i + 1
+    }
+    return s
+}
+
+// collectInts returns the elements of s as a concrete slice via Each.
+fn collectInts(s: sets.Set<int>) -> []int {
+    var out []int
+    s.Each(fn(v: int) {
+        out = append(out, v)
+    })
+    return out
+}
+
+// sortedCopy returns the elements of s in ascending order so tests can
+// assert on content without depending on iteration order.
+fn sortedCopy(s: []int) -> []int {
+    var out []int
+    i := 0
+    for i < len(s) {
+        out = append(out, s[i])
+        i = i + 1
+    }
+    i = 0
+    for i < len(out) {
+        j := i + 1
+        for j < len(out) {
+            if out[j] < out[i] {
+                tmp := out[i]
+                out[i] = out[j]
+                out[j] = tmp
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// sliceEqInt reports whether a and b contain equal ints in the same order.
+fn sliceEqInt(a: []int, b: []int) -> bool {
+    if len(a) != len(b) {
+        return false
+    }
+    i := 0
+    for i < len(a) {
+        if a[i] != b[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// assertSetEq asserts that s contains exactly the ints in want (any order).
+fn assertSetEq(want: []int, s: sets.Set<int>, msg: string) {
+    testing.AssertTrue(sliceEqInt(sortedCopy(collectInts(s)), sortedCopy(want)), msg)
+}
+
+// === Set<T> mutators and queries ===
+
+// TestNewIsEmpty verifies a fresh Set reports length 0.
+pub fn TestNewIsEmpty() {
+    s := sets.New<int>()
+    testing.AssertEqualInt(0, s.Len(), "New set should be empty")
+}
+
+// TestAddDedup verifies Add deduplicates and reports novelty correctly.
+pub fn TestAddDedup() {
+    s := sets.New<int>()
+    testing.AssertTrue(s.Add(1), "first Add should report new element")
+    testing.AssertTrue(s.Add(2), "second Add should report new element")
+    testing.AssertTrue(!s.Add(1), "duplicate Add should report existing element")
+    testing.AssertEqualInt(2, s.Len(), "duplicate Add should not grow the set")
+}
+
+// TestAddStrings verifies string elements hash/compare by content.
+pub fn TestAddStrings() {
+    s := sets.New<string>()
+    s.Add("apple")
+    s.Add("banana")
+    s.Add("apple")
+    testing.AssertEqualInt(2, s.Len(), "string set dedup")
+    testing.AssertTrue(s.Has("banana"), "string set membership")
+    testing.AssertTrue(!s.Has("cherry"), "string set non-membership")
+}
+
+// TestRemove verifies Remove deletes present elements and reports misses.
+pub fn TestRemove() {
+    s := sets.New<int>()
+    s.Add(1)
+    s.Add(2)
+    s.Add(3)
+    testing.AssertTrue(s.Remove(2), "Remove of present element should succeed")
+    testing.AssertTrue(!s.Remove(2), "Remove of absent element should fail")
+    testing.AssertTrue(!s.Has(2), "removed element should no longer be present")
+    testing.AssertEqualInt(2, s.Len(), "Len after remove")
+    testing.AssertTrue(s.Has(1) && s.Has(3), "remaining elements intact")
+}
+
+// TestClear verifies Clear empties the set.
+pub fn TestClear() {
+    s := sets.New<int>()
+    s.Add(1)
+    s.Add(2)
+    s.Clear()
+    testing.AssertEqualInt(0, s.Len(), "cleared set should be empty")
+    testing.AssertTrue(!s.Has(1), "cleared set has no members")
+    // The cleared set must still be usable.
+    s.Add(9)
+    testing.AssertTrue(s.Has(9), "set usable after Clear")
+}
+
+// TestEach verifies Each visits every element exactly once.
+pub fn TestEach() {
+    s := mkIntSet([]int{3, 1, 2})
+    out := collectInts(s)
+    testing.AssertTrue(sliceEqInt(sortedCopy(out), []int{1, 2, 3}), "Each contents")
+}
+
+// === Set<T> algebra (methods) ===
+
+// TestUnion verifies Union produces the combined set.
+pub fn TestUnion() {
+    a := mkIntSet([]int{1, 2, 3})
+    b := mkIntSet([]int{3, 4})
+    assertSetEq([]int{1, 2, 3, 4}, a.Union(b), "union contents")
+}
+
+// TestIntersection verifies Intersection keeps only shared elements.
+pub fn TestIntersection() {
+    a := mkIntSet([]int{1, 2, 3})
+    b := mkIntSet([]int{2, 3, 4})
+    assertSetEq([]int{2, 3}, a.Intersection(b), "intersection contents")
+}
+
+// TestDifference verifies Difference removes the other's elements.
+pub fn TestDifference() {
+    a := mkIntSet([]int{1, 2, 3})
+    b := mkIntSet([]int{2, 3, 4})
+    assertSetEq([]int{1}, a.Difference(b), "difference contents")
+}
+
+// TestSymmetricDifference verifies elements in exactly one input remain.
+pub fn TestSymmetricDifference() {
+    a := mkIntSet([]int{1, 2, 3})
+    b := mkIntSet([]int{2, 3, 4})
+    assertSetEq([]int{1, 4}, a.SymmetricDifference(b), "symmetric difference contents")
+}
+
+// TestPredicates verifies the subset/superset/disjoint/equals methods.
+pub fn TestPredicates() {
+    a := mkIntSet([]int{1, 2})
+    b := mkIntSet([]int{1, 2, 3})
+    c := mkIntSet([]int{9})
+    d := mkIntSet([]int{1, 2})
+    testing.AssertTrue(a.IsSubset(b), "a subset of b")
+    testing.AssertTrue(!b.IsSubset(a), "b not subset of a")
+    testing.AssertTrue(b.IsSuperset(a), "b superset of a")
+    testing.AssertTrue(a.IsDisjoint(c), "a disjoint from c")
+    testing.AssertTrue(!a.IsDisjoint(b), "a not disjoint from b")
+    testing.AssertTrue(a.Equals(d), "a equals d")
+    testing.AssertTrue(!a.Equals(b), "a does not equal b")
+}
+
+// === Conversion ===
+
+// TestFromSet converts a native set literal into a mutable Set.
+pub fn TestFromSet() {
+    s := sets.FromSet<int>(set{10, 20, 30, 20})
+    testing.AssertEqualInt(3, s.Len(), "FromSet dedups native literal")
+    testing.AssertTrue(s.Has(20), "FromSet membership")
+}
+
+// TestFromSetEmpty verifies that converting a null native set (an
+// uninitialized set<T> struct field) yields an empty Set — regression
+// guard for #140: for-in over a null set segfaulted before the guard.
+pub fn TestFromSetEmpty() {
+    h := NullSetHolder{}
+    empty := sets.FromSet<int>(h.s)
+    testing.AssertEqualInt(0, empty.Len(), "null native set converts to empty Set")
+}
+
+// === Free functions on native set<T> literals ===
+
+// TestNativeContains verifies sets.Contains on a built-in literal.
+pub fn TestNativeContains() {
+    s := set{1, 2, 3}
+    testing.AssertTrue(sets.Contains<int>(s, 2), "Contains present element")
+    testing.AssertTrue(!sets.Contains<int>(s, 7), "Contains absent element")
+}
+
+// TestNativeAlgebra verifies union/intersection/difference/symmetric
+// difference on native set literals.
+pub fn TestNativeAlgebra() {
+    a := set{1, 2, 3}
+    b := set{3, 4}
+    assertSetEq([]int{1, 2, 3, 4}, sets.Union<int>(a, b), "native union")
+    assertSetEq([]int{3}, sets.Intersection<int>(a, b), "native intersection")
+    assertSetEq([]int{1, 2}, sets.Difference<int>(a, b), "native difference")
+    assertSetEq([]int{1, 2, 4}, sets.SymmetricDifference<int>(a, b), "native symmetric difference")
+}
+
+// TestNativePredicates verifies subset/superset/disjoint/equality on
+// native set literals.
+pub fn TestNativePredicates() {
+    a := set{1, 2}
+    b := set{1, 2, 3}
+    c := set{9}
+    testing.AssertTrue(sets.IsSubset<int>(a, b), "native subset")
+    testing.AssertTrue(!sets.IsSubset<int>(b, a), "native not-subset")
+    testing.AssertTrue(sets.IsSuperset<int>(b, a), "native superset")
+    testing.AssertTrue(sets.IsDisjoint<int>(a, c), "native disjoint")
+    testing.AssertTrue(!sets.IsDisjoint<int>(a, b), "native not-disjoint")
+    testing.AssertTrue(sets.Equal<int>(set{1, 2}, set{2, 1}), "native equal")
+    testing.AssertTrue(!sets.Equal<int>(a, b), "native not-equal")
+}
+
+// TestNullNativeSetOps is the regression for comp_error.md #140: `in` and
+// `for` over an uninitialized set<T> struct field (a null set) segfaulted.
+pub fn TestNullNativeSetOps() {
+    h := NullSetHolder{}
+    count := 0
+    for v in h.s {
+        count = count + v
+    }
+    testing.AssertEqualInt(0, count, "for-in over null set iterates nothing")
+    testing.AssertTrue(!(3 in h.s), "in over null set is false")
+    testing.AssertEqualInt(0, len(h.s), "len over null set is 0")
+}
+
+// NullSetHolder carries an uninitialized set field used by
+// TestNullNativeSetOps and TestFromSetEmpty.
+struct NullSetHolder {
+    s: set<int>
+}

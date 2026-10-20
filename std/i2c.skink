@@ -28,8 +28,8 @@ import "std/libc"
 import "std/strconv"
 
 extern fn open(path: string, flags: int) -> int
-extern fn read(fd: int, buf: string, count: int) -> int
-extern fn write(fd: int, buf: string, count: int) -> int
+extern fn read(fd: int, buf: string, count: int64) -> int
+extern fn write(fd: int, buf: string, count: int64) -> int
 extern fn ioctl(fd: int, request: int64, arg: int64) -> int
 extern fn Skink_close_fd(fd: int) -> int
 

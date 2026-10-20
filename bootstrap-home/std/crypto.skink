@@ -27,9 +27,9 @@ import "std/str"
 import "std/libc"
 
 // External OpenSSL hash function declarations.
-extern fn MD5(d: string, n: int, md: string) -> string
-extern fn SHA1(d: string, n: int, md: string) -> string
-extern fn SHA256(d: string, n: int, md: string) -> string
+extern fn MD5(d: string, n: int64, md: string) -> string
+extern fn SHA1(d: string, n: int64, md: string) -> string
+extern fn SHA256(d: string, n: int64, md: string) -> string
 
 // Deprecated: MD5 is cryptographically broken and should not be used for
 // security purposes. Use Sha256 instead.

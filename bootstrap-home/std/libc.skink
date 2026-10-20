@@ -52,13 +52,17 @@ pub fn calloc(num: int, size: int) -> string {
     return Skink_raw_calloc(int64(num), int64(size))
 }
 
-extern fn memcpy(dest: string, src: string, n: int) -> string
-extern fn memset(dest: string, c: int, n: int) -> string
+// The n/size/count parameters below are size_t in C — 64-bit. Declaring
+// them int (i32) leaves the upper half of the argument register
+// undefined, so the callee can read a garbage length (comp_error.md
+// #145). int call-site arguments sign-extend automatically.
+extern fn memcpy(dest: string, src: string, n: int64) -> string
+extern fn memset(dest: string, c: int, n: int64) -> string
 extern fn strlen(s: string) -> int
 extern fn strcmp(a: string, b: string) -> int
 extern fn strstr(haystack: string, needle: string) -> string
 extern fn strcpy(dest: string, src: string) -> string
-extern fn strncpy(dest: string, src: string, n: int) -> string
+extern fn strncpy(dest: string, src: string, n: int64) -> string
 extern fn strcat(dest: string, src: string) -> string
 extern fn strchr(s: string, c: int) -> string
 extern fn tolower(c: int) -> int

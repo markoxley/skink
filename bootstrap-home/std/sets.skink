@@ -1,0 +1,310 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/sets.skink
+// Purpose: Mutable generic set type plus set-algebra operations that the
+//          built-in immutable set<T> literal type does not provide:
+//          union, intersection, difference, symmetric difference,
+//          subset/superset/disjoint/equality predicates, and conversion
+//          from native set<T> literals.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// Implementation notes:
+//
+// - Elements are compared via reflect.Equals / reflect.Hash (through
+//   std/hashmap) rather than `==` or `in`: under type erasure T lowers to
+//   i8* and the built-in comparison paths would treat erased integers as
+//   string pointers (comp_error.md #141).
+// - The module deliberately offers no []T-typed API (no ToSlice or
+//   FromSlice). Generic signatures instantiated with a scalar T cannot
+//   carry []T across the boundary — erased elements are pointer-sized
+//   while concrete slices of e.g. int use a smaller stride, which would
+//   silently corrupt values. Iterate with Each(fn(T)) instead, and let
+//   callers append into concrete slices themselves.
+module sets
+
+import "std/hashmap"
+import "std/reflect"
+
+// Set is a mutable collection of unique elements backed by an
+// open-addressed hash map (std/hashmap) with content-aware hashing via
+// std/reflect — string, integer, bool, float, and pointer elements all
+// behave correctly.
+pub struct Set<T> {
+    members: hashmap.HashMap<T, int>  // presence map; the int value is unused
+
+    // Add inserts v into the set. Returns true when v was newly added,
+    // false when it was already present.
+    fn Add(self: *Set<T>, v: T) -> bool {
+        if self.members.Has(v) {
+            return false
+        }
+        self.members.Put(v, 1)
+        return true
+    }
+
+    // Remove deletes v from the set. Returns true when v was present,
+    // false otherwise.
+    fn Remove(self: *Set<T>, v: T) -> bool {
+        if !self.members.Has(v) {
+            return false
+        }
+        self.members.Delete(v)
+        return true
+    }
+
+    // Has reports whether v is an element of the set.
+    fn Has(self: *Set<T>, v: T) -> bool {
+        return self.members.Has(v)
+    }
+
+    // Len returns the number of elements in the set.
+    fn Len(self: *Set<T>) -> int {
+        return self.members.Len()
+    }
+
+    // Clear removes every element from the set.
+    fn Clear(self: *Set<T>) {
+        self.members = hashmap.New<T, int>()
+    }
+
+    // Each calls f once per element of the set. Iteration order is the
+    // backing table's internal order — not insertion order.
+    fn Each(self: *Set<T>, f: fn(T)) {
+        i := 0
+        for i < len(self.members.entries) {
+            e := self.members.entries[i]
+            if e.occupied {
+                f(e.key)
+            }
+            i = i + 1
+        }
+    }
+
+    // addInto copies every element of self into dest. Internal helper
+    // shared by the algebra methods.
+    fn addInto(self: *Set<T>, dest: *Set<T>) {
+        i := 0
+        for i < len(self.members.entries) {
+            e := self.members.entries[i]
+            if e.occupied {
+                dest.Add(e.key)
+            }
+            i = i + 1
+        }
+    }
+
+    // Union returns a new set containing every element of self and other.
+    fn Union(self: *Set<T>, other: Set<T>) -> Set<T> {
+        r := New<T>()
+        self.addInto(&r)
+        other.addInto(&r)
+        return r
+    }
+
+    // Intersection returns a new set containing only the elements present
+    // in both self and other.
+    fn Intersection(self: *Set<T>, other: Set<T>) -> Set<T> {
+        r := New<T>()
+        i := 0
+        for i < len(self.members.entries) {
+            e := self.members.entries[i]
+            if e.occupied && other.members.Has(e.key) {
+                r.Add(e.key)
+            }
+            i = i + 1
+        }
+        return r
+    }
+
+    // Difference returns a new set containing the elements of self that
+    // are not present in other.
+    fn Difference(self: *Set<T>, other: Set<T>) -> Set<T> {
+        r := New<T>()
+        i := 0
+        for i < len(self.members.entries) {
+            e := self.members.entries[i]
+            if e.occupied && !other.members.Has(e.key) {
+                r.Add(e.key)
+            }
+            i = i + 1
+        }
+        return r
+    }
+
+    // SymmetricDifference returns a new set containing the elements that
+    // are in exactly one of self or other.
+    fn SymmetricDifference(self: *Set<T>, other: Set<T>) -> Set<T> {
+        r := self.Difference(other)
+        other.Difference(self).addInto(&r)
+        return r
+    }
+
+    // IsSubset reports whether every element of self is also in other.
+    fn IsSubset(self: *Set<T>, other: Set<T>) -> bool {
+        i := 0
+        for i < len(self.members.entries) {
+            e := self.members.entries[i]
+            if e.occupied && !other.members.Has(e.key) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+
+    // IsSuperset reports whether self contains every element of other.
+    fn IsSuperset(self: *Set<T>, other: Set<T>) -> bool {
+        return other.IsSubset(self)
+    }
+
+    // IsDisjoint reports whether self and other share no elements.
+    fn IsDisjoint(self: *Set<T>, other: Set<T>) -> bool {
+        i := 0
+        for i < len(self.members.entries) {
+            e := self.members.entries[i]
+            if e.occupied && other.members.Has(e.key) {
+                return false
+            }
+            i = i + 1
+        }
+        return true
+    }
+
+    // Equals reports whether self and other contain exactly the same
+    // elements.
+    fn Equals(self: *Set<T>, other: Set<T>) -> bool {
+        if self.Len() != other.Len() {
+            return false
+        }
+        return self.IsSubset(other)
+    }
+}
+
+// New returns an empty Set. The backing map allocates lazily on the
+// first Add.
+//
+//   s := sets.New[int]()
+pub fn New<T>() -> Set<T> {
+    return Set<T>{
+        members: hashmap.New<T, int>()
+    }
+}
+
+// FromSet converts a built-in set literal into a mutable Set. A null or
+// empty set produces an empty Set.
+//
+//   s := sets.FromSet[int](set{1, 2, 3})
+pub fn FromSet<T>(s: set<T>) -> Set<T> {
+    r := New<T>()
+    for v in s {
+        r.Add(v)
+    }
+    return r
+}
+
+// Contains reports whether v is an element of the built-in set s. This
+// is the generic-safe equivalent of `v in s` (which under type erasure
+// compares elements as string pointers).
+pub fn Contains<T>(s: set<T>, v: T) -> bool {
+    t := reflect.TypeOf<T>(v)
+    for e in s {
+        if reflect.Equals(e, v, t.name) {
+            return true
+        }
+    }
+    return false
+}
+
+// Union returns a new Set containing every element of the built-in sets
+// a and b.
+pub fn Union<T>(a: set<T>, b: set<T>) -> Set<T> {
+    r := New<T>()
+    for v in a {
+        r.Add(v)
+    }
+    for v in b {
+        r.Add(v)
+    }
+    return r
+}
+
+// Intersection returns a new Set containing only the elements present in
+// both built-in sets a and b.
+pub fn Intersection<T>(a: set<T>, b: set<T>) -> Set<T> {
+    r := New<T>()
+    for v in a {
+        if Contains<T>(b, v) {
+            r.Add(v)
+        }
+    }
+    return r
+}
+
+// Difference returns a new Set containing the elements of built-in set a
+// that are not present in b.
+pub fn Difference<T>(a: set<T>, b: set<T>) -> Set<T> {
+    r := New<T>()
+    for v in a {
+        if !Contains<T>(b, v) {
+            r.Add(v)
+        }
+    }
+    return r
+}
+
+// SymmetricDifference returns a new Set containing the elements that are
+// in exactly one of the built-in sets a or b.
+pub fn SymmetricDifference<T>(a: set<T>, b: set<T>) -> Set<T> {
+    r := Difference<T>(a, b)
+    d2 := Difference<T>(b, a)
+    d2.addInto(&r)
+    return r
+}
+
+// IsSubset reports whether every element of built-in set a is also in b.
+pub fn IsSubset<T>(a: set<T>, b: set<T>) -> bool {
+    for v in a {
+        if !Contains<T>(b, v) {
+            return false
+        }
+    }
+    return true
+}
+
+// IsSuperset reports whether built-in set a contains every element of b.
+pub fn IsSuperset<T>(a: set<T>, b: set<T>) -> bool {
+    return IsSubset<T>(b, a)
+}
+
+// IsDisjoint reports whether built-in sets a and b share no elements.
+pub fn IsDisjoint<T>(a: set<T>, b: set<T>) -> bool {
+    for v in a {
+        if Contains<T>(b, v) {
+            return false
+        }
+    }
+    return true
+}
+
+// Equal reports whether built-in sets a and b contain exactly the same
+// elements.
+pub fn Equal<T>(a: set<T>, b: set<T>) -> bool {
+    return IsSubset<T>(a, b) && IsSubset<T>(b, a)
+}

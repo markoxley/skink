@@ -1,0 +1,16 @@
+// expect: instantiated with non-pointer-sized type
+module main
+
+// comp_error.md #142 — instantiating a generic struct whose field embeds a
+// type parameter in an erased composite ([]T) with a non-pointer-sized T
+// is rejected, matching the generic-function signature rule (#36). The
+// field's erased slot and a concrete []int backing store disagree on
+// element stride, so either direction would silently corrupt memory.
+struct WrapA<T> {
+    elems: []T
+}
+
+fn main() -> int {
+    w := WrapA<int>{elems: []int{3, 4}}
+    return w.elems[0]
+}

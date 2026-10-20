@@ -34,9 +34,9 @@ extern fn fopen(path: string, mode: string) -> int64
 extern fn fclose(fp: int64) -> int
 extern fn fgetc(fp: int64) -> int
 extern fn fputc(c: int, fp: int64) -> int
-extern fn fwrite(ptr: string, size: int, count: int, fp: int64) -> int
+extern fn fwrite(ptr: string, size: int64, count: int64, fp: int64) -> int
 extern fn feof(fp: int64) -> int
-extern fn fread(buf: string, size: int, count: int, fp: int64) -> int
+extern fn fread(buf: string, size: int64, count: int64, fp: int64) -> int
 extern fn fseek(fp: int64, offset: int64, whence: int) -> int
 extern fn ftell(fp: int64) -> int64
 extern fn fflush(fp: int64) -> int

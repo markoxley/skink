@@ -32,8 +32,8 @@ import "std/str"
 extern fn socket(domain: int, ty: int, protocol: int) -> int
 extern fn connect(fd: int, addr: string, len: int) -> int
 extern fn Skink_close_fd(fd: int) -> int
-extern fn send(fd: int, buf: string, len: int, flags: int) -> int
-extern fn recv(fd: int, buf: string, len: int, flags: int) -> int
+extern fn send(fd: int, buf: string, len: int64, flags: int) -> int
+extern fn recv(fd: int, buf: string, len: int64, flags: int) -> int
 extern fn listen(fd: int, backlog: int) -> int
 extern fn bind(fd: int, addr: string, len: int) -> int
 extern fn accept(fd: int, addr: string, len: *int) -> int

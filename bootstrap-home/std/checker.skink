@@ -1121,6 +1121,9 @@ pub struct Checker {
     // expression so that untyped integer constants can be range-checked
     // when they flow into narrow integer targets (comp_error.md #28).
     constExprs: exprTable
+    // erasureDepth bounds the generic-struct instantiation check against
+    // mutually recursive generic field types (comp_error.md #142).
+    erasureDepth: int
 }
 
 // newChecker creates a Checker with a global scope pre-populated with builtins.
@@ -1516,6 +1519,7 @@ pub fn astTypeToType(c: *Checker, t: ast.Type) -> TType {
                 gargs = append(gargs, astTypeToType(c, t.genericArgs[i]))
             }
             result.genericArgs = gargs
+            checkStructErasureSafety(c, result, gargs)
         }
         return result
     }
@@ -3829,6 +3833,42 @@ fn checkErasureElem(c: *Checker, t: TType, paramMap: map[string]TType) {
     checkErasureType(c, t, paramMap)
 }
 
+// checkStructErasureSafety applies the erased-composite element rule
+// (checkGenericErasureSafety, comp_error.md #36) to generic *struct*
+// instantiations: a field whose declared type embeds a type parameter in
+// an erased composite ([]T, map[K]V) must resolve to a pointer-sized
+// element type, because the field's single LLVM slot is erased while a
+// concrete []int/map[int]V value keeps its natural stride — either
+// reading or writing direction would silently corrupt memory
+// (comp_error.md #142). Type annotations (x: WrapA<int>, parameters,
+// fields) reach here via astTypeToType; struct literals via
+// checkStructLit. erasureDepth bounds recursion through mutually
+// recursive generic field types.
+fn checkStructErasureSafety(c: *Checker, result: TType, gargs: []TType) {
+    if c.erasureDepth > 8 {
+        return
+    }
+    decl := c.structs.Get(result.name)
+    if decl.kind == 0 || len(decl.structGenerics) == 0 {
+        return
+    }
+    paramMap := make(map[string]TType)
+    gn := len(decl.structGenerics)
+    if gn > len(gargs) {
+        gn = len(gargs)
+    }
+    for gi := 0; gi < gn; gi = gi + 1 {
+        paramMap[decl.structGenerics[gi].name] = gargs[gi]
+    }
+    c.erasureDepth = c.erasureDepth + 1
+    for i := 0; i < len(decl.structFields); i = i + 1 {
+        if len(decl.structFields[i].typ) > 0 {
+            checkErasureType(c, astTypeToType(c, decl.structFields[i].typ[0]), paramMap)
+        }
+    }
+    c.erasureDepth = c.erasureDepth - 1
+}
+
 // checkGenericErasureSafety rejects generic instantiations where a type
 // parameter substituted into a composite element position resolves to a
 // non-pointer-sized concrete type. Under type erasure the generic body
@@ -4723,6 +4763,7 @@ fn checkStructLit(c: *Checker, e: ast.Expr) -> TType {
             gargs = append(gargs, astTypeToType(c, e.genericArgs[i]))
         }
         result.genericArgs = gargs
+        checkStructErasureSafety(c, result, gargs)
     }
     return result
 }

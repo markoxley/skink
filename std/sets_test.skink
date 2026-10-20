@@ -27,10 +27,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
+// Implementation note: the tests collect Set<int> elements through
+// Each(fn(int)) into concrete []int slices. Generic functions cannot
+// return []T instantiated with a scalar T (erased elements are
+// pointer-sized while []int uses a 4-byte stride), so the module exposes
+// Each as the iteration escape hatch instead of a ToSlice method.
 module sets_test
 
 import "std/sets"
-import "testing"
+import "std/testing"
+
+// mkIntSet builds a Set<int> from a concrete slice. A concrete []int
+// parameter is fine here — only generic []T signatures reject scalar
+// element types.
+fn mkIntSet(items: []int) -> sets.Set<int> {
+    s := sets.New<int>()
+    i := 0
+    for i < len(items) {
+        s.Add(items[i])
+        i = i + 1
+    }
+    return s
+}
+
+// collectInts returns the elements of s as a concrete slice via Each.
+fn collectInts(s: sets.Set<int>) -> []int {
+    var out []int
+    s.Each(fn(v: int) {
+        out = append(out, v)
+    })
+    return out
+}
 
 // sortedCopy returns the elements of s in ascending order so tests can
 // assert on content without depending on iteration order.
@@ -70,6 +97,11 @@ fn sliceEqInt(a: []int, b: []int) -> bool {
         i = i + 1
     }
     return true
+}
+
+// assertSetEq asserts that s contains exactly the ints in want (any order).
+fn assertSetEq(want: []int, s: sets.Set<int>, msg: string) {
+    testing.AssertTrue(sliceEqInt(sortedCopy(collectInts(s)), sortedCopy(want)), msg)
 }
 
 // === Set<T> mutators and queries ===
@@ -126,60 +158,49 @@ pub fn TestClear() {
     testing.AssertTrue(s.Has(9), "set usable after Clear")
 }
 
-// TestToSlice verifies ToSlice returns all elements.
-pub fn TestToSlice() {
-    s := sets.New<int>()
-    s.Add(3)
-    s.Add(1)
-    s.Add(2)
-    out := sortedCopy(s.ToSlice())
-    testing.AssertTrue(sliceEqInt(out, []int{1, 2, 3}), "ToSlice contents")
+// TestEach verifies Each visits every element exactly once.
+pub fn TestEach() {
+    s := mkIntSet([]int{3, 1, 2})
+    out := collectInts(s)
+    testing.AssertTrue(sliceEqInt(sortedCopy(out), []int{1, 2, 3}), "Each contents")
 }
 
 // === Set<T> algebra (methods) ===
 
 // TestUnion verifies Union produces the combined set.
 pub fn TestUnion() {
-    a := sets.FromSlice([]int{1, 2, 3})
-    b := sets.FromSlice([]int{3, 4})
-    u := a.Union(b)
-    out := sortedCopy(u.ToSlice())
-    testing.AssertTrue(sliceEqInt(out, []int{1, 2, 3, 4}), "union contents")
+    a := mkIntSet([]int{1, 2, 3})
+    b := mkIntSet([]int{3, 4})
+    assertSetEq([]int{1, 2, 3, 4}, a.Union(b), "union contents")
 }
 
 // TestIntersection verifies Intersection keeps only shared elements.
 pub fn TestIntersection() {
-    a := sets.FromSlice([]int{1, 2, 3})
-    b := sets.FromSlice([]int{2, 3, 4})
-    u := a.Intersection(b)
-    out := sortedCopy(u.ToSlice())
-    testing.AssertTrue(sliceEqInt(out, []int{2, 3}), "intersection contents")
+    a := mkIntSet([]int{1, 2, 3})
+    b := mkIntSet([]int{2, 3, 4})
+    assertSetEq([]int{2, 3}, a.Intersection(b), "intersection contents")
 }
 
 // TestDifference verifies Difference removes the other's elements.
 pub fn TestDifference() {
-    a := sets.FromSlice([]int{1, 2, 3})
-    b := sets.FromSlice([]int{2, 3, 4})
-    u := a.Difference(b)
-    out := sortedCopy(u.ToSlice())
-    testing.AssertTrue(sliceEqInt(out, []int{1}), "difference contents")
+    a := mkIntSet([]int{1, 2, 3})
+    b := mkIntSet([]int{2, 3, 4})
+    assertSetEq([]int{1}, a.Difference(b), "difference contents")
 }
 
 // TestSymmetricDifference verifies elements in exactly one input remain.
 pub fn TestSymmetricDifference() {
-    a := sets.FromSlice([]int{1, 2, 3})
-    b := sets.FromSlice([]int{2, 3, 4})
-    u := a.SymmetricDifference(b)
-    out := sortedCopy(u.ToSlice())
-    testing.AssertTrue(sliceEqInt(out, []int{1, 4}), "symmetric difference contents")
+    a := mkIntSet([]int{1, 2, 3})
+    b := mkIntSet([]int{2, 3, 4})
+    assertSetEq([]int{1, 4}, a.SymmetricDifference(b), "symmetric difference contents")
 }
 
 // TestPredicates verifies the subset/superset/disjoint/equals methods.
 pub fn TestPredicates() {
-    a := sets.FromSlice([]int{1, 2})
-    b := sets.FromSlice([]int{1, 2, 3})
-    c := sets.FromSlice([]int{9})
-    d := sets.FromSlice([]int{1, 2})
+    a := mkIntSet([]int{1, 2})
+    b := mkIntSet([]int{1, 2, 3})
+    c := mkIntSet([]int{9})
+    d := mkIntSet([]int{1, 2})
     testing.AssertTrue(a.IsSubset(b), "a subset of b")
     testing.AssertTrue(!b.IsSubset(a), "b not subset of a")
     testing.AssertTrue(b.IsSuperset(a), "b superset of a")
@@ -193,20 +214,18 @@ pub fn TestPredicates() {
 
 // TestFromSet converts a native set literal into a mutable Set.
 pub fn TestFromSet() {
-    s := sets.FromSet(set{10, 20, 30, 20})
+    s := sets.FromSet<int>(set{10, 20, 30, 20})
     testing.AssertEqualInt(3, s.Len(), "FromSet dedups native literal")
     testing.AssertTrue(s.Has(20), "FromSet membership")
 }
 
-// TestFromSetEmpty verifies that iterating a null/empty native set in a
-// generic context yields an empty Set — regression guard for #140 (for-in
-// over a null set segfaulted).
+// TestFromSetEmpty verifies that converting a null native set (an
+// uninitialized set<T> struct field) yields an empty Set — regression
+// guard for #140: for-in over a null set segfaulted before the guard.
 pub fn TestFromSetEmpty() {
-    s := sets.FromSet(set{1})
-    s.Remove(1)
-    empty := sets.FromSet(set{1, 2}.Union(set{3}).Difference(set{1, 2, 3}))
-    testing.AssertEqualInt(0, empty.Len(), "empty native set converts to empty Set")
-    _ = s
+    h := NullSetHolder{}
+    empty := sets.FromSet<int>(h.s)
+    testing.AssertEqualInt(0, empty.Len(), "null native set converts to empty Set")
 }
 
 // === Free functions on native set<T> literals ===
@@ -214,14 +233,8 @@ pub fn TestFromSetEmpty() {
 // TestNativeContains verifies sets.Contains on a built-in literal.
 pub fn TestNativeContains() {
     s := set{1, 2, 3}
-    testing.AssertTrue(sets.Contains(s, 2), "Contains present element")
-    testing.AssertTrue(!sets.Contains(s, 7), "Contains absent element")
-}
-
-// TestNativeElements verifies sets.Element's extraction order-agnostic.
-pub fn TestNativeElements() {
-    out := sortedCopy(sets.Elements(set{3, 1, 2}))
-    testing.AssertTrue(sliceEqInt(out, []int{1, 2, 3}), "Elements contents")
+    testing.AssertTrue(sets.Contains<int>(s, 2), "Contains present element")
+    testing.AssertTrue(!sets.Contains<int>(s, 7), "Contains absent element")
 }
 
 // TestNativeAlgebra verifies union/intersection/difference/symmetric
@@ -229,10 +242,10 @@ pub fn TestNativeElements() {
 pub fn TestNativeAlgebra() {
     a := set{1, 2, 3}
     b := set{3, 4}
-    testing.AssertTrue(sliceEqInt(sortedCopy(sets.Union(a, b).ToSlice()), []int{1, 2, 3, 4}), "native union")
-    testing.AssertTrue(sliceEqInt(sortedCopy(sets.Intersection(a, b).ToSlice()), []int{3}), "native intersection")
-    testing.AssertTrue(sliceEqInt(sortedCopy(sets.Difference(a, b).ToSlice()), []int{1, 2}), "native difference")
-    testing.AssertTrue(sliceEqInt(sortedCopy(sets.SymmetricDifference(a, b).ToSlice()), []int{1, 2, 4}), "native symmetric difference")
+    assertSetEq([]int{1, 2, 3, 4}, sets.Union<int>(a, b), "native union")
+    assertSetEq([]int{3}, sets.Intersection<int>(a, b), "native intersection")
+    assertSetEq([]int{1, 2}, sets.Difference<int>(a, b), "native difference")
+    assertSetEq([]int{1, 2, 4}, sets.SymmetricDifference<int>(a, b), "native symmetric difference")
 }
 
 // TestNativePredicates verifies subset/superset/disjoint/equality on
@@ -241,13 +254,13 @@ pub fn TestNativePredicates() {
     a := set{1, 2}
     b := set{1, 2, 3}
     c := set{9}
-    testing.AssertTrue(sets.IsSubset(a, b), "native subset")
-    testing.AssertTrue(!sets.IsSubset(b, a), "native not-subset")
-    testing.AssertTrue(sets.IsSuperset(b, a), "native superset")
-    testing.AssertTrue(sets.IsDisjoint(a, c), "native disjoint")
-    testing.AssertTrue(!sets.IsDisjoint(a, b), "native not-disjoint")
-    testing.AssertTrue(sets.Equal(set{1, 2}, set{2, 1}), "native equal")
-    testing.AssertTrue(!sets.Equal(a, b), "native not-equal")
+    testing.AssertTrue(sets.IsSubset<int>(a, b), "native subset")
+    testing.AssertTrue(!sets.IsSubset<int>(b, a), "native not-subset")
+    testing.AssertTrue(sets.IsSuperset<int>(b, a), "native superset")
+    testing.AssertTrue(sets.IsDisjoint<int>(a, c), "native disjoint")
+    testing.AssertTrue(!sets.IsDisjoint<int>(a, b), "native not-disjoint")
+    testing.AssertTrue(sets.Equal<int>(set{1, 2}, set{2, 1}), "native equal")
+    testing.AssertTrue(!sets.Equal<int>(a, b), "native not-equal")
 }
 
 // TestNullNativeSetOps is the regression for comp_error.md #140: `in` and
@@ -264,7 +277,7 @@ pub fn TestNullNativeSetOps() {
 }
 
 // NullSetHolder carries an uninitialized set field used by
-// TestNullNativeSetOps.
+// TestNullNativeSetOps and TestFromSetEmpty.
 struct NullSetHolder {
     s: set<int>
 }

@@ -34,11 +34,11 @@ extern fn exit(code: int)
 extern fn getenv(name: string) -> string
 extern fn setenv(name: string, value: string, overwrite: int) -> int
 extern fn unsetenv(name: string) -> int
-extern fn getcwd(buf: string, size: int) -> string
+extern fn getcwd(buf: string, size: int64) -> string
 extern fn chdir(path: string) -> int
 extern fn popen(cmd: string, mode: string) -> int64
 extern fn pclose(fp: int64) -> int
-extern fn fread(buf: string, size: int, nmemb: int, fp: int64) -> int
+extern fn fread(buf: string, size: int64, nmemb: int64, fp: int64) -> int
 extern fn feof(fp: int64) -> int
 extern fn ferror(fp: int64) -> int
 extern fn _skink_runtime_get_argc() -> int

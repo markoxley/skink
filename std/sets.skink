@@ -9,7 +9,7 @@
 //          built-in immutable set<T> literal type does not provide:
 //          union, intersection, difference, symmetric difference,
 //          subset/superset/disjoint/equality predicates, and conversion
-//          to and from native set<T> literals and slices.
+//          from native set<T> literals.
 // Author:  Mark Oxley
 // Created: 2026
 //
@@ -25,25 +25,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-// Element comparisons never use `==` or `in` on the generic element type:
-// under type erasure `T` lowers to i8*, and the built-in comparison paths
-// treat i8* as a string (strcmp), which crashes on non-string elements.
-// Instead every comparison goes through reflect.Equals and membership
-// lookups go through the reflect-aware hashing in std/hashmap — the same
-// technique the HashMap module uses to support erased int/string keys.
+// Implementation notes:
+//
+// - Elements are compared via reflect.Equals / reflect.Hash (through
+//   std/hashmap) rather than `==` or `in`: under type erasure T lowers to
+//   i8* and the built-in comparison paths would treat erased integers as
+//   string pointers (comp_error.md #141).
+// - The module deliberately offers no []T-typed API (no ToSlice or
+//   FromSlice). Generic signatures instantiated with a scalar T cannot
+//   carry []T across the boundary — erased elements are pointer-sized
+//   while concrete slices of e.g. int use a smaller stride, which would
+//   silently corrupt values. Iterate with Each(fn(T)) instead, and let
+//   callers append into concrete slices themselves.
 module sets
 
 import "std/hashmap"
 import "std/reflect"
 
 // Set is a mutable collection of unique elements backed by an
-// open-addressed hash map (std/hashmap) for membership tests and an
-// insertion-ordered element list for iteration. Elements may be any
-// type usable with reflect.Equals — strings, integers, bools, floats,
-// and pointers all behave correctly.
+// open-addressed hash map (std/hashmap) with content-aware hashing via
+// std/reflect — string, integer, bool, float, and pointer elements all
+// behave correctly.
 pub struct Set<T> {
     members: hashmap.HashMap<T, int>  // presence map; the int value is unused
-    elems: []T                        // insertion-ordered elements
 
     // Add inserts v into the set. Returns true when v was newly added,
     // false when it was already present.
@@ -52,30 +56,16 @@ pub struct Set<T> {
             return false
         }
         self.members.Put(v, 1)
-        self.elems = append(self.elems, v)
         return true
     }
 
     // Remove deletes v from the set. Returns true when v was present,
-    // false otherwise. Removal is a swap-remove on the element list, so
-    // iteration order is not preserved for elements after the removed one.
+    // false otherwise.
     fn Remove(self: *Set<T>, v: T) -> bool {
         if !self.members.Has(v) {
             return false
         }
         self.members.Delete(v)
-        t := reflect.TypeOf<T>(v)
-        n := len(self.elems)
-        i := 0
-        for i < n {
-            if reflect.Equals(self.elems[i], v, t.name) {
-                self.elems[i] = self.elems[n - 1]
-                self.elems = self.elems[:n - 1]
-                return true
-            }
-            i = i + 1
-        }
-        // Unreachable in practice: members and elems are kept in sync.
         return true
     }
 
@@ -92,38 +82,39 @@ pub struct Set<T> {
     // Clear removes every element from the set.
     fn Clear(self: *Set<T>) {
         self.members = hashmap.New<T, int>()
-        var e []T
-        self.elems = e
     }
 
-    // ToSlice returns a fresh slice containing every element of the set
-    // in insertion order.
-    fn ToSlice(self: *Set<T>) -> []T {
-        var out []T
+    // Each calls f once per element of the set. Iteration order is the
+    // backing table's internal order — not insertion order.
+    fn Each(self: *Set<T>, f: fn(T)) {
         i := 0
-        n := len(self.elems)
-        for i < n {
-            out = append(out, self.elems[i])
+        for i < len(self.members.entries) {
+            e := self.members.entries[i]
+            if e.occupied {
+                f(e.key)
+            }
             i = i + 1
         }
-        return out
+    }
+
+    // addInto copies every element of self into dest. Internal helper
+    // shared by the algebra methods.
+    fn addInto(self: *Set<T>, dest: *Set<T>) {
+        i := 0
+        for i < len(self.members.entries) {
+            e := self.members.entries[i]
+            if e.occupied {
+                dest.Add(e.key)
+            }
+            i = i + 1
+        }
     }
 
     // Union returns a new set containing every element of self and other.
     fn Union(self: *Set<T>, other: Set<T>) -> Set<T> {
         r := New<T>()
-        i := 0
-        n := len(self.elems)
-        for i < n {
-            r.Add(self.elems[i])
-            i = i + 1
-        }
-        i = 0
-        n = len(other.elems)
-        for i < n {
-            r.Add(other.elems[i])
-            i = i + 1
-        }
+        self.addInto(&r)
+        other.addInto(&r)
         return r
     }
 
@@ -132,10 +123,10 @@ pub struct Set<T> {
     fn Intersection(self: *Set<T>, other: Set<T>) -> Set<T> {
         r := New<T>()
         i := 0
-        n := len(self.elems)
-        for i < n {
-            if other.members.Has(self.elems[i]) {
-                r.Add(self.elems[i])
+        for i < len(self.members.entries) {
+            e := self.members.entries[i]
+            if e.occupied && other.members.Has(e.key) {
+                r.Add(e.key)
             }
             i = i + 1
         }
@@ -147,10 +138,10 @@ pub struct Set<T> {
     fn Difference(self: *Set<T>, other: Set<T>) -> Set<T> {
         r := New<T>()
         i := 0
-        n := len(self.elems)
-        for i < n {
-            if !other.members.Has(self.elems[i]) {
-                r.Add(self.elems[i])
+        for i < len(self.members.entries) {
+            e := self.members.entries[i]
+            if e.occupied && !other.members.Has(e.key) {
+                r.Add(e.key)
             }
             i = i + 1
         }
@@ -161,22 +152,16 @@ pub struct Set<T> {
     // are in exactly one of self or other.
     fn SymmetricDifference(self: *Set<T>, other: Set<T>) -> Set<T> {
         r := self.Difference(other)
-        otherHalf := other.Difference(self)
-        i := 0
-        n := len(otherHalf.elems)
-        for i < n {
-            r.Add(otherHalf.elems[i])
-            i = i + 1
-        }
+        other.Difference(self).addInto(&r)
         return r
     }
 
     // IsSubset reports whether every element of self is also in other.
     fn IsSubset(self: *Set<T>, other: Set<T>) -> bool {
         i := 0
-        n := len(self.elems)
-        for i < n {
-            if !other.members.Has(self.elems[i]) {
+        for i < len(self.members.entries) {
+            e := self.members.entries[i]
+            if e.occupied && !other.members.Has(e.key) {
                 return false
             }
             i = i + 1
@@ -192,9 +177,9 @@ pub struct Set<T> {
     // IsDisjoint reports whether self and other share no elements.
     fn IsDisjoint(self: *Set<T>, other: Set<T>) -> bool {
         i := 0
-        n := len(self.elems)
-        for i < n {
-            if other.members.Has(self.elems[i]) {
+        for i < len(self.members.entries) {
+            e := self.members.entries[i]
+            if e.occupied && other.members.Has(e.key) {
                 return false
             }
             i = i + 1
@@ -217,29 +202,15 @@ pub struct Set<T> {
 //
 //   s := sets.New[int]()
 pub fn New<T>() -> Set<T> {
-    var elems []T
     return Set<T>{
-        members: hashmap.New<T, int>(),
-        elems: elems
+        members: hashmap.New<T, int>()
     }
-}
-
-// FromSlice returns a Set containing the elements of items with
-// duplicates removed.
-pub fn FromSlice<T>(items: []T) -> Set<T> {
-    r := New<T>()
-    i := 0
-    for i < len(items) {
-        r.Add(items[i])
-        i = i + 1
-    }
-    return r
 }
 
 // FromSet converts a built-in set literal into a mutable Set. A null or
 // empty set produces an empty Set.
 //
-//   s := sets.FromSet(set{1, 2, 3})
+//   s := sets.FromSet[int](set{1, 2, 3})
 pub fn FromSet<T>(s: set<T>) -> Set<T> {
     r := New<T>()
     for v in s {
@@ -249,9 +220,8 @@ pub fn FromSet<T>(s: set<T>) -> Set<T> {
 }
 
 // Contains reports whether v is an element of the built-in set s. This
-// is the generic-safe equivalent of `v in s` (which uses a string
-// comparison under type erasure and cannot be used inside generic code
-// for non-string elements).
+// is the generic-safe equivalent of `v in s` (which under type erasure
+// compares elements as string pointers).
 pub fn Contains<T>(s: set<T>, v: T) -> bool {
     t := reflect.TypeOf<T>(v)
     for e in s {
@@ -260,16 +230,6 @@ pub fn Contains<T>(s: set<T>, v: T) -> bool {
         }
     }
     return false
-}
-
-// Elements returns a fresh slice containing every element of the
-// built-in set s.
-pub fn Elements<T>(s: set<T>) -> []T {
-    var out []T
-    for v in s {
-        out = append(out, v)
-    }
-    return out
 }
 
 // Union returns a new Set containing every element of the built-in sets
@@ -313,10 +273,8 @@ pub fn Difference<T>(a: set<T>, b: set<T>) -> Set<T> {
 // in exactly one of the built-in sets a or b.
 pub fn SymmetricDifference<T>(a: set<T>, b: set<T>) -> Set<T> {
     r := Difference<T>(a, b)
-    otherHalf := Difference<T>(b, a)
-    for v in otherHalf.elems {
-        r.Add(v)
-    }
+    d2 := Difference<T>(b, a)
+    d2.addInto(&r)
     return r
 }
 

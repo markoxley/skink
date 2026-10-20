@@ -131,7 +131,7 @@ pub fn Ext(p: string) -> string {
 
 // realpath is a C library function that resolves a path to an absolute path.
 extern fn realpath(path: string, resolved: string) -> string
-extern fn getcwd(buf: string, size: int) -> string
+extern fn getcwd(buf: string, size: int64) -> string
 
 // Abs returns an absolute version of the path. When the path exists,
 // symlinks and relative components are resolved via realpath(3). When it

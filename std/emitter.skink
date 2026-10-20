@@ -57,6 +57,7 @@ pub struct StructLayout {
     fields:          []string  // the fields
     fieldTypes:      []string  // the field types
     fieldSkinkTypes: []string  // the Skink field type names (preserves []T vs *T)
+    fieldNullDefault: []bool  // i8* fields that default to null rather than "" (fn/chan/ptr/slice)
     fieldTags:       []string  // the field tags ([attr] annotations, space-joined)
     isUnsigned:      []bool  // whether unsigned
     size:            int  // the size
@@ -2111,7 +2112,11 @@ fn setTypeName(elemLL: string) -> string {
 }
 
 // emitSetTypeDecl emits the LLVM type declaration for a set struct.
-// A set is represented as { elem*, i32 } (data pointer + count).
+// A set is represented as { i8**, i32 } (data pointer + count): elements
+// are boxed to i8* at literal construction (comp_error.md #143) so that
+// every set layout — including the %set.i8Ptr* an erased set<T> parameter
+// lowers to — shares one element stride. elemLL still feeds the type
+// name so distinct element types keep distinct %set.<elem> names.
 fn emitSetTypeDecl(cg: *CodeGen, name: string, elemLL: string) {
     has := mapStringBoolHasKeyCG(cg.setTypes, name)
     if has {
@@ -2121,9 +2126,7 @@ fn emitSetTypeDecl(cg: *CodeGen, name: string, elemLL: string) {
     parts := []string{}
     parts = append(parts, "%")
     parts = append(parts, name)
-    parts = append(parts, " = type { ")
-    parts = append(parts, elemLL)
-    parts = append(parts, "*, i32 }\n")
+    parts = append(parts, " = type { i8**, i32 }\n")
     emitHeader(cg, concatMany(parts))
 }
 
@@ -3166,13 +3169,7 @@ fn emitMapLiteral(cg: *CodeGen, e: ast.Expr) -> string {
         }
 
         // Compute hash and find slot via linear probing.
-        hashReg := nextReg(cg)
-        if str.Equal(keyLL, "i8*") {
-            emitfmt(cg, "  %s = call i32 @Skink_str_hash(i8* %s)\n", []string{hashReg, keyReg})
-        } else {
-            // For integer keys, use the value itself as the hash.
-            hashReg = keyReg
-        }
+        hashReg := emitMapKeyHash(cg, keyReg, keyLL, mapKeyReflectName(cg, e))
         idxReg := nextReg(cg)
         emitfmt(cg, "  %s = srem i32 %s, %s\n", []string{idxReg, hashReg, strconv.Itoa(cap)})
         negCheck := nextReg(cg)
@@ -3261,9 +3258,11 @@ fn emitMapLiteral(cg: *CodeGen, e: ast.Expr) -> string {
 }
 
 // emitSetLiteral emits a set literal as an RC-managed struct.
-// Sets use the same struct layout as maps but with only a data pointer
-// and count: { elem*, i32 }. Duplicate elements are filtered out at
-// emission time via a linear scan over the already-added elements.
+// Sets are { i8**, i32 }: a data pointer to an array of boxed i8*
+// elements plus a count (comp_error.md #143 — elements are boxed so a
+// generic set<T> parameter reads concrete sets with a uniform 8-byte
+// stride). Duplicate elements are filtered out at emission time via a
+// linear scan over the already-added elements.
 fn emitSetLiteral(cg: *CodeGen, e: ast.Expr) -> string {
     if len(e.setElems) == 0 {
         return "null"
@@ -3274,7 +3273,7 @@ fn emitSetLiteral(cg: *CodeGen, e: ast.Expr) -> string {
     setStructType := str.Concat("%", setName)
 
     n := len(e.setElems)
-    elemSize := emitElemSize(cg, elemLL)
+    elemSize := emitElemSize(cg, "i8*")
 
     // Allocate backing array with capacity = n (worst case: all unique).
     bytesReg := nextReg(cg)
@@ -3299,7 +3298,7 @@ fn emitSetLiteral(cg: *CodeGen, e: ast.Expr) -> string {
     emitfmt(cg, "  %s = bitcast i8* %s to i64*\n", []string{capTyped, capPtr})
     emitfmt(cg, "  store i64 %s, i64* %s\n", []string{strconv.Itoa(n), capTyped})
     dataTyped := nextReg(cg)
-    emitfmt(cg, "  %s = bitcast i8* %s to %s*\n", []string{dataTyped, rawReg, elemLL})
+    emitfmt(cg, "  %s = bitcast i8* %s to i8**\n", []string{dataTyped, rawReg})
 
     // Allocate an i32 counter for the number of unique elements added.
     countAlloca := nextReg(cg)
@@ -3337,11 +3336,13 @@ fn emitSetLiteral(cg: *CodeGen, e: ast.Expr) -> string {
         emitCondBranch(cg, cmpJ, checkLabel, endLabel)
 
         emitLabel(cg, checkLabel)
-        // Load existing element at index jReg.
+        // Load existing element at index jReg (boxed i8* storage) and
+        // unbox it back to elemLL for comparison.
         existingGep := nextReg(cg)
-        emitfmt(cg, "  %s = getelementptr inbounds %s, %s* %s, i32 %s\n", []string{existingGep, elemLL, elemLL, dataTyped, jReg})
+        emitfmt(cg, "  %s = getelementptr inbounds i8*, i8** %s, i32 %s\n", []string{existingGep, dataTyped, jReg})
         existingReg := nextReg(cg)
-        emitfmt(cg, "  %s = load %s, %s* %s\n", []string{existingReg, elemLL, elemLL, existingGep})
+        emitfmt(cg, "  %s = load i8*, i8** %s\n", []string{existingReg, existingGep})
+        existingReg = emitSetElemUnbox(cg, existingReg, elemLL)
         // Compare.
         isDup := emitSetElemCompare(cg, elemReg, existingReg, elemLL)
         foundReg := nextReg(cg)
@@ -3370,10 +3371,11 @@ fn emitSetLiteral(cg: *CodeGen, e: ast.Expr) -> string {
         emitCondBranch(cg, notFound, storeLabel, skipLabel)
 
         emitLabel(cg, storeLabel)
-        // Store elemReg at index countReg.
+        // Box elemReg to i8* and store it at index countReg.
+        boxedReg := emitSetElemBox(cg, elemReg, elemLL)
         storeGep := nextReg(cg)
-        emitfmt(cg, "  %s = getelementptr inbounds %s, %s* %s, i32 %s\n", []string{storeGep, elemLL, elemLL, dataTyped, countReg})
-        emitStore(cg, elemLL, elemReg, elemLL, storeGep)
+        emitfmt(cg, "  %s = getelementptr inbounds i8*, i8** %s, i32 %s\n", []string{storeGep, dataTyped, countReg})
+        emitStore(cg, "i8*", boxedReg, "i8*", storeGep)
         // Increment count.
         countNext := nextReg(cg)
         emitfmt(cg, "  %s = add i32 %s, 1\n", []string{countNext, countReg})
@@ -3404,7 +3406,7 @@ fn emitSetLiteral(cg: *CodeGen, e: ast.Expr) -> string {
     // Store data pointer (field 0).
     dataField := nextReg(cg)
     emitfmt(cg, "  %s = getelementptr inbounds %s, %s* %s, i32 0, i32 0\n", []string{dataField, setStructType, setStructType, setPtr})
-    emitfmt(cg, "  store %s* %s, %s** %s\n", []string{elemLL, dataTyped, elemLL, dataField})
+    emitfmt(cg, "  store i8** %s, i8*** %s\n", []string{dataTyped, dataField})
 
     // Store count (field 1).
     finalCount := nextReg(cg)
@@ -3416,14 +3418,151 @@ fn emitSetLiteral(cg: *CodeGen, e: ast.Expr) -> string {
     return setPtr
 }
 
+// emitSetElemBox converts an element value of LLVM type elemLL into the
+// uniform i8* representation stored in set backing arrays. Set elements
+// are always pointer-sized (comp_error.md #143): an erased set<T>
+// parameter lowers to %set.i8Ptr*, whose readers use an 8-byte element
+// stride, so a concrete set<int> backing array of i32s would otherwise be
+// misread.
+fn emitSetElemBox(cg: *CodeGen, reg: string, elemLL: string) -> string {
+    if str.Equal(elemLL, "i8*") {
+        return reg
+    }
+    if str.EndsWith(elemLL, "*") {
+        r := nextReg(cg)
+        emitfmt(cg, "  %s = bitcast %s %s to i8*\n", []string{r, elemLL, reg})
+        return r
+    }
+    if str.Equal(elemLL, "float") {
+        bits := nextReg(cg)
+        emitfmt(cg, "  %s = bitcast float %s to i32\n", []string{bits, reg})
+        r := nextReg(cg)
+        emitfmt(cg, "  %s = inttoptr i32 %s to i8*\n", []string{r, bits})
+        return r
+    }
+    if str.Equal(elemLL, "double") {
+        bits := nextReg(cg)
+        emitfmt(cg, "  %s = bitcast double %s to i64\n", []string{bits, reg})
+        r := nextReg(cg)
+        emitfmt(cg, "  %s = inttoptr i64 %s to i8*\n", []string{r, bits})
+        return r
+    }
+    if str.StartsWith(elemLL, "i") {
+        r := nextReg(cg)
+        emitfmt(cg, "  %s = inttoptr %s %s to i8*\n", []string{r, elemLL, reg})
+        return r
+    }
+    // By-value composites (e.g. a %struct.X value element) spill to an
+    // RC-managed heap copy so the boxed pointer outlives this frame.
+    sizePtr := nextReg(cg)
+    emitfmt(cg, "  %s = getelementptr %s, %s* null, i32 1\n", []string{sizePtr, elemLL, elemLL})
+    sizeReg := nextReg(cg)
+    emitfmt(cg, "  %s = ptrtoint %s* %s to i64\n", []string{sizeReg, elemLL, sizePtr})
+    raw := nextReg(cg)
+    emitfmt(cg, "  %s = call i8* @Skink_rc_alloc(i64 %s)\n", []string{raw, sizeReg})
+    typed := nextReg(cg)
+    emitfmt(cg, "  %s = bitcast i8* %s to %s*\n", []string{typed, raw, elemLL})
+    emitStore(cg, elemLL, reg, elemLL, typed)
+    return raw
+}
+
+// emitSetElemUnbox is the inverse of emitSetElemBox: it converts an i8*
+// element read from a set backing array back to LLVM type elemLL.
+fn emitSetElemUnbox(cg: *CodeGen, reg: string, elemLL: string) -> string {
+    if str.Equal(elemLL, "i8*") {
+        return reg
+    }
+    if str.EndsWith(elemLL, "*") {
+        r := nextReg(cg)
+        emitfmt(cg, "  %s = bitcast i8* %s to %s\n", []string{r, reg, elemLL})
+        return r
+    }
+    if str.Equal(elemLL, "float") {
+        bits := nextReg(cg)
+        emitfmt(cg, "  %s = ptrtoint i8* %s to i32\n", []string{bits, reg})
+        r := nextReg(cg)
+        emitfmt(cg, "  %s = bitcast i32 %s to float\n", []string{r, bits})
+        return r
+    }
+    if str.Equal(elemLL, "double") {
+        bits := nextReg(cg)
+        emitfmt(cg, "  %s = ptrtoint i8* %s to i64\n", []string{bits, reg})
+        r := nextReg(cg)
+        emitfmt(cg, "  %s = bitcast i64 %s to double\n", []string{r, bits})
+        return r
+    }
+    if str.StartsWith(elemLL, "i") {
+        r := nextReg(cg)
+        emitfmt(cg, "  %s = ptrtoint i8* %s to %s\n", []string{r, reg, elemLL})
+        return r
+    }
+    // Inverse of the RC-managed box emitted by emitSetElemBox.
+    typed := nextReg(cg)
+    emitfmt(cg, "  %s = bitcast i8* %s to %s*\n", []string{typed, reg, elemLL})
+    return emitLoad(cg, elemLL, elemLL, typed)
+}
+
+// emitCastLL converts a register between LLVM types at the erased-generic
+// boundary: i8* → concrete unboxes (ptrtoint/bitcast/load), concrete →
+// i8* boxes (inttoptr/bitcast/spill), and pointer-to-pointer reinterprets.
+// Used where a slot holds the erased representation but the expression's
+// semantic type is the instantiated one (comp_error.md #142).
+fn emitCastLL(cg: *CodeGen, reg: string, fromLL: string, toLL: string) -> string {
+    if str.Equal(fromLL, toLL) {
+        return reg
+    }
+    if str.Equal(fromLL, "i8*") {
+        return emitSetElemUnbox(cg, reg, toLL)
+    }
+    if str.Equal(toLL, "i8*") && !str.EndsWith(fromLL, "*") {
+        return emitSetElemBox(cg, reg, fromLL)
+    }
+    if str.EndsWith(fromLL, "*") && str.EndsWith(toLL, "*") {
+        r := nextReg(cg)
+        emitfmt(cg, "  %s = bitcast %s %s to %s\n", []string{r, fromLL, reg, toLL})
+        return r
+    }
+    return reg
+}
+
+// receiverIsGenericInstance reports whether a field-access expression's
+// receiver has an instantiated generic struct type (e.g. WrapA<int>, or a
+// pointer to one). Such receivers share a single erased LLVM layout whose
+// slot types do not reflect the substituted field types (comp_error.md #142).
+fn receiverIsGenericInstance(cg: *CodeGen, e: ast.Expr) -> bool {
+    if len(e.fieldTarget) == 0 {
+        return false
+    }
+    st := exprSkinkType(cg, e.fieldTarget[0])
+    if st.kind == checker.TK_NAMED {
+        st = resolveAliasCG(cg, st)
+        if st.kind == checker.TK_NAMED && len(st.genericArgs) > 0 {
+            return true
+        }
+    }
+    if st.kind == checker.TK_POINTER && len(st.elem) > 0 {
+        inner := checker.typeOptT(st.elem)
+        if inner.kind == checker.TK_NAMED && len(inner.genericArgs) > 0 {
+            return true
+        }
+    }
+    return false
+}
+
 // emitSetElemCompare compares two set elements of the given LLVM type
 // and returns an i1 register that is true when they are equal.
 fn emitSetElemCompare(cg: *CodeGen, a: string, b: string, elemLL: string) -> string {
     if str.Equal(elemLL, "i8*") {
+        // Erased generic elements also lower to i8* — a raw strcmp crashes
+        // on non-string elements (comp_error.md #141). reflect_equals uses
+        // a mapped-memory heuristic instead: mapped pointers compare by
+        // string content, unmapped values by raw bits — correct for real
+        // strings and for erased int/bool/float/pointer elements alike.
+        emptyStr := emitStringLiteral(cg, "")
         cmp := nextReg(cg)
-        emitfmt(cg, "  %s = call i32 @strcmp(i8* %s, i8* %s)\n", []string{cmp, a, b})
+        emitfmt(cg, "  %s = call i32 @reflect_equals(i8* %s, i8* %s, i8* %s)\n", []string{cmp, a, b, emptyStr})
         r := nextReg(cg)
-        emitfmt(cg, "  %s = icmp eq i32 %s, 0\n", []string{r, cmp})
+        emitfmt(cg, "  %s = icmp ne i32 %s, 0\n", []string{r, cmp})
         return r
     }
     r := nextReg(cg)
@@ -3439,6 +3578,18 @@ fn emitSetInOp(cg: *CodeGen, e: ast.Expr) -> string {
     setReg := emitExpression(cg, e.infixRight[0])
     setLLType := exprLLType(cg, e.infixRight[0])
     elemLL := exprLLType(cg, e.infixLeft[0])
+
+    // Result alloca (i1), initially false. Must be emitted before the
+    // null-guard branch so it dominates the final load at endLabel on the
+    // null path too.
+    resultAlloca := nextReg(cg)
+    emitfmt(cg, "  %s = alloca i1\n", []string{resultAlloca})
+    emitfmt(cg, "  store i1 false, i1* %s\n", []string{resultAlloca})
+
+    // Loop index alloca.
+    iAlloca := nextReg(cg)
+    emitfmt(cg, "  %s = alloca i32\n", []string{iAlloca})
+    emitfmt(cg, "  store i32 0, i32* %s\n", []string{iAlloca})
 
     // A null set (e.g. an uninitialized `set<T>` struct field) contains no
     // elements — skip the scan and leave the result false rather than
@@ -3458,21 +3609,12 @@ fn emitSetInOp(cg: *CodeGen, e: ast.Expr) -> string {
     countReg := nextReg(cg)
     emitfmt(cg, "  %s = load i32, i32* %s\n", []string{countReg, countField})
 
-    // Load data pointer (field 0).
+    // Load data pointer (field 0) — set backing arrays are always i8**
+    // (elements boxed to i8*, comp_error.md #143).
     dataField := nextReg(cg)
     emitfmt(cg, "  %s = getelementptr inbounds %s, %s %s, i32 0, i32 0\n", []string{dataField, setType, setLLType, setReg})
     dataReg := nextReg(cg)
-    emitfmt(cg, "  %s = load %s*, %s** %s\n", []string{dataReg, elemLL, elemLL, dataField})
-
-    // Result alloca (i1), initially false.
-    resultAlloca := nextReg(cg)
-    emitfmt(cg, "  %s = alloca i1\n", []string{resultAlloca})
-    emitfmt(cg, "  store i1 false, i1* %s\n", []string{resultAlloca})
-
-    // Loop index alloca.
-    iAlloca := nextReg(cg)
-    emitfmt(cg, "  %s = alloca i32\n", []string{iAlloca})
-    emitfmt(cg, "  store i32 0, i32* %s\n", []string{iAlloca})
+    emitfmt(cg, "  %s = load i8*, i8** %s\n", []string{dataReg, dataField})
 
     loopLabel := nextLabel(cg)
     checkLabel := nextLabel(cg)
@@ -3487,9 +3629,10 @@ fn emitSetInOp(cg: *CodeGen, e: ast.Expr) -> string {
 
     emitLabel(cg, checkLabel)
     elemGep := nextReg(cg)
-    emitfmt(cg, "  %s = getelementptr inbounds %s, %s* %s, i32 %s\n", []string{elemGep, elemLL, elemLL, dataReg, iReg})
-    elemReg := nextReg(cg)
-    emitfmt(cg, "  %s = load %s, %s* %s\n", []string{elemReg, elemLL, elemLL, elemGep})
+    emitfmt(cg, "  %s = getelementptr inbounds i8*, i8** %s, i32 %s\n", []string{elemGep, dataReg, iReg})
+    elemRaw := nextReg(cg)
+    emitfmt(cg, "  %s = load i8*, i8** %s\n", []string{elemRaw, elemGep})
+    elemReg := emitSetElemUnbox(cg, elemRaw, elemLL)
     isMatch := emitSetElemCompare(cg, leftReg, elemReg, elemLL)
     // If match, set result to true.
     emitfmt(cg, "  store i1 %s, i1* %s\n", []string{isMatch, resultAlloca})
@@ -3516,7 +3659,78 @@ fn emitSetInOp(cg: *CodeGen, e: ast.Expr) -> string {
 // emitMapIndex emits a hash-based lookup through a map.
 // Uses open addressing with linear probing: computes hash(key) % capacity,
 // then probes until finding the key or an empty slot.
-fn emitMapIndex(cg: *CodeGen, mapReg: string, keyReg: string, keyLL: string, valLL: string) -> string {
+// mapKeyReflectName returns the type-name hint to pass to
+// reflect_hash/reflect_equals for the keys of the given map expression
+// (comp_error.md #141): "string" when the checker's semantic key type is
+// the builtin string (reflect_hash then delegates to Skink_str_hash —
+// identical hash values, no heuristic syscall), "" for anything else —
+// including erased generic keys — so the mapped-memory heuristic kicks
+// in. An unresolved type also yields "", which stays correct because the
+// heuristic hashes real string pointers by content anyway.
+fn mapKeyReflectName(cg: *CodeGen, mapExpr: ast.Expr) -> string {
+    t := checker.exprTypeLookup(cg.checker, cg.currentFilePath, mapExpr.line, mapExpr.col)
+    if t.kind == checker.TK_MAP && len(t.keyType) > 0 {
+        kt := checker.typeOptT(t.keyType)
+        if kt.kind == checker.TK_BUILTIN && str.Equal(kt.name, "string") {
+            return "string"
+        }
+    }
+    return ""
+}
+
+// exprIsBuiltinString reports whether the checker's recorded type for e
+// is the builtin string type.
+fn exprIsBuiltinString(cg: *CodeGen, e: ast.Expr) -> bool {
+    t := checker.exprTypeLookup(cg.checker, cg.currentFilePath, e.line, e.col)
+    return t.kind == checker.TK_BUILTIN && str.Equal(t.name, "string")
+}
+
+// i8StarEqTypeName returns the type-name hint for a `==`/`!=` between
+// two i8* operands (comp_error.md #141): "string" only when BOTH
+// operands are provably builtin string — the explicit-string path in
+// reflect_equals dereferences both pointers as C strings, so a mixed
+// string/erased pair must use the "" heuristic instead.
+fn i8StarEqTypeName(cg: *CodeGen, e: ast.Expr) -> string {
+    if exprIsBuiltinString(cg, e.infixLeft[0]) && exprIsBuiltinString(cg, e.infixRight[0]) {
+        return "string"
+    }
+    return ""
+}
+
+// emitMapKeyHash emits the hash computation for a map key and returns
+// the i32 hash register. i8* keys route through reflect_hash with the
+// given type-name hint (comp_error.md #141): a raw Skink_str_hash call
+// would dereference erased generic keys (inttoptr'd scalars) as C
+// strings and crash. Non-i8* keys keep the identity hash.
+fn emitMapKeyHash(cg: *CodeGen, keyReg: string, keyLL: string, typeName: string) -> string {
+    if str.Equal(keyLL, "i8*") {
+        tnReg := emitStringLiteral(cg, typeName)
+        hashReg := nextReg(cg)
+        emitfmt(cg, "  %s = call i32 @reflect_hash(i8* %s, i8* %s)\n", []string{hashReg, keyReg, tnReg})
+        return hashReg
+    }
+    return keyReg
+}
+
+// emitMapKeyCompare emits a key equality test and returns an i1 register
+// that is true when a == b. i8* keys route through reflect_equals with
+// the given type-name hint (comp_error.md #141) — a raw strcmp crashes
+// on erased generic keys. Other key types keep icmp eq.
+fn emitMapKeyCompare(cg: *CodeGen, a: string, b: string, keyLL: string, typeName: string) -> string {
+    if str.Equal(keyLL, "i8*") {
+        tnReg := emitStringLiteral(cg, typeName)
+        cmp := nextReg(cg)
+        emitfmt(cg, "  %s = call i32 @reflect_equals(i8* %s, i8* %s, i8* %s)\n", []string{cmp, a, b, tnReg})
+        r := nextReg(cg)
+        emitfmt(cg, "  %s = icmp ne i32 %s, 0\n", []string{r, cmp})
+        return r
+    }
+    r := nextReg(cg)
+    emitfmt(cg, "  %s = icmp eq %s %s, %s\n", []string{r, keyLL, a, b})
+    return r
+}
+
+fn emitMapIndex(cg: *CodeGen, mapReg: string, keyReg: string, keyLL: string, valLL: string, keyTypeName: string) -> string {
     mtName := mapTypeName(keyLL, valLL)
     emitMapTypeDecl(cg, mtName, keyLL, valLL)
     mapType := str.Concat("%", mtName)
@@ -3574,12 +3788,7 @@ fn emitMapIndex(cg: *CodeGen, mapReg: string, keyReg: string, keyLL: string, val
 
     emitln(cg, str.Concat(searchLabel, ":\n"))
     // Compute hash and starting index.
-    hashReg := nextReg(cg)
-    if str.Equal(keyLL, "i8*") {
-        emitfmt(cg, "  %s = call i32 @Skink_str_hash(i8* %s)\n", []string{hashReg, keyReg})
-    } else {
-        hashReg = keyReg
-    }
+    hashReg := emitMapKeyHash(cg, keyReg, keyLL, keyTypeName)
     idxReg := nextReg(cg)
     emitfmt(cg, "  %s = srem i32 %s, %s\n", []string{idxReg, hashReg, capReg})
     negCheck := nextReg(cg)
@@ -3617,16 +3826,7 @@ fn emitMapIndex(cg: *CodeGen, mapReg: string, keyReg: string, keyLL: string, val
     curKey := nextReg(cg)
     emitfmt(cg, "  %s = load %s, %s* %s\n", []string{curKey, keyLL, keyLL, keyGep})
 
-    var matchReg: string
-    if str.Equal(keyLL, "i8*") {
-        cmp := nextReg(cg)
-        emitfmt(cg, "  %s = call i32 @strcmp(i8* %s, i8* %s)\n", []string{cmp, curKey, keyReg})
-        matchReg = nextReg(cg)
-        emitfmt(cg, "  %s = icmp eq i32 %s, 0\n", []string{matchReg, cmp})
-    } else {
-        matchReg = nextReg(cg)
-        emitfmt(cg, "  %s = icmp eq %s %s, %s\n", []string{matchReg, keyLL, curKey, keyReg})
-    }
+    matchReg := emitMapKeyCompare(cg, curKey, keyReg, keyLL, keyTypeName)
     emitCondBranch(cg, matchReg, foundLabel, probeLabel)
 
     emitln(cg, str.Concat(foundLabel, ":\n"))
@@ -3659,7 +3859,7 @@ fn emitMapIndex(cg: *CodeGen, mapReg: string, keyReg: string, keyLL: string, val
 
 // emitMapIndexOk handles map[key] access with comma-ok: returns (value, found).
 // Uses hash-based lookup with linear probing.
-fn emitMapIndexOk(cg: *CodeGen, mapReg: string, keyReg: string, keyLL: string, valLL: string) -> (string, string) {
+fn emitMapIndexOk(cg: *CodeGen, mapReg: string, keyReg: string, keyLL: string, valLL: string, keyTypeName: string) -> (string, string) {
     mtName := mapTypeName(keyLL, valLL)
     emitMapTypeDecl(cg, mtName, keyLL, valLL)
     mapType := str.Concat("%", mtName)
@@ -3721,12 +3921,7 @@ fn emitMapIndexOk(cg: *CodeGen, mapReg: string, keyReg: string, keyLL: string, v
 
     emitln(cg, str.Concat(searchLabel, ":\n"))
     // Compute hash and starting index.
-    hashReg := nextReg(cg)
-    if str.Equal(keyLL, "i8*") {
-        emitfmt(cg, "  %s = call i32 @Skink_str_hash(i8* %s)\n", []string{hashReg, keyReg})
-    } else {
-        hashReg = keyReg
-    }
+    hashReg := emitMapKeyHash(cg, keyReg, keyLL, keyTypeName)
     idxReg := nextReg(cg)
     emitfmt(cg, "  %s = srem i32 %s, %s\n", []string{idxReg, hashReg, capReg})
     negCheck := nextReg(cg)
@@ -3764,16 +3959,7 @@ fn emitMapIndexOk(cg: *CodeGen, mapReg: string, keyReg: string, keyLL: string, v
     curKey := nextReg(cg)
     emitfmt(cg, "  %s = load %s, %s* %s\n", []string{curKey, keyLL, keyLL, keyGep})
 
-    var matchReg: string
-    if str.Equal(keyLL, "i8*") {
-        cmp := nextReg(cg)
-        emitfmt(cg, "  %s = call i32 @strcmp(i8* %s, i8* %s)\n", []string{cmp, curKey, keyReg})
-        matchReg = nextReg(cg)
-        emitfmt(cg, "  %s = icmp eq i32 %s, 0\n", []string{matchReg, cmp})
-    } else {
-        matchReg = nextReg(cg)
-        emitfmt(cg, "  %s = icmp eq %s %s, %s\n", []string{matchReg, keyLL, curKey, keyReg})
-    }
+    matchReg := emitMapKeyCompare(cg, curKey, keyReg, keyLL, keyTypeName)
     emitCondBranch(cg, matchReg, foundLabel, probeLabel)
 
     emitln(cg, str.Concat(foundLabel, ":\n"))
@@ -3807,7 +3993,7 @@ fn emitMapIndexOk(cg: *CodeGen, mapReg: string, keyReg: string, keyLL: string, v
 // emitMapIndexAssignment handles map[key] = value with hash-based search, update, and insert.
 // If the key exists, updates the value. If not, inserts a new entry, resizing (rehashing)
 // when the load factor exceeds 75%.
-fn emitMapIndexAssignment(cg: *CodeGen, mapReg: string, keyReg: string, keyLL: string, valLL: string, value: ast.Expr, op: string) {
+fn emitMapIndexAssignment(cg: *CodeGen, mapReg: string, keyReg: string, keyLL: string, valLL: string, value: ast.Expr, op: string, keyTypeName: string) {
     mtName := mapTypeName(keyLL, valLL)
     emitMapTypeDecl(cg, mtName, keyLL, valLL)
     mapType := str.Concat("%", mtName)
@@ -3890,12 +4076,7 @@ fn emitMapIndexAssignment(cg: *CodeGen, mapReg: string, keyReg: string, keyLL: s
     emitfmt(cg, "  store i32 0, i32* %s\n", []string{foundIdx})
 
     // Compute hash (always needed for both search and insert paths).
-    hashReg := nextReg(cg)
-    if str.Equal(keyLL, "i8*") {
-        emitfmt(cg, "  %s = call i32 @Skink_str_hash(i8* %s)\n", []string{hashReg, keyReg})
-    } else {
-        hashReg = keyReg
-    }
+    hashReg := emitMapKeyHash(cg, keyReg, keyLL, keyTypeName)
 
     // Compute startIdx safely: if capacity == 0, use 0 to avoid division by zero.
     // (The no-resize insert path uses startIdx; when capacity == 0, resize always
@@ -3948,16 +4129,7 @@ fn emitMapIndexAssignment(cg: *CodeGen, mapReg: string, keyReg: string, keyLL: s
     curKey := nextReg(cg)
     emitfmt(cg, "  %s = load %s, %s* %s\n", []string{curKey, keyLL, keyLL, keyGep})
 
-    var matchReg: string
-    if str.Equal(keyLL, "i8*") {
-        cmp := nextReg(cg)
-        emitfmt(cg, "  %s = call i32 @strcmp(i8* %s, i8* %s)\n", []string{cmp, curKey, keyReg})
-        matchReg = nextReg(cg)
-        emitfmt(cg, "  %s = icmp eq i32 %s, 0\n", []string{matchReg, cmp})
-    } else {
-        matchReg = nextReg(cg)
-        emitfmt(cg, "  %s = icmp eq %s %s, %s\n", []string{matchReg, keyLL, curKey, keyReg})
-    }
+    matchReg := emitMapKeyCompare(cg, curKey, keyReg, keyLL, keyTypeName)
     emitCondBranch(cg, matchReg, foundLabel, probeLabel)
 
     emitln(cg, str.Concat(foundLabel, ":\n"))
@@ -4112,12 +4284,7 @@ fn emitMapIndexAssignment(cg: *CodeGen, mapReg: string, keyReg: string, keyLL: s
     oldValVal := nextReg(cg)
     emitfmt(cg, "  %s = load %s, %s* %s\n", []string{oldValVal, valLL, valLL, oldValGep})
     // Compute new hash index.
-    rehashHash := nextReg(cg)
-    if str.Equal(keyLL, "i8*") {
-        emitfmt(cg, "  %s = call i32 @Skink_str_hash(i8* %s)\n", []string{rehashHash, oldKeyVal})
-    } else {
-        rehashHash = oldKeyVal
-    }
+    rehashHash := emitMapKeyHash(cg, oldKeyVal, keyLL, keyTypeName)
     rehashIdx := nextReg(cg)
     emitfmt(cg, "  %s = srem i32 %s, %s\n", []string{rehashIdx, rehashHash, newCap})
     rehashNeg := nextReg(cg)
@@ -4194,12 +4361,7 @@ fn emitMapIndexAssignment(cg: *CodeGen, mapReg: string, keyReg: string, keyLL: s
 
     emitln(cg, str.Concat(rehashEnd, ":\n"))
     // Now insert the new key into the new (resized) arrays.
-    insHash := nextReg(cg)
-    if str.Equal(keyLL, "i8*") {
-        emitfmt(cg, "  %s = call i32 @Skink_str_hash(i8* %s)\n", []string{insHash, keyReg})
-    } else {
-        insHash = keyReg
-    }
+    insHash := emitMapKeyHash(cg, keyReg, keyLL, keyTypeName)
     insIdx := nextReg(cg)
     emitfmt(cg, "  %s = srem i32 %s, %s\n", []string{insIdx, insHash, newCap})
     insNeg := nextReg(cg)
@@ -4783,6 +4945,7 @@ fn computeStructLayout(cg: *CodeGen, name: string, d: ast.Decl) -> StructLayout 
     layout.fields = []string{}
     layout.fieldTypes = []string{}
     layout.fieldSkinkTypes = []string{}
+    layout.fieldNullDefault = []bool{}
     layout.fieldTags = []string{}
     layout.isUnsigned = []bool{}
     layout.offsets = []int{}
@@ -4820,10 +4983,21 @@ fn computeStructLayout(cg: *CodeGen, name: string, d: ast.Decl) -> StructLayout 
         }
         fSize, fAlign := typeSizeAndAlign(cg, ft)
 
+        // i8* slots whose semantic type is a function, channel, pointer,
+        // or slice must default to null, not the empty-string literal —
+        // `f != nil` on those compares by pointer identity, so an ""
+        // default would read as a live value and calling it crashes
+        // (comp_error.md #144).
+        resolvedFt := resolveAliasCG(cg, ft)
+        fNullDefault := str.Equal(fLL, "i8*") && (resolvedFt.kind == checker.TK_FUNCTION ||
+            resolvedFt.kind == checker.TK_CHAN || resolvedFt.kind == checker.TK_POINTER ||
+            resolvedFt.kind == checker.TK_ARRAY)
+
         offset = alignUp(offset, fAlign)
         layout.fields = append(layout.fields, field.name)
         layout.fieldTypes = append(layout.fieldTypes, fLL)
         layout.fieldSkinkTypes = append(layout.fieldSkinkTypes, fSkinkType)
+        layout.fieldNullDefault = append(layout.fieldNullDefault, fNullDefault)
         layout.fieldTags = append(layout.fieldTags, str.Join(field.tags, " "))
         layout.isUnsigned = append(layout.isUnsigned, false)
         layout.offsets = append(layout.offsets, offset)
@@ -6645,6 +6819,42 @@ fn emitInfixExpr(cg: *CodeGen, e: ast.Expr) -> string {
                     return r
                 }
             }
+            if str.Equal(errLLType, "i8*") {
+                valReg := emitExpression(cg, errExpr)
+                if exprIsBuiltinString(cg, errExpr) {
+                    // String nil semantics (comp_error.md #144): both a
+                    // null pointer and an empty string mean "nil" — this
+                    // is what str.Len(null) == 0 relies on. Test
+                    // null-or-first-byte-zero on the guarded value.
+                    nulReg := nextReg(cg)
+                    emitfmt(cg, "  %s = icmp eq i8* %s, null\n", []string{nulReg, valReg})
+                    nilZBAlloca := emitAlloca(cg, "i8")
+                    emitfmt(cg, "  store i8 0, i8* %s\n", []string{nilZBAlloca})
+                    nilSafePtr := nextReg(cg)
+                    emitfmt(cg, "  %s = select i1 %s, i8* %s, i8* %s\n", []string{nilSafePtr, nulReg, nilZBAlloca, valReg})
+                    nilByte := nextReg(cg)
+                    emitfmt(cg, "  %s = load i8, i8* %s\n", []string{nilByte, nilSafePtr})
+                    nilEmpty := nextReg(cg)
+                    emitfmt(cg, "  %s = icmp eq i8 %s, 0\n", []string{nilEmpty, nilByte})
+                    nilEmptyOrNull := nextReg(cg)
+                    emitfmt(cg, "  %s = or i1 %s, %s\n", []string{nilEmptyOrNull, nulReg, nilEmpty})
+                    if str.Equal(op, "==") {
+                        return nilEmptyOrNull
+                    }
+                    r2 := nextReg(cg)
+                    emitfmt(cg, "  %s = xor i1 %s, true\n", []string{r2, nilEmptyOrNull})
+                    return r2
+                }
+                // Non-string i8* (fn values, erased generics, untyped
+                // pointers): nil means pointer identity (comp_error.md
+                // #144). A content compare would misread a closure's
+                // first byte as a string terminator, making a live fn
+                // value compare equal to nil.
+                if str.Equal(op, "==") {
+                    return emitBinaryOp(cg, "icmp eq", "i8*", valReg, "null")
+                }
+                return emitBinaryOp(cg, "icmp ne", "i8*", valReg, "null")
+            }
         }
     }
 
@@ -6720,12 +6930,18 @@ fn emitInfixExpr(cg: *CodeGen, e: ast.Expr) -> string {
         }
     }
 
-    // String comparison: use strcmp for == and != on i8* operands
-    // Null-safe: treat NULL as empty string to avoid strcmp crashes
-    // BUT: if the other operand is an integer literal (from generic type
-    // erasure where int→i8* via inttoptr), use pointer comparison instead.
+    // String-ish comparison for i8* operands. `==`/`!=` route through
+    // reflect_equals (comp_error.md #141): i8* is also the erased type of
+    // generic parameters, and strcmp on an inttoptr'd value crashes. The
+    // "string" type-name hint is only emitted when BOTH operands are
+    // provably builtin string — a mixed string/erased pair would deref
+    // an inttoptr'd operand under the explicit-string path. Both operands
+    // are null-guarded to "" first, preserving the long-standing
+    // null == "" semantics that str.Len and friends rely on. Relational
+    // <,>,<=,>= keep strcmp — the checker only permits them on strings,
+    // and a type-erased operand cannot legally reach them.
     if str.Equal(operandType, "i8*") && !isIntegerLiteralExpr(e.infixRight[0]) && !isIntegerLiteralExpr(e.infixLeft[0]) {
-        if str.Equal(op, "==") {
+        if str.Equal(op, "==") || str.Equal(op, "!=") {
             leftNull := nextReg(cg)
             emitfmt(cg, "  %s = icmp eq i8* %s, null\n", []string{leftNull, left})
             leftSafe := nextReg(cg)
@@ -6737,26 +6953,13 @@ fn emitInfixExpr(cg: *CodeGen, e: ast.Expr) -> string {
             emptyR := emitStringLiteral(cg, "")
             emitfmt(cg, "  %s = select i1 %s, i8* %s, i8* %s\n", []string{rightSafe, rightNull, emptyR, right})
             cmpReg := nextReg(cg)
-            emitfmt(cg, "  %s = call i32 @strcmp(i8* %s, i8* %s)\n", []string{cmpReg, leftSafe, rightSafe})
+            emitfmt(cg, "  %s = call i32 @reflect_equals(i8* %s, i8* %s, i8* %s)\n", []string{cmpReg, leftSafe, rightSafe, emitStringLiteral(cg, i8StarEqTypeName(cg, e))})
             r := nextReg(cg)
-            emitfmt(cg, "  %s = icmp eq i32 %s, 0\n", []string{r, cmpReg})
-            return r
-        }
-        if str.Equal(op, "!=") {
-            leftNull := nextReg(cg)
-            emitfmt(cg, "  %s = icmp eq i8* %s, null\n", []string{leftNull, left})
-            leftSafe := nextReg(cg)
-            emptyL := emitStringLiteral(cg, "")
-            emitfmt(cg, "  %s = select i1 %s, i8* %s, i8* %s\n", []string{leftSafe, leftNull, emptyL, left})
-            rightNull := nextReg(cg)
-            emitfmt(cg, "  %s = icmp eq i8* %s, null\n", []string{rightNull, right})
-            rightSafe := nextReg(cg)
-            emptyR := emitStringLiteral(cg, "")
-            emitfmt(cg, "  %s = select i1 %s, i8* %s, i8* %s\n", []string{rightSafe, rightNull, emptyR, right})
-            cmpReg := nextReg(cg)
-            emitfmt(cg, "  %s = call i32 @strcmp(i8* %s, i8* %s)\n", []string{cmpReg, leftSafe, rightSafe})
-            r := nextReg(cg)
-            emitfmt(cg, "  %s = icmp ne i32 %s, 0\n", []string{r, cmpReg})
+            if str.Equal(op, "==") {
+                emitfmt(cg, "  %s = icmp ne i32 %s, 0\n", []string{r, cmpReg})
+            } else {
+                emitfmt(cg, "  %s = icmp eq i32 %s, 0\n", []string{r, cmpReg})
+            }
             return r
         }
         // Relational string comparison via strcmp sign.
@@ -9284,12 +9487,8 @@ fn emitDeleteCall(cg: *CodeGen, e: ast.Expr) -> string {
     emitStore(cg, "i32", "0", "i32", idxAlloca)
 
     // Compute hash (always needed for search path).
-    hashReg := nextReg(cg)
-    if str.Equal(keyLL, "i8*") {
-        emitfmt(cg, "  %s = call i32 @Skink_str_hash(i8* %s)\n", []string{hashReg, keyReg})
-    } else {
-        hashReg = keyReg
-    }
+    keyTypeName := mapKeyReflectName(cg, mapExpr)
+    hashReg := emitMapKeyHash(cg, keyReg, keyLL, keyTypeName)
 
     // Compute startIdx safely: if capacity == 0, use 0 to avoid division by zero.
     capZeroCheck := nextReg(cg)
@@ -9335,14 +9534,7 @@ fn emitDeleteCall(cg: *CodeGen, e: ast.Expr) -> string {
     emitfmt(cg, "  %s = getelementptr inbounds %s, %s* %s, i32 %s\n", []string{keyGep, keyLL, keyLL, keysPtr, iVal})
     keyVal := nextReg(cg)
     emitfmt(cg, "  %s = load %s, %s* %s\n", []string{keyVal, keyLL, keyLL, keyGep})
-    isMatch := nextReg(cg)
-    if str.Equal(keyLL, "i8*") {
-        cmpResult := nextReg(cg)
-        emitfmt(cg, "  %s = call i32 @strcmp(i8* %s, i8* %s)\n", []string{cmpResult, keyVal, keyReg})
-        emitfmt(cg, "  %s = icmp eq i32 %s, 0\n", []string{isMatch, cmpResult})
-    } else {
-        emitfmt(cg, "  %s = icmp eq %s %s, %s\n", []string{isMatch, keyLL, keyVal, keyReg})
-    }
+    isMatch := emitMapKeyCompare(cg, keyVal, keyReg, keyLL, keyTypeName)
     emitCondBranch(cg, isMatch, foundLabel, probeLabel)
 
     emitLabel(cg, foundLabel)
@@ -9460,12 +9652,7 @@ fn emitDeleteCall(cg: *CodeGen, e: ast.Expr) -> string {
     emitfmt(cg, "  %s = getelementptr inbounds %s, %s* %s, i32 %s\n", []string{oldValGep, valLL, valLL, valsPtr, riVal})
     oldValVal := nextReg(cg)
     emitfmt(cg, "  %s = load %s, %s* %s\n", []string{oldValVal, valLL, valLL, oldValGep})
-    rehashHash := nextReg(cg)
-    if str.Equal(keyLL, "i8*") {
-        emitfmt(cg, "  %s = call i32 @Skink_str_hash(i8* %s)\n", []string{rehashHash, oldKeyVal})
-    } else {
-        rehashHash = oldKeyVal
-    }
+    rehashHash := emitMapKeyHash(cg, oldKeyVal, keyLL, keyTypeName)
     rehashIdx := nextReg(cg)
     emitfmt(cg, "  %s = srem i32 %s, %s\n", []string{rehashIdx, rehashHash, capReg})
     rehashNeg := nextReg(cg)
@@ -10718,7 +10905,7 @@ fn emitIndexExpr(cg: *CodeGen, e: ast.Expr) -> string {
     keyLL, valLL, isMap := parseMapTypeLL(leftType)
     if isMap && !str.EndsWith(leftType, "**") {
         idx := emitExpression(cg, e.indexExpr[0])
-        return emitMapIndex(cg, target, idx, keyLL, valLL)
+        return emitMapIndex(cg, target, idx, keyLL, valLL, mapKeyReflectName(cg, e.indexTarget[0]))
     }
     
     // String and byte-slice indexing. Strings are raw i8*; byte slices
@@ -10842,7 +11029,15 @@ fn emitFieldAccessExpr(cg: *CodeGen, e: ast.Expr) -> string {
                 indices = append(indices, "i32 0")
                 indices = append(indices, str.Concat("i32 ", strconv.Itoa(fieldIdx)))
                 fieldPtr := emitGEP(cg, layout.llType, structPtrType, basePtr, indices)
-                return emitLoad(cg, fieldType, fieldType, fieldPtr)
+                fieldReg := emitLoad(cg, fieldType, fieldType, fieldPtr)
+                // Instantiated generic receivers: the slot holds the erased
+                // representation while readers expect the substituted type —
+                // unbox/bitcast to the semantic LLVM type (comp_error.md #142).
+                wantLL := exprFieldLLType(cg, e)
+                if !str.Equal(wantLL, fieldType) {
+                    return emitCastLL(cg, fieldReg, fieldType, wantLL)
+                }
+                return fieldReg
             }
         }
     }
@@ -11063,16 +11258,22 @@ fn emitStructInitExpr(cg: *CodeGen, e: ast.Expr) -> string {
         }
         i = i + 1
     }
-    // Initialize unset string fields to empty string (NULL causes strcmp crashes)
+    // Initialize unset i8* fields: strings get the empty-string literal
+    // (NULL causes strcmp crashes); fn/chan/pointer/slice fields get null
+    // so `f != nil` sees them as unset (comp_error.md #144).
     k := 0
     for k < len(layout.fields) {
         if !setFields[k] && str.Equal(layout.fieldTypes[k], "i8*") {
-            emptyStr := emitStringLiteral(cg, "")
             indices2 := []string{}
             indices2 = append(indices2, "i32 0")
             indices2 = append(indices2, str.Concat("i32 ", strconv.Itoa(k)))
             fieldPtr2 := emitGEP(cg, layout.llType, structPtrType, structPtr, indices2)
-            emitfmt(cg, "  store i8* %s, i8** %s\n", []string{emptyStr, fieldPtr2})
+            if k < len(layout.fieldNullDefault) && layout.fieldNullDefault[k] {
+                emitfmt(cg, "  store i8* null, i8** %s\n", []string{fieldPtr2})
+            } else {
+                emptyStr := emitStringLiteral(cg, "")
+                emitfmt(cg, "  store i8* %s, i8** %s\n", []string{emptyStr, fieldPtr2})
+            }
         }
         k = k + 1
     }
@@ -12000,7 +12201,7 @@ fn emitVarStmt(cg: *CodeGen, stmt: ast.Stmt) {
                 mapReg := emitExpression(cg, ve.indexTarget[0])
                 keyReg := emitExpression(cg, ve.indexExpr[0])
                 // Emit map index with ok flag.
-                valReg, okReg := emitMapIndexOk(cg, mapReg, keyReg, keyLL, valLL)
+                valReg, okReg := emitMapIndexOk(cg, mapReg, keyReg, keyLL, valLL, mapKeyReflectName(cg, ve.indexTarget[0]))
                 // The map owns its values — the variable needs its own ref.
                 if isHeapLLType(valLL) {
                     valReg = emitRetain(cg, valReg, valLL)
@@ -12185,7 +12386,7 @@ fn emitAssignStmt(cg: *CodeGen, stmt: ast.Stmt) {
             arrReg := emitExpression(cg, arrExpr)
             keyReg := emitExpression(cg, target.indexExpr[0])
             keyLL, valLL, _ := parseMapTypeLL(leftType)
-            emitMapIndexAssignment(cg, arrReg, keyReg, keyLL, valLL, stmt.assignValue[0], stmt.assignOp)
+            emitMapIndexAssignment(cg, arrReg, keyReg, keyLL, valLL, stmt.assignValue[0], stmt.assignOp, mapKeyReflectName(cg, arrExpr))
             return
         }
     }
@@ -12446,9 +12647,16 @@ fn emitFieldAssignment(cg: *CodeGen, target: ast.Expr, valReg: string, valType: 
                 // Compound assignment: obj.field += val → obj.field = obj.field + val
                 if !str.Equal(op, "=") {
                     oldVal := emitLoad(cg, fieldType, fieldType, fieldPtr)
-                    coercedReg := coerceExprToParamType(cg, valReg, valType, fieldType, value)
-                    resultReg := computeCompoundOp(cg, oldVal, coercedReg, op, fieldType, false)
-                    emitStore(cg, fieldType, resultReg, fieldType, fieldPtr)
+                    // Instantiated generic receiver: the slot holds the
+                    // erased representation — unbox before arithmetic and
+                    // rebox for the store (comp_error.md #142).
+                    semLL := exprFieldLLType(cg, target)
+                    if !str.Equal(semLL, fieldType) {
+                        oldVal = emitCastLL(cg, oldVal, fieldType, semLL)
+                    }
+                    coercedReg := coerceExprToParamType(cg, valReg, valType, semLL, value)
+                    resultReg := computeCompoundOp(cg, oldVal, coercedReg, op, semLL, false)
+                    emitStore(cg, fieldType, emitCastLL(cg, resultReg, semLL, fieldType), fieldType, fieldPtr)
                     return
                 }
                 coercedReg := coerceExprToParamType(cg, valReg, valType, fieldType, value)
@@ -13935,7 +14143,8 @@ fn emitForInMapStmt(cg: *CodeGen, stmt: ast.Stmt, mapReg: string, mapLLType: str
 }
 
 // emitForInSetStmt handles for-in loops over sets.
-// Sets use { elem*, i32 } layout: field 0 = data pointer, field 1 = count.
+// Sets use { i8**, i32 } layout: field 0 = data pointer (boxed elements),
+// field 1 = count (comp_error.md #143).
 fn emitForInSetStmt(cg: *CodeGen, stmt: ast.Stmt, setReg: string, setLLType: string, elemLL: string) {
     setStructType := str.Substr(setLLType, 0, str.Len(setLLType) - 1)
 
@@ -13949,11 +14158,12 @@ fn emitForInSetStmt(cg: *CodeGen, stmt: ast.Stmt, setReg: string, setLLType: str
     emitCondBranch(cg, isNullSet, endLabel, proceedLabel)
     emitLabel(cg, proceedLabel)
 
-    // Load data pointer (field 0).
+    // Load data pointer (field 0) — set backing arrays are always i8**
+    // (elements boxed to i8*, comp_error.md #143).
     dataField := nextReg(cg)
     emitfmt(cg, "  %s = getelementptr inbounds %s, %s %s, i32 0, i32 0\n", []string{dataField, setStructType, setLLType, setReg})
     dataPtr := nextReg(cg)
-    emitfmt(cg, "  %s = load %s*, %s** %s\n", []string{dataPtr, elemLL, elemLL, dataField})
+    emitfmt(cg, "  %s = load i8*, i8** %s\n", []string{dataPtr, dataField})
 
     // Load count (field 1).
     countField := nextReg(cg)
@@ -13984,9 +14194,10 @@ fn emitForInSetStmt(cg: *CodeGen, stmt: ast.Stmt, setReg: string, setLLType: str
     emitLabel(cg, bodyLabel)
     pushScope(cg)
     elemGep := nextReg(cg)
-    emitfmt(cg, "  %s = getelementptr inbounds %s, %s* %s, i32 %s\n", []string{elemGep, elemLL, elemLL, dataPtr, idxLoad})
-    elemVal := nextReg(cg)
-    emitfmt(cg, "  %s = load %s, %s* %s\n", []string{elemVal, elemLL, elemLL, elemGep})
+    emitfmt(cg, "  %s = getelementptr inbounds i8*, i8** %s, i32 %s\n", []string{elemGep, dataPtr, idxLoad})
+    elemRaw := nextReg(cg)
+    emitfmt(cg, "  %s = load i8*, i8** %s\n", []string{elemRaw, elemGep})
+    elemVal := emitSetElemUnbox(cg, elemRaw, elemLL)
     // Elements are borrowed from the set; the loop variable takes its own.
     if isHeapLLType(elemLL) {
         elemVal = emitRetain(cg, elemVal, elemLL)
@@ -16232,6 +16443,13 @@ fn emitRuntimeDecls(cg: *CodeGen) {
     // emitted code unwraps data/cap/base only at element-access sites.
     emitHeader(cg, "%hdr.slice = type { i8*, i64, i64, i8* }\n")
     emitHeader(cg, "declare i32 @Skink_str_hash(i8*)\n")
+    // reflect_equals/reflect_hash (reflect_rt.c) are emitted
+    // unconditionally: emitSetElemCompare uses reflect_equals for i8* set
+    // elements and emitMapKeyHash/emitMapKeyCompare route i8* map keys
+    // through both — erased generic elements/keys lower to i8* and cannot
+    // be hashed/compared with strcmp (#141).
+    emitHeader(cg, "declare i32 @reflect_equals(i8*, i8*, i8*)\n")
+    emitHeader(cg, "declare i32 @reflect_hash(i8*, i8*)\n")
     emitHeader(cg, "declare void @Skink_panic(i8*)\n")
     emitHeader(cg, "declare void @Skink_bounds_check(i32, i32, i32)\n")
     emitHeader(cg, "declare i32 @setjmp(i8*) returns_twice\n")
@@ -16271,6 +16489,7 @@ fn emitRuntimeDecls(cg: *CodeGen) {
         "Skink_chan_make", "Skink_chan_close", "Skink_chan_send",
         "Skink_chan_recv", "Skink_chan_select", "Skink_spawn", "Skink_free",
         "Skink_future_make", "Skink_future_set", "Skink_future_get",
+        "reflect_equals", "reflect_hash",
     }
     i := 0
     for i < len(rtNames) {
@@ -16797,6 +17016,23 @@ fn exprFieldLLType(cg: *CodeGen, e: ast.Expr) -> string {
             i := 0
             for i < len(layout.fields) {
                 if str.Equal(layout.fields[i], e.fieldName) {
+                    // Instantiated generic structs share one erased layout,
+                    // so the declared slot type can disagree with the
+                    // substituted field type (e.g. elems: []T lowers to
+                    // i8** but WrapA<int>.elems is []int). Prefer the
+                    // checker's substituted semantic type (#142).
+                    if receiverIsGenericInstance(cg, e) {
+                        st := exprSkinkType(cg, e)
+                        if st.kind == checker.TK_NAMED {
+                            st = resolveAliasCG(cg, st)
+                        }
+                        if st.kind != 0 && st.kind != checker.TK_UNKNOWN {
+                            llT := llvmType(cg, st)
+                            if str.Len(llT) > 0 && !str.Equal(llT, "void") {
+                                return llT
+                            }
+                        }
+                    }
                     return layout.fieldTypes[i]
                 }
                 i = i + 1
