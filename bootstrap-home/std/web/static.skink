@@ -27,6 +27,7 @@ module static
 import "std/str"
 import "std/fs"
 import "std/errors"
+import "std/path"
 import "std/web/types"
 import "std/libc"
 
@@ -58,30 +59,57 @@ fn mimeType(path: string) -> string {
 // chunked str.Concat loop truncated at NUL bytes and ran in O(n²) time)
 // and it is written via the explicit-length WriteBytes path
 // (comp_error.md #52).
+// serveFile streams a file from rootDir to the response writer. rootDir
+// must already be canonicalized (see FileServer). The request path is
+// normalized with path.Clean — collapsing "//"→"/" and resolving "."
+// and ".." — then the joined target is canonicalized and verified to
+// stay inside the root. Previously "//etc/passwd" slipped past the
+// one-slash strip and a bare ".." substring test missed symlink escapes
+// (VULN-26).
 fn serveFile(rootDir: string, req: types.Request, w: *types.ResponseWriter) {
-    path := req.Path()
-    if path == "" {
-        path = "/"
+    raw := req.Path()
+    if raw == "" {
+        raw = "/"
     }
-
-    // Prevent directory traversal.
-    if str.Contains(path, "..") {
+    // Reject ".." as a raw path component outright: path.Clean drops
+    // root-level ".." on absolute paths, which would silently normalize
+    // "/../etc/passwd" to "/etc/passwd" and hide the escape attempt
+    // (VULN-26). Interior uses like "/a/../b" are refused too — a file
+    // server has no legitimate need for them.
+    if raw == ".." || str.StartsWith(raw, "../") || str.Contains(raw, "/../") || str.EndsWith(raw, "/..") {
         w.WriteHeader(403)
         w.Write("Forbidden")
         return
     }
-
-    // Strip leading slash and join with root.
-    filePath := rootDir
-    rel := path
+    cleaned := path.Clean(raw)
+    // A leading ".." component means the request tried to climb out.
+    if cleaned == ".." || str.StartsWith(cleaned, "../") {
+        w.WriteHeader(403)
+        w.Write("Forbidden")
+        return
+    }
+    rel := cleaned
     if str.StartsWith(rel, "/") {
         rel = str.Substr(rel, 1, str.Len(rel) - 1)
     }
+    if rel == "." {
+        rel = ""
+    }
+    filePath := rootDir
     if str.Len(rel) > 0 {
         filePath = str.Concat(str.Concat(rootDir, "/"), rel)
-    } else {
-        filePath = str.Concat(rootDir, "/")
     }
+
+    // Defense in depth: realpath the joined path and require it to stay
+    // inside the canonical root — catches symlink escapes that lexical
+    // checks miss.
+    absTarget := path.Abs(filePath)
+    if absTarget != rootDir && !str.StartsWith(absTarget, str.Concat(rootDir, "/")) {
+        w.WriteHeader(403)
+        w.Write("Forbidden")
+        return
+    }
+    filePath = absTarget
 
     // Try opening as file first ("rb" so Windows does not translate
     // newlines in binary content). On POSIX, fopen() succeeds on
@@ -93,15 +121,28 @@ fn serveFile(rootDir: string, req: types.Request, w: *types.ResponseWriter) {
         openErr = errors.New("is a directory")
     }
     if openErr.message != "" {
-        // Try index.html fallback for directories.
-        indexPath := str.Concat(filePath, "index.html")
-        f, openErr = fs.Open(indexPath, "rb")
+        // Try index.html fallback for directories. filePath may be the
+        // root itself ("/" request), so join with a separator.
+        indexPath := filePath
+        if !str.EndsWith(indexPath, "/") {
+            indexPath = str.Concat(indexPath, "/")
+        }
+        indexPath = str.Concat(indexPath, "index.html")
+        // index.html may itself be a symlink escaping root — recheck
+        // containment on the canonical fallback target.
+        idxAbs := path.Abs(indexPath)
+        if idxAbs != rootDir && !str.StartsWith(idxAbs, str.Concat(rootDir, "/")) {
+            w.WriteHeader(403)
+            w.Write("Forbidden")
+            return
+        }
+        f, openErr = fs.Open(idxAbs, "rb")
         if openErr.message != "" {
             w.WriteHeader(404)
             w.Write("Not Found")
             return
         }
-        filePath = indexPath
+        filePath = idxAbs
     }
 
     // Size the buffer from fs.Stat; grow on demand if it under-reports.
@@ -136,9 +177,15 @@ fn serveFile(rootDir: string, req: types.Request, w: *types.ResponseWriter) {
 // FileServer returns a Handler that serves files from rootDir. The root
 // is captured by the returned closure, so multiple file servers with
 // different roots can be mounted on one router (comp_error.md #60).
-// Directory traversal attempts (paths containing "..") are rejected.
+// rootDir is canonicalized once here (realpath; "" maps to the cwd) —
+// request paths that escape it via "..", "//", or symlinks get 403.
 pub fn FileServer(rootDir: string) -> types.Handler {
+    root := rootDir
+    if str.Len(root) == 0 {
+        root = "."
+    }
+    root = path.Abs(root)
     return fn(req: types.Request, w: *types.ResponseWriter) {
-        serveFile(rootDir, req, w)
+        serveFile(root, req, w)
     }
 }

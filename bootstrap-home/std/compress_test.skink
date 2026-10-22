@@ -107,3 +107,59 @@ pub fn TestInflaterEmptyData() {
         Errorf("Inflater empty data should return empty output")
     }
 }
+
+// --- VULN-13 security regressions ---
+
+// packedLen reads the compressed-length field out of a Compress() blob
+// so callers can supply the real byte length to DecompressBuf — the
+// blob contains NUL bytes so str.Len cannot report it.
+fn packedLen(packed: string) -> int {
+    clen := int(packed[4]) | (int(packed[5]) << 8) | (int(packed[6]) << 16) | (int(packed[7]) << 24)
+    return 8 + clen
+}
+
+// TestDecompressBufRoundtrip guards VULN-13: the length-explicit API
+// round-trips Compress output.
+pub fn TestDecompressBufRoundtrip() {
+    src := "hello hello hello hello"
+    packed, err := compress.Compress(src)
+    testing.AssertTrue(err.message == "", "compress ok")
+    back, derr := compress.DecompressBuf(packed, packedLen(packed))
+    testing.AssertTrue(derr.message == "", "DecompressBuf ok")
+    testing.AssertEqualString(src, back, "DecompressBuf roundtrip")
+}
+
+// TestDecompressBufRejectsShort guards VULN-13: fewer than 8 input
+// bytes must be an error, not an out-of-bounds header read.
+pub fn TestDecompressBufRejectsShort() {
+    _, err := compress.DecompressBuf("abc", 3)
+    testing.AssertTrue(err.message != "", "short input must error")
+    _, err2 := compress.DecompressBuf("abcdefg", 7)
+    testing.AssertTrue(err2.message != "", "7-byte input must error")
+}
+
+// TestDecompressBufRejectsBadLength guards VULN-13: a header claiming
+// more compressed bytes than the caller's length must error instead of
+// reading past the buffer.
+pub fn TestDecompressBufRejectsBadLength() {
+    src := "hello hello hello hello"
+    packed, err := compress.Compress(src)
+    testing.AssertTrue(err.message == "", "compress ok")
+    total := packedLen(packed)
+    // Claim fewer bytes than the blob actually carries: clen > len-8
+    // must be rejected.
+    _, derr := compress.DecompressBuf(packed, total - 1)
+    testing.AssertTrue(derr.message != "", "truncated length must error")
+}
+
+// TestDecompressBufRejectsBomb guards VULN-13: a header claiming a
+// giant original size must be rejected before any multi-hundred-MB
+// "decompression bomb" allocation is attempted.
+pub fn TestDecompressBufRejectsBomb() {
+    packed, err := compress.Compress("tiny")
+    testing.AssertTrue(err.message == "", "compress ok")
+    // Corrupt origSize to ~2 GiB (little-endian byte 3 = 0x7F).
+    packed[3] = 127
+    _, derr := compress.DecompressBuf(packed, packedLen(packed))
+    testing.AssertTrue(derr.message != "", "origSize bomb must error")
+}

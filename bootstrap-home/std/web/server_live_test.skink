@@ -693,3 +693,113 @@ pub fn TestLiveMaxConns() {
     conn1.Close()
     conn2.Close()
 }
+
+// --- VULN-14 regression tests: Content-Length overflow, CL+TE
+// smuggling, exact-token Transfer-Encoding matching, and the chunked
+// capacity off-by-one. ---
+
+// TestLiveContentLengthOverflow guards VULN-14: a Content-Length larger
+// than the 32-bit int the parser used to produce must be rejected
+// (413 over the 1 MiB limit) rather than wrapping to a tiny read bound.
+pub fn TestLiveContentLengthOverflow() {
+    r := router.NewRouter()
+    r.Post("/echo", liveEcho)
+    s := server.NewServer(18130, &r)
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18130)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    // 2^32+1: parsed as i64 now; exceeds maxRequestBytes -> 413.
+    conn.Send("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 4294967297\r\n\r\n")
+    resp := liveReadResp(&cl)
+    testing.AssertContains(resp, "HTTP/1.1 413", "overflowing Content-Length rejected")
+    conn.Close()
+}
+
+// TestLiveContentLengthHuge guards VULN-14: a digit string that
+// overflows even int64 must be a clean 400, not a wraparound.
+pub fn TestLiveContentLengthHuge() {
+    r := router.NewRouter()
+    r.Post("/echo", liveEcho)
+    s := server.NewServer(18131, &r)
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18131)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    conn.Send("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 99999999999999999999\r\n\r\n")
+    resp := liveReadResp(&cl)
+    testing.AssertContains(resp, "HTTP/1.1 400", "i64-overflow Content-Length rejected")
+    conn.Close()
+}
+
+// TestLiveContentLengthMalformed guards VULN-14: non-digit
+// Content-Length values are a parse error (400), never a silent 0.
+pub fn TestLiveContentLengthMalformed() {
+    r := router.NewRouter()
+    r.Post("/echo", liveEcho)
+    s := server.NewServer(18132, &r)
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18132)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    conn.Send("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 12x4\r\n\r\n")
+    resp := liveReadResp(&cl)
+    testing.AssertContains(resp, "HTTP/1.1 400", "malformed Content-Length rejected")
+    conn.Close()
+}
+
+// TestLiveCLAndTE guards VULN-14: Content-Length combined with
+// Transfer-Encoding: chunked is ambiguous framing — the classic
+// request-smuggling vector — and must be rejected with 400.
+pub fn TestLiveCLAndTE() {
+    r := router.NewRouter()
+    r.Post("/echo", liveEcho)
+    s := server.NewServer(18133, &r)
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18133)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    conn.Send("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n")
+    resp := liveReadResp(&cl)
+    testing.AssertContains(resp, "HTTP/1.1 400", "CL+TE request rejected")
+    conn.Close()
+}
+
+// TestLiveChunkedPowerOfTwo guards VULN-14: a chunked body whose total
+// lands exactly on the growth boundary used to overflow the body buffer
+// by one byte when the NUL terminator was appended. ASan builds catch
+// the former overflow; functionally the echo must return all 1024
+// bytes.
+pub fn TestLiveChunkedPowerOfTwo() {
+    r := router.NewRouter()
+    r.Post("/echo", liveEcho)
+    s := server.NewServer(18134, &r)
+    spawn liveServe(&s)
+
+    conn, ok := liveDial(18134)
+    cl := liveClientInit(conn)
+    if !ok {
+        testing.FailNow()
+    }
+    // Build a 1024-byte chunk body: "400\r\n" + 1024 bytes + "\r\n0\r\n\r\n".
+    body := str.Repeat("A", 1024)
+    req := str.Concat("POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n400\r\n", body)
+    req = str.Concat(req, "\r\n0\r\n\r\n")
+    conn.Send(req)
+    resp := liveReadResp(&cl)
+    testing.AssertContains(resp, "HTTP/1.1 200", "power-of-two chunked status")
+    testing.AssertEqualInt(1024, str.Len(liveRespBody(resp)), "power-of-two chunked body")
+    conn.Close()
+}

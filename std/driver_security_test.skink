@@ -1,0 +1,161 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/driver_security_test.skink
+// Purpose: Security regression tests for the compiler driver and
+//          emitter diagnostics:
+//            VULN-01 — the driver used to shell out to clang via
+//              system() with raw argv interpolation; a source file or
+//              -o name containing `;`, `$()`, or spaces executed shell
+//              commands. The driver now execs clang via argv arrays and
+//              writes the intermediate .ll into an O_EXCL temp file.
+//            VULN-10 — DWARF DIFile metadata interpolated unescaped
+//              directory/file names; a path containing `"` injected
+//              arbitrary LLVM metadata. Paths are now escaped.
+//          Runs standalone (module main); run_tests.sh exports SKINK_BIN.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/os"
+import "std/fs"
+import "std/str"
+import "std/io"
+import "std/strconv"
+
+extern fn Skink_fs_mktemp(prefix: string, suffix: string) -> string
+
+var dsFailures = 0
+
+// dsFail records a failed check and prints a diagnostic.
+fn dsFail(msg: string) {
+    dsFailures = dsFailures + 1
+    println(str.Concat("FAIL: ", msg))
+}
+
+// dsCheck asserts cond, reporting msg on failure.
+fn dsCheck(cond: bool, msg: string) {
+    if !cond {
+        dsFail(msg)
+    }
+}
+
+// dsBin returns the compiler under test.
+fn dsBin() -> string {
+    b := os.Getenv("SKINK_BIN")
+    if str.Len(b) > 0 {
+        return b
+    }
+    return "./skink"
+}
+
+// dsCompile compiles srcPath to outPath and returns the compiler's
+// exit code. Output is discarded.
+fn dsCompile(srcPath: string, outPath: string) -> int {
+    var args []string
+    args = append(args, dsBin())
+    args = append(args, "-o")
+    args = append(args, outPath)
+    args = append(args, srcPath)
+    _, rc := os.ExecWithOutput(args)
+    return rc
+}
+
+// dsEmitLL runs `skink -g -emit-ll src` and returns its stdout + rc.
+fn dsEmitLL(srcPath: string) -> (string, int) {
+    var args []string
+    args = append(args, dsBin())
+    args = append(args, "-g")
+    args = append(args, "-emit-ll")
+    args = append(args, srcPath)
+    return os.ExecWithOutput(args)
+}
+
+// TestSemicolonFileName (VULN-01): a source path containing
+// `;touch <marker>` must compile literally — under the old system()
+// pipeline the shell would have run `touch` and created the marker in
+// the working directory. The marker is a bare filename (no '/') so the
+// source path itself stays a single valid path.
+fn testSemicolonFileName() {
+    marker := "dsec_pwned_marker_1"
+    fs.Remove(marker)
+    src := str.Concat(Skink_fs_mktemp("dsec_a", ""), ";touch ")
+    src = str.Concat(src, marker)
+    src = str.Concat(src, ";.skink")
+    io.WriteFile(src, "module main\nfn main() -> int { return 0 }\n")
+    out := Skink_fs_mktemp("dsec_out_", "")
+    rc := dsCompile(src, out)
+    dsCheck(rc == 0, str.Concat("compile of ;-containing path failed rc=", strconv.Itoa(rc)))
+    dsCheck(!fs.Exists(marker), "shell injection via source filename created marker file")
+    fs.Remove(src)
+    fs.Remove(out)
+}
+
+// TestOutputInjection (VULN-01): a `-o` value containing shell
+// metacharacters must produce a file with that literal name, not run
+// the embedded command.
+fn testOutputInjection() {
+    src := Skink_fs_mktemp("dsec_src_", ".skink")
+    io.WriteFile(src, "module main\nfn main() -> int { return 0 }\n")
+    marker := "dsec_pwned_marker_2"
+    fs.Remove(marker)
+    // The -o value carries a literal command substitution. It must not
+    // contain '/' or the output path would traverse into a missing dir
+    // even without a shell — the marker is a bare filename.
+    out := str.Concat(Skink_fs_mktemp("dsec_o", ""), "$(touch ")
+    out = str.Concat(out, marker)
+    out = str.Concat(out, ")")
+    rc := dsCompile(src, out)
+    dsCheck(rc == 0, str.Concat("compile with metachar -o failed rc=", strconv.Itoa(rc)))
+    dsCheck(!fs.Exists(marker), "shell injection via -o argument created marker file")
+    fs.Remove(src)
+    fs.Remove(out)
+}
+
+// TestDebugMetadataEscaping (VULN-10): compiling a file inside a
+// directory whose name contains a double quote must emit escaped IR
+// (\\\") rather than a raw quote that would break out of the DIFile
+// filename string.
+fn testDebugMetadataEscaping() {
+    dir := Skink_fs_mktemp("dsec_q", "")
+    fs.Remove(dir)
+    dir = str.Concat(dir, "_q\"q")
+    fs.Mkdir(dir)
+    src := str.Concat(dir, "/p.skink")
+    io.WriteFile(src, "module main\nfn main() -> int { return 0 }\n")
+    ir, rc := dsEmitLL(src)
+    dsCheck(rc == 0, "emit-ll on quoted path failed")
+    // The escaped form \\\" must appear wherever the directory name is
+    // embedded in debug metadata; a raw unescaped quote breaks the IR.
+    dsCheck(str.Contains(ir, "\\\""), "DIFile metadata did not escape quote in path")
+    fs.Remove(src)
+    fs.Remove(dir)
+}
+
+fn main() -> int {
+    testSemicolonFileName()
+    testOutputInjection()
+    testDebugMetadataEscaping()
+    if dsFailures > 0 {
+        println(str.Concat("driver_security_test: ", strconv.Itoa(dsFailures)))
+        return 1
+    }
+    println("driver_security_test: all checks passed")
+    return 0
+}

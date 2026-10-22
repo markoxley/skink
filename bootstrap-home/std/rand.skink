@@ -29,22 +29,32 @@ module rand
 // C standard library functions.
 extern fn rand() -> int
 extern fn srand(seed: int)
-extern fn time(t: *int64) -> int64
+// Skink_rand_seed_once seeds libc rand() exactly once from OS entropy
+// under a pthread_once guard — replacing the old "srand(time) on first
+// use" path, which raced on the seeded flag and produced identical
+// sequences for processes started in the same second (VULN-27).
+extern fn Skink_rand_seed_once()
 
-// seeded tracks whether the generator has been seeded.
+// seeded tracks whether an explicit Seed() call already initialized the
+// generator, in which case seedOnce must not clobber the reproducible
+// sequence with an entropy reseed.
 var seeded: bool
 
-// seedOnce auto-seeds from the system clock on first use.
+// seedOnce auto-seeds from OS entropy on first use — exactly once, even
+// under concurrent callers (the once-guard lives in the C runtime).
 fn seedOnce() {
     if !seeded {
-        srand(int(time(nil)))
+        Skink_rand_seed_once()
         seeded = true
     }
 }
 
 // Seed initializes the random number generator with the given seed.
-// Use this for reproducible sequences (e.g. in tests).
+// Use this for reproducible sequences (e.g. in tests). The pthread_once
+// is consumed first so a racing first-use caller on another thread can
+// never entropy-reseed afterwards and clobber the explicit seed.
 pub fn Seed(s: int64) {
+    Skink_rand_seed_once()
     srand(int(s))
     seeded = true
 }

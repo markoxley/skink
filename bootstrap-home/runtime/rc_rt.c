@@ -819,6 +819,38 @@ void *Skink_mem_calloc(int64_t count, int64_t size) {
   return Skink_rc_alloc((int64_t)total);
 }
 
+// Skink_panic is provided by panic_rt.c.
+extern void Skink_panic(char *msg);
+
+// Skink_rc_alloc_array allocates an RC-managed array of count elements of
+// the given size, panicking on negative counts, multiplication overflow,
+// or OOM rather than returning NULL. Used by emitters that would
+// otherwise dereference an unchecked allocation (VULN-03).
+void *Skink_rc_alloc_array(int64_t count, int64_t size) {
+  size_t total;
+  if (!checked_byte_count(count, size, &total)) {
+    Skink_panic((char *)"allocation size overflow");
+    return NULL;
+  }
+  void *p = Skink_rc_alloc((int64_t)total);
+  if (!p) {
+    Skink_panic((char *)"out of memory");
+  }
+  return p;
+}
+
+// Skink_rc_is_registered reports whether ptr is a live RC/registry block.
+// reflect_rt.c uses this to recognize heap-allocated string values under
+// type erasure instead of guessing from page mappings alone (VULN-17).
+int Skink_rc_is_registered(const void *ptr) {
+  if (!ptr)
+    return 0;
+  pthread_rwlock_rdlock(&rc_lock);
+  RCEntry *e = rc_table_find((void *)ptr);
+  pthread_rwlock_unlock(&rc_lock);
+  return e != NULL ? 1 : 0;
+}
+
 // Skink_mem_realloc resizes a block, copying existing data and releasing the old block.
 void *Skink_mem_realloc(void *ptr, int64_t size) {
   if (size < 0 || (uint64_t)size > (uint64_t)SIZE_MAX)

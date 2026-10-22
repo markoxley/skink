@@ -40,6 +40,26 @@ extern fn Skink_tls_write(ssl: int64, buf: string, len: int) -> int
 extern fn Skink_tls_close(ssl: int64)
 extern fn Skink_set_socket_timeout(fd: int, timeoutMs: int) -> int
 
+// maxResponseBytes caps how large a server response may grow before the
+// read loop aborts — a hostile or buggy server could otherwise stream
+// unbounded data and exhaust memory, and bufSize * 2 overflowed int32
+// past 1 GiB (VULN-15).
+const maxResponseBytes = 67108864
+
+// headerClean reports whether s is safe to embed in an HTTP request
+// line or header value: a caller-controlled CR/LF would inject extra
+// headers or whole requests into the stream (VULN-15).
+fn headerClean(s: string) -> bool {
+    n := int(libc.strlen(s))
+    for i := 0; i < n; i = i + 1 {
+        c := int(s[i])
+        if c == 13 || c == 10 {
+            return false
+        }
+    }
+    return true
+}
+
 // Response holds an HTTP response.
 pub struct Response {
     status: int  // the status
@@ -106,6 +126,9 @@ pub struct Client {
     // Get performs an HTTP GET request.
     pub fn Get(self: Client, url: string) -> (Response, errors.Error) {
         host, path, port, useTLS := parseURL(url)
+        if !headerClean(host) || !headerClean(path) {
+            return Response{status: 0, body: ""}, errors.New("invalid characters in URL")
+        }
         // Delegate to TLS path if the URL uses https://
         if useTLS {
             return self.doTLSGet(host, path, port)
@@ -120,15 +143,26 @@ pub struct Client {
         request = str.Concat(request, host)
         request = str.Concat(request, "\r\nConnection: close\r\n\r\n")
         conn.Send(request)
-        // Read the full response, growing the buffer as needed.
+        // Read the full response, growing the buffer up to a cap —
+        // unbounded growth let a hostile server exhaust memory (VULN-15).
         bufSize := 8192
         buf := libc.malloc(bufSize)
         total := 0
         for {
             if total >= bufSize - 1 {
-                // Double the buffer when we are about to overflow.
+                if bufSize >= maxResponseBytes {
+                    libc.free(buf)
+                    conn.Close()
+                    return Response{status: 0, body: ""}, errors.New("response too large")
+                }
+                newBuf := libc.realloc(buf, bufSize * 2)
+                if int64(newBuf) == 0 {
+                    libc.free(buf)
+                    conn.Close()
+                    return Response{status: 0, body: ""}, errors.New("out of memory")
+                }
+                buf = newBuf
                 bufSize = bufSize * 2
-                buf = libc.realloc(buf, bufSize)
             }
             n := conn.Read(string(int64(buf) + int64(total)), bufSize - total - 1)
             if n <= 0 {
@@ -178,14 +212,28 @@ pub struct Client {
         request = str.Concat(request, "\r\nConnection: close\r\n\r\n")
         Skink_tls_write(ssl, request, str.Len(request))
 
-        // Read the full TLS-encrypted response, growing the buffer as needed.
+        // Read the full TLS-encrypted response, growing the buffer up to
+        // the same cap as the plain path (VULN-15).
         bufSize := 8192
         buf := libc.malloc(bufSize)
         total := 0
         for {
             if total >= bufSize - 1 {
+                if bufSize >= maxResponseBytes {
+                    libc.free(buf)
+                    Skink_tls_close(ssl)
+                    conn.Close()
+                    return Response{status: 0, body: ""}, errors.New("response too large")
+                }
+                newBuf := libc.realloc(buf, bufSize * 2)
+                if int64(newBuf) == 0 {
+                    libc.free(buf)
+                    Skink_tls_close(ssl)
+                    conn.Close()
+                    return Response{status: 0, body: ""}, errors.New("out of memory")
+                }
+                buf = newBuf
                 bufSize = bufSize * 2
-                buf = libc.realloc(buf, bufSize)
             }
             n := Skink_tls_read(ssl, string(int64(buf) + int64(total)), bufSize - total - 1)
             if n <= 0 {
@@ -216,6 +264,9 @@ pub struct Client {
     // Post performs an HTTP POST request.
     pub fn Post(self: Client, url: string, contentType: string, bodyData: string) -> (Response, errors.Error) {
         host, path, port, useTLS := parseURL(url)
+        if !headerClean(host) || !headerClean(path) || !headerClean(contentType) {
+            return Response{status: 0, body: ""}, errors.New("invalid characters in request")
+        }
         // Delegate to TLS path if the URL uses https://
         if useTLS {
             return self.doTLSPost(host, path, port, contentType, bodyData)
@@ -236,14 +287,26 @@ pub struct Client {
         request = str.Concat(request, "\r\nConnection: close\r\n\r\n")
         request = str.Concat(request, bodyData)
         conn.Send(request)
-        // Read the full response, growing the buffer as needed.
+        // Read the full response, growing the buffer up to a cap —
+        // unbounded growth let a hostile server exhaust memory (VULN-15).
         bufSize := 8192
         buf := libc.malloc(bufSize)
         total := 0
         for {
             if total >= bufSize - 1 {
+                if bufSize >= maxResponseBytes {
+                    libc.free(buf)
+                    conn.Close()
+                    return Response{status: 0, body: ""}, errors.New("response too large")
+                }
+                newBuf := libc.realloc(buf, bufSize * 2)
+                if int64(newBuf) == 0 {
+                    libc.free(buf)
+                    conn.Close()
+                    return Response{status: 0, body: ""}, errors.New("out of memory")
+                }
+                buf = newBuf
                 bufSize = bufSize * 2
-                buf = libc.realloc(buf, bufSize)
             }
             n := conn.Read(string(int64(buf) + int64(total)), bufSize - total - 1)
             if n <= 0 {
@@ -291,14 +354,28 @@ pub struct Client {
         request = str.Concat(request, bodyData)
         Skink_tls_write(ssl, request, str.Len(request))
 
-        // Read the full TLS-encrypted response, growing the buffer as needed.
+        // Read the full TLS-encrypted response, growing the buffer up to
+        // the same cap as the plain path (VULN-15).
         bufSize := 8192
         buf := libc.malloc(bufSize)
         total := 0
         for {
             if total >= bufSize - 1 {
+                if bufSize >= maxResponseBytes {
+                    libc.free(buf)
+                    Skink_tls_close(ssl)
+                    conn.Close()
+                    return Response{status: 0, body: ""}, errors.New("response too large")
+                }
+                newBuf := libc.realloc(buf, bufSize * 2)
+                if int64(newBuf) == 0 {
+                    libc.free(buf)
+                    Skink_tls_close(ssl)
+                    conn.Close()
+                    return Response{status: 0, body: ""}, errors.New("out of memory")
+                }
+                buf = newBuf
                 bufSize = bufSize * 2
-                buf = libc.realloc(buf, bufSize)
             }
             n := Skink_tls_read(ssl, string(int64(buf) + int64(total)), bufSize - total - 1)
             if n <= 0 {

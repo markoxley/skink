@@ -33,8 +33,18 @@ run_one() {
     f="$1"
     dir=$(dirname "$f")
     base=$(basename "$f" .skink)
-    main=$dir/__skink_bench_main.skink
-    bin=$dir/__skink_bench_bin
+
+    # The basename is interpolated into generated Skink source
+    # (import "$base" and $base.$fn()); anything outside the identifier
+    # grammar would inject code into the compiled bench main (VULN-23).
+    case "$base" in
+        *[!A-Za-z0-9_]* | "" | [0-9]*)
+            echo "SKIP $f (unsafe module name '$base')"
+            return 0
+            ;;
+    esac
+    main=$dir/__skink_bench_main_$$.skink
+    bin=$dir/__skink_bench_bin_$$
 
     fns=$(grep -oE '^pub fn (Bench[A-Za-z0-9_]+)' "$f" | sed 's/pub fn //' | tr '\n' ' ')
     if [ -z "$fns" ]; then

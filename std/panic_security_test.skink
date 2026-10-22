@@ -1,0 +1,113 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/panic_security_test.skink
+// Purpose: Security regression tests for the panic/defer machinery:
+//            VULN-06 — the emitter used to stack-allocate a fixed
+//              264-byte buffer for setjmp, overflowing on platforms
+//              where sizeof(jmp_buf) > 264 (glibc arm64: 312). Handler
+//              storage is now a runtime-owned growable jmp_buf pool.
+//            VULN-07 — the old pool capped at 64 handlers: pushing a
+//              65th silently failed while the return path still popped,
+//              desynchronizing panic_depth and longjmp'ing into a dead
+//              frame.
+//          Guards: recursion deeper than the old 64-handler cap with a
+//          defer in every frame must unwind cleanly, run every defer,
+//          recover at the outermost frame, and leave the handler stack
+//          consistent for subsequent panics.
+//          Runs standalone (module main).
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/str"
+import "std/strconv"
+
+var psFailures = 0
+
+// psCheck asserts cond, printing msg on failure.
+fn psCheck(cond: bool, msg: string) {
+    if !cond {
+        psFailures = psFailures + 1
+        println(str.Concat("FAIL: ", msg))
+    }
+}
+
+// psDeferRan counts how many defer bodies executed during the unwind.
+var psDeferRan = 0
+
+// psCaught receives the panic message recovered by psOuter.
+var psCaught: string
+
+// psDeep recurses to depth n with a defer in every frame — each frame
+// installs a panic-handler slot, so depth 200 exercises more than the
+// old MAX_PANIC_DEPTH=64 (VULN-07) and proves the pool grows (VULN-06).
+fn psDeep(n: int) {
+    defer fn() { psDeferRan = psDeferRan + 1 }()
+    if n <= 0 {
+        panic("deep boom")
+    }
+    psDeep(n - 1)
+}
+
+// psSave captures a recovered panic message.
+fn psSave(s: string) {
+    psCaught = s
+}
+
+// psOuter installs the outermost recoverable frame.
+fn psOuter(n: int) {
+    defer fn() { psSave(recover()) }()
+    psDeep(n)
+}
+
+// psSecond proves the handler stack is still consistent after the deep
+// unwind: a second panic must recover normally rather than desync.
+var psSecondMsg: string
+
+fn psSaveSecond(s: string) {
+    psSecondMsg = s
+}
+
+fn psBoom() {
+    panic("second")
+}
+
+fn psRound2() {
+    defer fn() { psSaveSecond(recover()) }()
+    psBoom()
+}
+
+fn main() -> int {
+    psDeferRan = 0
+    psCaught = ""
+    psOuter(200)
+    psCheck(str.Equal(psCaught, "deep boom"), str.Concat("outer recover got: ", psCaught))
+    // 201 deferred frames: psDeep(200) down through psDeep(0) inclusive.
+    psCheck(psDeferRan == 201, "defers ran " + strconv.Itoa(psDeferRan) + " != 201")
+    psSecondMsg = ""
+    psRound2()
+    psCheck(str.Equal(psSecondMsg, "second"), "handler stack desynced after deep unwind")
+    if psFailures > 0 {
+        println(str.Concat("panic_security_test: ", strconv.Itoa(psFailures)))
+        return 1
+    }
+    println("panic_security_test: all checks passed")
+    return 0
+}

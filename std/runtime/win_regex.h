@@ -349,10 +349,15 @@ static int wr_match(const char *pat, const char *text, int newline, int icase) {
     // Handle grouping
     if (*pat == '(') {
         const char *close = wr_find_close_paren(pat + 1);
-        int group_len = (close - 1) - (pat + 1);
+        // wr_find_close_paren returns the NUL position when the group is
+        // unclosed; then close[-1] != ')' and group_len would underflow
+        // to -1, making memcpy copy (size_t)-1 bytes (VULN-08).
+        if (close == pat + 1 || close[-1] != ')') return -1;
+        int group_len = (int)((close - 1) - (pat + 1));
+        if (group_len < 0) return -1;
         char *group = (char *)malloc(group_len + 1);
         if (!group) return -1;
-        memcpy(group, pat + 1, group_len);
+        memcpy(group, pat + 1, (size_t)group_len);
         group[group_len] = '\0';
 
         // Check for quantifier on group
@@ -386,25 +391,30 @@ static int wr_match(const char *pat, const char *text, int newline, int icase) {
             t += gn;
             count++;
         }
-        free(group);
 
-        if (count < qmin) return -1;
+        if (count < qmin) { free(group); return -1; }
 
-        // Backtrack
+        // Backtrack. group must stay alive here — the backtrack loop
+        // re-matches it; freeing before this block was a
+        // use-after-free (VULN-08).
+        int result = -1;
         while (count >= qmin) {
             int rn = wr_match(after, t, newline, icase);
-            if (rn >= 0) return (int)(t - text) + rn;
+            if (rn >= 0) { result = (int)(t - text) + rn; break; }
             if (count == 0) break;
             count--;
             // Backtrack group: re-match group count times from text
             t = text;
+            int ok = 1;
             for (int i = 0; i < count; i++) {
                 int gn = wr_match(group, t, newline, icase);
-                if (gn < 0) return -1;
+                if (gn < 0) { ok = 0; break; }
                 t += gn;
             }
+            if (!ok) break;
         }
-        return -1;
+        free(group);
+        return result;
     }
 
     // Handle escape

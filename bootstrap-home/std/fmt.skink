@@ -361,37 +361,23 @@ fn formatArg(verb: int, width: int, precision: int, arg: Arg) -> string {
     return raw
 }
 
+// Skink_format_double_prec is the runtime snprintf-probed %.*f
+// formatter — it sizes the output exactly, so any clamped precision is
+// safe (the fixed 64-byte buffer overflowed at precision >= 62, and the
+// manual digit loop overflowed int64 for large precisions — VULN-12).
+extern fn Skink_format_double_prec(v: float, precision: int) -> string
+
 // formatFloatPrec formats a float with the given number of decimal places.
+// precision is clamped to [0, 340]: it sizes the output buffer, so an
+// unbounded value overflowed the old fixed 64-byte buffer (VULN-12).
 fn formatFloatPrec(f: float, precision: int) -> string {
-    buf := libc.malloc(64)
-    pos := 0
-    // Handle the sign first, then work with the absolute value.
-    if f < 0.0 {
-        buf[pos] = 45 // '-'
-        pos = pos + 1
-        f = -f
+    if precision < 0 {
+        precision = 0
     }
-    intPart := int(f)
-    intStr := Itoa(intPart)
-    intLen := int(libc.strlen(intStr))
-    libc.memcpy(string(int64(buf) + int64(pos)), intStr, intLen)
-    pos = pos + intLen
-    libc.free(intStr)
-    if precision > 0 {
-        buf[pos] = 46 // '.'
-        pos = pos + 1
-        // Extract each fractional digit by multiplying and truncating.
-        frac := f - float(intPart)
-        for i := 0; i < precision; i = i + 1 {
-            frac = frac * 10.0
-            digit := int(frac)
-            buf[pos] = 48 + digit
-            pos = pos + 1
-            frac = frac - float(digit)
-        }
+    if precision > 340 {
+        panic("fmt: float precision too large")
     }
-    buf[pos] = 0
-    return buf
+    return Skink_format_double_prec(f, precision)
 }
 
 // formatHex converts an integer to a lowercase hexadecimal string.

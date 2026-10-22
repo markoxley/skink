@@ -22,6 +22,7 @@
 // limitations under the License.
 
 #include <stdint.h>
+#include <string.h>
 
 // ---------------------------------------------------------------------------
 // Safe string detection for erased generic values.
@@ -41,15 +42,31 @@
 // correct even when an integer value happens to land in a mapped page.
 // ---------------------------------------------------------------------------
 
+// Skink_rc_is_registered reports whether a pointer is a live RC-managed
+// block (heap strings, slices). Declared in rc_rt.c (VULN-17).
+extern int Skink_rc_is_registered(const void *ptr);
+
 #if defined(__unix__) || defined(__APPLE__)
+#include <pthread.h>
+#include <setjmp.h>
+#include <signal.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
-// skink_is_mapped checks if a pointer points to readable memory using mincore (POSIX).
-static int skink_is_mapped(const void *p) {
+// skink_page_size returns the OS memory page size, cached after first call.
+static long skink_page_size(void) {
   static long ps = 0;
   if (ps == 0)
     ps = sysconf(_SC_PAGESIZE);
+  return ps;
+}
+
+// skink_is_mapped checks if a pointer points to resident memory using
+// mincore (POSIX). Note: residency is NOT readability — a PROT_NONE
+// guard page is resident but faults on access (VULN-17), so callers
+// must combine this with skink_byte_readable before dereferencing.
+static int skink_is_mapped(const void *p) {
+  long ps = skink_page_size();
   if (ps <= 0)
     return 0;
   uintptr_t page_mask = ~((uintptr_t)ps - 1);
@@ -69,21 +86,102 @@ static int skink_is_mapped(const void *p) {
   cached_result = r;
   return r;
 }
+
+// Fault-protected byte probe. mincore tells us a page is resident, not
+// that it is readable; to verify readability we read one byte inside a
+// sigsetjmp guard. The process-wide SIGSEGV/SIGBUS handlers longjmp
+// back only when this thread's probe flag is set — faults on other
+// threads (or outside a probe) restore the default disposition and
+// re-raise so genuine crashes still crash (VULN-17).
+static __thread sigjmp_buf skink_probe_jb;
+static __thread volatile sig_atomic_t skink_probe_active = 0;
+
+static void skink_probe_handler(int sig) {
+  if (skink_probe_active) {
+    skink_probe_active = 0;
+    siglongjmp(skink_probe_jb, 1);
+  }
+  signal(sig, SIG_DFL);
+  raise(sig);
+}
+
+static void skink_probe_install(void) {
+  struct sigaction sa;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = skink_probe_handler;
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGSEGV, &sa, NULL);
+  sigaction(SIGBUS, &sa, NULL);
+}
+
+// skink_byte_readable returns 1 if reading *p does not fault.
+static int skink_byte_readable(const void *p) {
+  static pthread_once_t once = PTHREAD_ONCE_INIT;
+  pthread_once(&once, skink_probe_install);
+  if (sigsetjmp(skink_probe_jb, 1) == 0) {
+    skink_probe_active = 1;
+    volatile unsigned char c = *(const volatile unsigned char *)p;
+    (void)c;
+    skink_probe_active = 0;
+    return 1;
+  }
+  return 0;
+}
+
+// skink_probe_span returns how many bytes may be safely scanned from p
+// without leaving its (now verified readable) page — protects are
+// page-granular so the whole page shares the probe result.
+static size_t skink_probe_span(const void *p) {
+  long ps = skink_page_size();
+  return (size_t)ps - ((uintptr_t)p & (uintptr_t)(ps - 1));
+}
 #elif defined(_WIN32)
 #include <windows.h>
 
-// skink_is_mapped checks if a pointer points to committed memory using VirtualQuery (Windows).
+// skink_is_mapped checks if a pointer points to committed, readable
+// memory using VirtualQuery (Windows). Unlike POSIX mincore,
+// VirtualQuery reports the real protection flags, so PROT_NONE-style
+// pages (PAGE_NOACCESS / PAGE_GUARD) are rejected here (VULN-17).
 static int skink_is_mapped(const void *p) {
   MEMORY_BASIC_INFORMATION mbi;
   if (VirtualQuery(p, &mbi, sizeof(mbi)) == 0)
     return 0;
-  return (mbi.State == MEM_COMMIT) ? 1 : 0;
+  if (mbi.State != MEM_COMMIT)
+    return 0;
+  if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))
+    return 0;
+  return (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                         PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                         PAGE_EXECUTE_WRITECOPY)) != 0;
+}
+
+// skink_byte_readable mirrors the POSIX fault-probe contract; on
+// Windows the protection check above already guarantees readability.
+static int skink_byte_readable(const void *p) {
+  return skink_is_mapped(p);
+}
+
+// skink_probe_span returns bytes safely scannable from p: the remainder
+// of the VirtualQuery region shares one protection value.
+static size_t skink_probe_span(const void *p) {
+  MEMORY_BASIC_INFORMATION mbi;
+  if (VirtualQuery(p, &mbi, sizeof(mbi)) == 0)
+    return 0;
+  return (size_t)((char *)mbi.BaseAddress + mbi.RegionSize - (char *)p);
 }
 #else
-// skink_is_mapped is a fallback that always returns 0 (treats all values as integers).
+// Fallbacks treat all values as integers.
 static int skink_is_mapped(const void *p) {
   (void)p;
-  return 0; /* fallback: treat all values as integers */
+  return 0;
+}
+static int skink_byte_readable(const void *p) {
+  (void)p;
+  return 0;
+}
+static size_t skink_probe_span(const void *p) {
+  (void)p;
+  return 0;
 }
 #endif
 
@@ -120,11 +218,23 @@ static int skink_streq(const char *sa, const char *sb) {
   return *sa == *sb;
 }
 
-// Heuristic: does the erased i8* value look like a readable string pointer?
+// Heuristic: does the erased i8* value look like a readable string
+// pointer? RC-registered blocks are trusted outright; otherwise the
+// page must be resident AND verifiably readable (PROT_NONE guard pages
+// pass mincore but fault on read — VULN-17), and a NUL terminator must
+// exist within the readable span so the subsequent strcmp/hash cannot
+// run off into unverified memory.
 static int skink_looks_like_string(const void *p) {
   if (!p)
     return 0;
-  return skink_is_mapped(p);
+  if (Skink_rc_is_registered(p))
+    return 1;
+  if (!skink_is_mapped(p) || !skink_byte_readable(p))
+    return 0;
+  size_t span = skink_probe_span(p);
+  if (span == 0)
+    return 0;
+  return memchr(p, 0, span) != NULL;
 }
 
 // reflect_get_bool reads a boolean value at the given offset from a struct address.

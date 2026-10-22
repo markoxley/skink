@@ -1,0 +1,17 @@
+// expect: cyclic
+// VULN-19 regression: mutually recursive value-type struct fields have
+// infinite size and must be rejected at check time instead of sending
+// layout/codegen into unbounded recursion.
+module main
+
+struct CycA {
+    b: CycB
+}
+
+struct CycB {
+    a: CycA
+}
+
+fn main() -> int {
+    return 0
+}

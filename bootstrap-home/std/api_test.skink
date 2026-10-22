@@ -162,3 +162,16 @@ pub fn TestClientTimeoutUsed() {
         Errorf("timeoutMs should be 5000")
     }
 }
+
+// --- VULN-15 security regression ---
+
+// TestCRLFInjectionRejected guards VULN-15: host/path/contentType
+// strings containing CR/LF were interpolated into the request headers
+// unfiltered, allowing HTTP request splitting. They are now rejected
+// before any socket I/O.
+pub fn TestCRLFInjectionRejected() {
+    _, err := api.Get("http://127.0.0.1:1/ok\r\nX-Injected: evil")
+    testing.AssertTrue(str.Len(err.String()) > 0, "CRLF in URL path must error")
+    _, err2 := api.Post("http://127.0.0.1:1/", "text/plain\r\nX: y", "body")
+    testing.AssertTrue(str.Len(err2.String()) > 0, "CRLF in contentType must error")
+}

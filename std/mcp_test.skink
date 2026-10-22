@@ -26,6 +26,9 @@ module mcp_test
 import "std/mcp"
 import "std/json"
 import "std/str"
+import "std/net"
+import "std/time"
+import "std/libc"
 import "testing"
 
 // TestServerCreation verifies that NewServer stores name and version.
@@ -157,4 +160,49 @@ pub fn TestBuildToolsListResult() {
     if str.Equal(first, "alpha") == false {
         Errorf("First tool name should be alpha")
     }
+}
+
+// --- VULN-15 security regression ---
+
+// mcpNullHandler is a no-op tool handler for the injection test server.
+fn mcpNullHandler(name: string, args: json.Value) -> json.Value {
+    return json.FromString("ok")
+}
+
+// mcpServe runs the HTTP MCP loop on the test server in a spawned
+// thread (mirrors the web live-test pattern).
+fn mcpServe(s: *mcp.Server) {
+    s.StartHttp("127.0.0.1", 18250, mcpNullHandler)
+}
+
+// TestOversizedContentLength guards VULN-15: a Content-Length that
+// overflows the accumulator must yield a clean 400 — the old int
+// accumulation could wrap to a small malloc with a huge read bound.
+pub fn TestOversizedContentLength() {
+    srv := mcp.NewServer("t", "0.1")
+    spawn mcpServe(&srv)
+
+    // Retry the connect until the spawned listener is up.
+    var conn net.Connection
+    ok := false
+    for i := 0; i < 40; i = i + 1 {
+        c, err := net.Connect("127.0.0.1", 18250)
+        if err.message == "" {
+            conn = c
+            ok = true
+            break
+        }
+        time.SleepMs(50)
+    }
+    testing.AssertTrue(ok, "connect to mcp test server")
+    defer conn.Close()
+    conn.SetTimeout(5000)
+
+    conn.Send("POST /message HTTP/1.1\r\nHost: x\r\nContent-Length: 99999999999999999999\r\n\r\n")
+    resp := libc.malloc(4096)
+    n := conn.Read(resp, 4095)
+    if n > 0 {
+        resp[n] = 0
+    }
+    testing.AssertTrue(n > 0 && str.Contains(resp, "400"), "oversized Content-Length must get a 400")
 }

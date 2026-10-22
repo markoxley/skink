@@ -316,3 +316,32 @@ pub fn TestLogisticSigmoid() {
         Errorf("Sigmoid(0) should be 0.5")
     }
 }
+
+// --- VULN-05 security regression ---
+
+// These externs mirror the runtime callbacks whose invocation was
+// fixed: a Skink fn value is a closure handle (first field = code
+// pointer), not a C function pointer, so calling the handle itself
+// jumped into heap metadata (VULN-05).
+extern fn Skink_math_diff(f: fn(float) -> float, x: float) -> float
+extern fn Skink_math_integrate(f: fn(float) -> float, a: float, b: float) -> float
+
+fn mtSquare(x: float) -> float {
+    return x * x
+}
+
+// TestMathCallbackABI guards VULN-05: Skink_math_diff /
+// Skink_math_integrate must invoke the closure through its code
+// pointer — pre-fix this jumped to the handle address and crashed.
+pub fn TestMathCallbackABI() {
+    d := Skink_math_diff(mtSquare, 3.0)
+    // d/dx x^2 at 3.0 ≈ 6.0 (central-difference epsilon).
+    if d < 5.9 || d > 6.1 {
+        Errorf("math_diff(x^2, 3) should ~= 6.0")
+    }
+    i := Skink_math_integrate(mtSquare, 0.0, 1.0)
+    // ∫x^2 from 0..1 = 1/3 (trapezoidal approximation).
+    if i < 0.30 || i > 0.37 {
+        Errorf("math_integrate(x^2, 0, 1) should ~= 0.333")
+    }
+}

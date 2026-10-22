@@ -117,3 +117,73 @@ pub fn TestSubstr() {
     }
 }
 
+
+// --- VULN-11 / VULN-25 security regressions ---
+
+var stPanicMsg: string
+
+// stSavePanic captures the panic message recovered inside stInvoke.
+fn stSavePanic(s: string) { stPanicMsg = s }
+
+// stInvoke runs f inside a recoverable frame.
+fn stInvoke(f: fn()) {
+    defer fn() { stSavePanic(recover()) }()
+    f()
+}
+
+// stExpectPanic asserts that f panics (VULN-11 converts silent
+// size-overflow corruption into panics).
+fn stExpectPanic(f: fn(), what: string) {
+    stPanicMsg = ""
+    stInvoke(f)
+    if str.Len(stPanicMsg) == 0 {
+        Errorf("expected panic: " + what)
+    }
+}
+
+fn stRepeatOverflow() {
+    // 2 * 2e9 bytes exceeds INT_MAX — used to wrap the size computation
+    // and memcpy past a tiny allocation (VULN-11).
+    _ = str.Repeat("ab", 2000000000)
+}
+
+fn stRepeatBoundary() {
+    // n*count == INT_MAX leaves no room for the NUL terminator.
+    _ = str.Repeat("x", 2147483647)
+}
+
+// TestRepeatSizeSafety guards VULN-11: pathological repeat sizes panic
+// instead of overflowing the backing allocation; negative and ordinary
+// counts keep working.
+pub fn TestRepeatSizeSafety() {
+    stExpectPanic(stRepeatOverflow, "str.Repeat with overflowing size")
+    stExpectPanic(stRepeatBoundary, "str.Repeat at INT_MAX boundary")
+    if str.Len(str.Repeat("x", -1)) != 0 {
+        Errorf("str.Repeat with negative count should return empty")
+    }
+    if str.Len(str.Repeat("ab", 3)) != 6 {
+        Errorf("str.Repeat normal case broken")
+    }
+}
+
+// TestContainsIndexSafety guards VULN-25: Contains/IndexOf must compare
+// 64-bit pointer differences — the old int() truncation returned wrong
+// results for hits past 4 GiB. The pointer math is asserted here via
+// functional correctness (a >4 GiB haystack is impractical in a test).
+pub fn TestContainsIndexSafety() {
+    if !str.Contains("hello world", "world") {
+        Errorf("Contains should find 'world'")
+    }
+    if str.Contains("hello", "zz") {
+        Errorf("Contains should not find 'zz'")
+    }
+    if str.IndexOf("abcabc", "c") != 2 {
+        Errorf("IndexOf should return first hit")
+    }
+    if str.IndexOf("abc", "z") != -1 {
+        Errorf("IndexOf miss should be -1")
+    }
+    if !str.Contains("", "") {
+        Errorf("Contains of empty needle should be true")
+    }
+}

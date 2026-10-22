@@ -240,28 +240,44 @@ fn parseHttpRequest(conn: net.Connection) -> (string, string, string, bool) {
     method := parts[0]
     path := parts[1]
 
-    // Find Content-Length
-    contentLength := 0
+    // Find Content-Length — accumulated in int64 with a hard cap so a
+    // hostile peer cannot wrap contentLength negative/small, which
+    // previously produced a tiny malloc with a huge read bound (VULN-15).
+    contentLength := int64(0)
+    badLength := false
     for i := 1; i < len(lines); i = i + 1 {
         line := lines[i]
         if str.StartsWith(line, "Content-Length:") || str.StartsWith(line, "content-length:") {
             val := str.Trim(str.Substr(line, 15, str.Len(line) - 15))
             for j := 0; j < str.Len(val); j = j + 1 {
                 if val[j] >= 48 && val[j] <= 57 {
-                    contentLength = contentLength * 10 + int(val[j]) - 48
+                    // Bail before the *10 can wrap int64 — a 20-digit
+                    // value could otherwise land back under the cap.
+                    if contentLength > int64(268435456) {
+                        badLength = true
+                        break
+                    }
+                    contentLength = contentLength * 10 + int64(val[j]) - 48
                 }
             }
             break
         }
     }
+    if contentLength < 0 || contentLength > int64(268435456) {
+        badLength = true
+    }
 
     // Read body
     body := ""
+    if badLength {
+        libc.free(headers)
+        return "", "", "", false
+    }
     if contentLength > 0 {
-        bodyBuf := libc.malloc(contentLength + 1)
+        bodyBuf := libc.malloc(int(contentLength) + 1)
         readSoFar := 0
-        for readSoFar < contentLength {
-            n := conn.Read(string(int64(bodyBuf) + int64(readSoFar)), contentLength - readSoFar)
+        for readSoFar < int(contentLength) {
+            n := conn.Read(string(int64(bodyBuf) + int64(readSoFar)), int(contentLength) - readSoFar)
             if n <= 0 {
                 break
             }

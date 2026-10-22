@@ -171,6 +171,10 @@ pub fn Clean(p: string) -> string {
     b := buf.NewBuffer()
     start := 0
     stackLen := 0
+    // Absolute paths keep their leading '/'; a ".." at the root of an
+    // absolute path is dropped (POSIX Clean semantics), while relative
+    // paths keep the literal ".." component.
+    absolute := p[0] == 47
     // Use a simple approach: write components to buffer, tracking positions
     // to allow backtracking for ".."
     for i := 0; i <= n; i = i + 1 {
@@ -200,7 +204,7 @@ pub fn Clean(p: string) -> string {
                         // Truncate buffer at j (remove separator and component)
                         b.Truncate(j)
                         stackLen = stackLen - 1
-                    } else {
+                    } else if !absolute {
                         // Keep ".." at root level
                         if b.Len() > 0 {
                             b.WriteByte(47)
@@ -222,13 +226,16 @@ pub fn Clean(p: string) -> string {
     }
     // Handle the case where cleaning produced an empty result.
     if b.Len() == 0 {
-        if p[0] == 47 {
+        if absolute {
             return "/"
         }
         return "."
     }
     result := b.String()
     b.Free()
+    if absolute {
+        return str.Concat("/", result)
+    }
     return result
 }
 

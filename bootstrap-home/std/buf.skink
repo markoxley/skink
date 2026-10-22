@@ -163,32 +163,39 @@ pub struct Buffer {
     // room for extra bytes. It doubles the capacity (minimum 16) until
     // the requirement is satisfied.
     fn ensureCap(self: *Buffer, extra: int) {
-        // Check for integer overflow in need calculation
+        // Overflow checks must panic, not return silently: callers write
+        // `extra` bytes unconditionally after this returns, so a silent
+        // early-return meant a heap overflow (VULN-11).
         if extra < 0 {
-            return
+            panic("buf.Buffer: negative write size")
         }
-        if self.len > 2147483647 - extra {
-            return
+        if int64(self.len) + int64(extra) > int64(2147483647) {
+            panic("buf.Buffer: size overflow")
         }
         need := self.len + extra
         if need <= self.cap {
             return
         }
         // Grow by doubling, with a minimum of 16 bytes.
-        newCap := self.cap * 2
+        newCap := int64(self.cap) * 2
         if newCap < 16 {
             newCap = 16
         }
-        if newCap < need {
-            newCap = need
+        if newCap < int64(need) {
+            newCap = int64(need)
         }
         // Use realloc if we already have an allocation, otherwise malloc.
+        // A NULL result must panic — callers memcpy `extra` bytes
+        // unconditionally after this returns (VULN-11).
         if self.cap > 0 {
-            self.data = libc.realloc(self.data, newCap)
+            self.data = libc.realloc(self.data, int(newCap))
         } else {
-            self.data = libc.malloc(newCap)
+            self.data = libc.malloc(int(newCap))
         }
-        self.cap = newCap
+        if int64(self.data) == 0 {
+            panic("buf.Buffer: out of memory")
+        }
+        self.cap = int(newCap)
     }
 }
 

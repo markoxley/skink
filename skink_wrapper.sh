@@ -65,9 +65,11 @@ if [ -z "$output" ] || [ -z "$input" ]; then
     exec "$SKINK_REAL_BIN" "$@"
 fi
 
-# Compile to LLVM IR first
-ll_file="/tmp/skink_wrapper_$$.ll"
-err_file="/tmp/skink_wrapper_err_$$"
+# Compile to LLVM IR first. mktemp instead of predictable /tmp/$$ names —
+# a pre-created symlink at the old path let a local attacker clobber or
+# poison the intermediate IR (VULN-23).
+ll_file="$(mktemp /tmp/skink_wrapper.XXXXXX.ll)" || exit 1
+err_file="$(mktemp /tmp/skink_wrapper_err.XXXXXX)" || { rm -f "$ll_file"; exit 1; }
 "$SKINK_REAL_BIN" -emit-ll "$input" > "$ll_file" 2>"$err_file"
 rc=$?
 if [ $rc -ne 0 ]; then

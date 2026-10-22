@@ -29,9 +29,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKINK_HOME="$SCRIPT_DIR"
 SKINK_BIN="${SKINK:-$SCRIPT_DIR/skink}"
 export SKINK_HOME SKINK_BIN
-RESULTS_DIR="/tmp/skink_test_results"
-rm -rf "$RESULTS_DIR"
-mkdir -p "$RESULTS_DIR"
+# Private results dir via mktemp: the previous fixed /tmp path could be
+# pre-created by another user (results clobbered or binaries swapped)
+# and rm -rf on a shared path is a footgun (VULN-23).
+RESULTS_DIR="$(mktemp -d /tmp/skink_test_results.XXXXXX)"
 
 # Sanitizer mode selection. VALGRIND=1 runs each test binary under valgrind;
 # ASAN=1 compiles every binary (tests and book examples) with clang's
@@ -191,6 +192,18 @@ echo "Test suites skipped:    $skip"
 echo "Total test functions:   $total_tests"
 echo "============================================"
 
+# Auxiliary security regression tests (tests/*.sh): the win_regex.h C
+# self-test (VULN-08) and the shell-harness injection test (VULN-23).
+# Each script self-skips when its toolchain is unavailable.
+aux_fail=0
+if [ -d "$SCRIPT_DIR/tests" ]; then
+    for aux_script in "$SCRIPT_DIR"/tests/*_test.sh "$SCRIPT_DIR"/tests/run_*.sh; do
+        [ -e "$aux_script" ] || continue
+        echo ""
+        bash "$aux_script" || aux_fail=1
+    done
+fi
+
 # Compile-test every code sample extracted from the book.
 book_fail=0
 if [ -f "$SCRIPT_DIR/book/test_examples.sh" ]; then
@@ -199,7 +212,7 @@ if [ -f "$SCRIPT_DIR/book/test_examples.sh" ]; then
     bash "$SCRIPT_DIR/book/test_examples.sh" || book_fail=1
 fi
 
-if [ $fail -gt 0 ] || [ $compile_fail -gt 0 ] || [ $book_fail -gt 0 ]; then
+if [ $fail -gt 0 ] || [ $compile_fail -gt 0 ] || [ $book_fail -gt 0 ] || [ $aux_fail -gt 0 ]; then
     exit 1
 fi
 exit 0

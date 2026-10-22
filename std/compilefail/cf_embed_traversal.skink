@@ -1,0 +1,12 @@
+// expect: embed path escapes
+// VULN-09 regression: a relative embed path that walks above the
+// declaring source directory must be rejected. ".." from
+// std/compilefail resolves to std/, which is outside this file's
+// directory and would bake arbitrary build-host files into the binary.
+module main
+
+embed ".."
+
+fn main() -> int {
+    return 0
+}

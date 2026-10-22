@@ -29,6 +29,7 @@ import "std/ast"
 import "std/checker"
 import "std/emitter"
 import "std/fs"
+import "std/os"
 import "std/resolver"
 import "std/str"
 import "std/strconv"
@@ -39,9 +40,9 @@ extern fn _skink_runtime_get_argc() -> int
 extern fn _skink_runtime_get_argv() -> []string
 
 extern fn getenv(name: string) -> string
-extern fn system(cmd: string) -> int
 extern fn remove(path: string) -> int
 extern fn fputs(s: string, fp: int64) -> int
+extern fn Skink_fs_mktemp(prefix: string, suffix: string) -> string
 
 // usage prints the command-line usage message for the compiler.
 fn usage() {
@@ -89,12 +90,17 @@ fn main() -> int {
         skinkHome = "/usr/local/lib/skink"
     }
 
-    // Delegate to the test harness script when -t is given.
+    // Delegate to the test harness script when -t is given. The script
+    // is exec'd directly with an argv array — the old code interpolated
+    // argv[0], SKINK_HOME, and argv[2] into a shell command string, so a
+    // metacharacter anywhere in those values ran arbitrary commands
+    // (VULN-01).
     if argc >= 3 && argv[1] == "-t" {
         selfBin := argv[0]
         script := findHarnessScript(selfBin, "skink_test.sh")
-        cmd := str.Concat("SKINK=", str.Concat(selfBin, str.Concat(" SKINK_HOME=", str.Concat(skinkHome, str.Concat(" ", str.Concat(script, str.Concat(" ", argv[2])))))))
-        testRc := system(cmd)
+        os.Setenv("SKINK", selfBin)
+        os.Setenv("SKINK_HOME", skinkHome)
+        testRc := os.Exec([]string{script, argv[2]})
         if testRc == 0 {
             return 0
         }
@@ -105,8 +111,9 @@ fn main() -> int {
     if argc >= 3 && argv[1] == "-b" {
         selfBin := argv[0]
         script := findHarnessScript(selfBin, "skink_bench.sh")
-        cmd := str.Concat("SKINK=", str.Concat(selfBin, str.Concat(" SKINK_HOME=", str.Concat(skinkHome, str.Concat(" ", str.Concat(script, str.Concat(" ", argv[2])))))))
-        benchRc := system(cmd)
+        os.Setenv("SKINK", selfBin)
+        os.Setenv("SKINK_HOME", skinkHome)
+        benchRc := os.Exec([]string{script, argv[2]})
         if benchRc == 0 {
             return 0
         }
@@ -220,8 +227,15 @@ fn main() -> int {
         return 0
     }
 
-    // Write the IR to a temporary .ll file for clang to consume.
-    llPath := str.Concat(outName, ".ll")
+    // Write the IR to a uniquely-named file in the system temp dir for
+    // clang to consume. The old code used <outName>.ll in the working
+    // directory, which could clobber a user file or collide
+    // predictably between concurrent compiles (VULN-01).
+    llPath := Skink_fs_mktemp("skink", ".ll")
+    if int64(llPath) == 0 || str.Len(llPath) == 0 {
+        println("cannot create temporary .ll file")
+        return 1
+    }
     fp := fopen(llPath, "w")
     if fp == 0 {
         println(str.Concat("cannot open ", llPath))
@@ -231,22 +245,23 @@ fn main() -> int {
     fclose(fp)
 
     // Assemble the full runtime C source list that every Skink binary links against.
-    rt := str.Concat(skinkHome, "/runtime/rc_rt.c ")
-    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/fs_rt.c "))
-    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/regex_rt.c "))
-    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/sync_rt.c "))
-    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/tensor_rt.c "))
-    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/compress_rt.c "))
-    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/conc_rt.c "))
-    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/db_rt.c "))
-    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/reflect_rt.c "))
-    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/rules_rt.c "))
-    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/panic_rt.c "))
-    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/net_rt.c "))
-    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/llm_rt.c "))
-    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/mqtt_rt.c "))
-    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/tls_rt.c "))
-    rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/template_bridge.ll "))
+    var rt []string
+    rt = append(rt, str.Concat(skinkHome, "/runtime/rc_rt.c"))
+    rt = append(rt, str.Concat(skinkHome, "/runtime/fs_rt.c"))
+    rt = append(rt, str.Concat(skinkHome, "/runtime/regex_rt.c"))
+    rt = append(rt, str.Concat(skinkHome, "/runtime/sync_rt.c"))
+    rt = append(rt, str.Concat(skinkHome, "/runtime/tensor_rt.c"))
+    rt = append(rt, str.Concat(skinkHome, "/runtime/compress_rt.c"))
+    rt = append(rt, str.Concat(skinkHome, "/runtime/conc_rt.c"))
+    rt = append(rt, str.Concat(skinkHome, "/runtime/db_rt.c"))
+    rt = append(rt, str.Concat(skinkHome, "/runtime/reflect_rt.c"))
+    rt = append(rt, str.Concat(skinkHome, "/runtime/rules_rt.c"))
+    rt = append(rt, str.Concat(skinkHome, "/runtime/panic_rt.c"))
+    rt = append(rt, str.Concat(skinkHome, "/runtime/net_rt.c"))
+    rt = append(rt, str.Concat(skinkHome, "/runtime/llm_rt.c"))
+    rt = append(rt, str.Concat(skinkHome, "/runtime/mqtt_rt.c"))
+    rt = append(rt, str.Concat(skinkHome, "/runtime/tls_rt.c"))
+    rt = append(rt, str.Concat(skinkHome, "/runtime/template_bridge.ll"))
 
     // Detect whether the program imports the UI library — its runtime
     // shim (ui_rt.c) and SDL2 are only linked in that case so headless
@@ -264,39 +279,73 @@ fn main() -> int {
         uiScan = uiScan + 1
     }
     if needsUI {
-        rt = str.Concat(rt, str.Concat(skinkHome, "/runtime/ui_rt.c "))
+        rt = append(rt, str.Concat(skinkHome, "/runtime/ui_rt.c"))
     }
     // Detect platform at runtime to choose appropriate linker flags.
     // Windows sets the OS environment variable to "Windows_NT".
     osEnv := getenv("OS")
     isWindows := str.Equal(osEnv, "Windows_NT")
-    // Invoke clang to compile the IR + runtime sources into a native binary.
-    clangFlags := "clang -Wno-override-module"
-    libs := "-lpthread -ldl -lm -lssl -lcrypto -lz -lsqlite3"
+    // Build the clang argv array — exec without a shell so no argument
+    // (file name, -o path, SKINK_HOME, SKINK_CLANG_FLAGS) can inject
+    // shell syntax (VULN-01).
+    var clangArgs []string
+    clangArgs = append(clangArgs, "clang")
+    clangArgs = append(clangArgs, "-Wno-override-module")
+    if !isWindows {
+        clangArgs = append(clangArgs, "-march=native")
+    }
+    if debugInfo {
+        clangArgs = append(clangArgs, "-g")
+        clangArgs = append(clangArgs, "-O0")
+    } else {
+        clangArgs = append(clangArgs, "-O2")
+    }
+    // SKINK_CLANG_FLAGS supplies extra flags for the sanitizer harness
+    // (-fsanitize=address etc.); word-split on spaces preserves its
+    // former shell-expansion semantics.
+    extraFlags := getenv("SKINK_CLANG_FLAGS")
+    if str.Len(extraFlags) > 0 {
+        flagParts := str.Split(extraFlags, " ")
+        fi := 0
+        for fi < len(flagParts) {
+            if str.Len(flagParts[fi]) > 0 {
+                clangArgs = append(clangArgs, flagParts[fi])
+            }
+            fi = fi + 1
+        }
+    }
+    clangArgs = append(clangArgs, "-o")
+    clangArgs = append(clangArgs, outName)
+    clangArgs = append(clangArgs, llPath)
+    ri := 0
+    for ri < len(rt) {
+        clangArgs = append(clangArgs, rt[ri])
+        ri = ri + 1
+    }
     if isWindows {
         // Windows (MinGW): winpthreads instead of pthread, Winsock2,
         // no dl (Windows uses LoadLibrary), bcrypt for OpenSSL 3.x.
-        libs = "-lwinpthread -lws2_32 -lssl -lcrypto -lz -lsqlite3 -lbcrypt"
+        clangArgs = append(clangArgs, "-lwinpthread")
+        clangArgs = append(clangArgs, "-lws2_32")
+        clangArgs = append(clangArgs, "-lssl")
+        clangArgs = append(clangArgs, "-lcrypto")
+        clangArgs = append(clangArgs, "-lz")
+        clangArgs = append(clangArgs, "-lsqlite3")
+        clangArgs = append(clangArgs, "-lbcrypt")
     } else {
-        clangFlags = str.Concat(clangFlags, " -march=native")
+        clangArgs = append(clangArgs, "-lpthread")
+        clangArgs = append(clangArgs, "-ldl")
+        clangArgs = append(clangArgs, "-lm")
+        clangArgs = append(clangArgs, "-lssl")
+        clangArgs = append(clangArgs, "-lcrypto")
+        clangArgs = append(clangArgs, "-lz")
+        clangArgs = append(clangArgs, "-lsqlite3")
     }
     if needsUI {
         // SDL2 headers/libs must be installed (sdl2-devel / libsdl2-dev).
-        libs = str.Concat(libs, " -lSDL2")
+        clangArgs = append(clangArgs, "-lSDL2")
     }
-    if debugInfo {
-        clangFlags = str.Concat(clangFlags, " -g -O0")
-    } else {
-        clangFlags = str.Concat(clangFlags, " -O2")
-    }
-    // SKINK_CLANG_FLAGS appends arbitrary flags to the clang invocation —
-    // used by the sanitizer harness to inject -fsanitize=address etc.
-    extraFlags := getenv("SKINK_CLANG_FLAGS")
-    if str.Len(extraFlags) > 0 {
-        clangFlags = str.Concat(clangFlags, str.Concat(" ", extraFlags))
-    }
-    cmd := str.Concat(clangFlags, str.Concat(" -o ", str.Concat(outName, str.Concat(" ", str.Concat(llPath, str.Concat(" ", str.Concat(rt, libs)))))))
-    rc := system(cmd)
+    rc := os.Exec(clangArgs)
     remove(llPath)
     if rc != 0 {
         println("clang failed")

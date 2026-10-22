@@ -101,3 +101,16 @@ pub fn TestSprintf2() {
         Errorf("Sprintf2 should replace both placeholders")
     }
 }
+
+// TestSprintfLargeFloatPrecision guards VULN-12: fmt's %.*f path shared
+// the fixed 64-byte format buffer; a large precision must now size the
+// output exactly instead of overflowing.
+pub fn TestSprintfLargeFloatPrecision() {
+    s := fmt.Sprintf("%.120f", []fmt.Arg{fmt.FArg(1.25)})
+    if str.Len(s) < 122 {
+        Errorf("Sprintf(%.120f) too short")
+    }
+    if str.Substr(s, 0, 4) != "1.25" {
+        Errorf("Sprintf(%.120f) wrong digits")
+    }
+}

@@ -39,6 +39,12 @@ import "std/strconv"
 import "std/checker"
 import "std/fs"
 
+// realpath canonicalizes a filesystem path (POSIX realpath; _fullpath on
+// Windows). Used to confine `embed` roots to the source directory —
+// raw join + string compare would let "../" or symlink escapes read
+// arbitrary build-host files into compiled binaries (VULN-09).
+extern fn realpath(path: string, resolved: string) -> string
+
 // === Constants ===
 // Type kind constants are imported from checker module (checker.TK_*)
 
@@ -496,10 +502,21 @@ fn getOrCreateDIFile(cg: *CodeGen, filePath: string) -> string {
         directory = str.Substr(filePath, 0, slash)
     }
     def := str.Concat(str.Concat(str.Concat(str.Concat(
-        id, " = !DIFile(filename: \""), filename), "\", directory: \""),
-        str.Concat(directory, "\")"))
+        id, " = !DIFile(filename: \""), diEscape(filename)), "\", directory: \""),
+        str.Concat(diEscape(directory), "\")"))
     setDbgMeta(cg, id, def)
     return id
+}
+
+// diEscape escapes a file path for an LLVM "..." metadata operand
+// (e.g. !DIFile(filename: "...")). An unescaped " or \ in a source path
+// previously terminated the quoted operand and injected arbitrary
+// metadata tokens into the emitted IR (VULN-10). Backslash must be
+// escaped first.
+fn diEscape(s: string) -> string {
+    r := str.Replace(s, "\\", "\\\\")
+    r = str.Replace(r, "\"", "\\\"")
+    return r
 }
 
 // dbgType maps an LLVM type string to a DWARF debug type metadata node.
@@ -3128,18 +3145,16 @@ fn emitMapLiteral(cg: *CodeGen, e: ast.Expr) -> string {
     keyElemSize := emitElemSize(cg, keyLL)
     valElemSize := emitElemSize(cg, valLL)
 
-    keysBytes := nextReg(cg)
-    emitfmt(cg, "  %s = mul i32 %s, %s\n", []string{keysBytes, strconv.Itoa(cap), keyElemSize})
+    // Byte counts are computed in i64 so cap*elemSize cannot wrap at 32
+    // bits (VULN-03). cap is a compile-time constant here.
     keysBytes64 := nextReg(cg)
-    emitfmt(cg, "  %s = zext i32 %s to i64\n", []string{keysBytes64, keysBytes})
+    emitfmt(cg, "  %s = mul i64 %s, %s\n", []string{keysBytes64, strconv.Itoa(cap), i64Operand(cg, keyElemSize)})
     keysRaw := emitMapArrayAlloc(cg, keyLL, keysBytes64)
     keysTyped := nextReg(cg)
     emitfmt(cg, "  %s = bitcast i8* %s to %s*\n", []string{keysTyped, keysRaw, keyLL})
 
-    valsBytes := nextReg(cg)
-    emitfmt(cg, "  %s = mul i32 %s, %s\n", []string{valsBytes, strconv.Itoa(cap), valElemSize})
     valsBytes64 := nextReg(cg)
-    emitfmt(cg, "  %s = zext i32 %s to i64\n", []string{valsBytes64, valsBytes})
+    emitfmt(cg, "  %s = mul i64 %s, %s\n", []string{valsBytes64, strconv.Itoa(cap), i64Operand(cg, valElemSize)})
     valsRaw := emitMapArrayAlloc(cg, valLL, valsBytes64)
     valsTyped := nextReg(cg)
     emitfmt(cg, "  %s = bitcast i8* %s to %s*\n", []string{valsTyped, valsRaw, valLL})
@@ -3276,10 +3291,10 @@ fn emitSetLiteral(cg: *CodeGen, e: ast.Expr) -> string {
     elemSize := emitElemSize(cg, "i8*")
 
     // Allocate backing array with capacity = n (worst case: all unique).
-    bytesReg := nextReg(cg)
-    emitfmt(cg, "  %s = mul i32 %s, %s\n", []string{bytesReg, strconv.Itoa(n), elemSize})
+    // i64 multiply — n is compile-time but the pattern must not wrap
+    // (VULN-03).
     bytes64 := nextReg(cg)
-    emitfmt(cg, "  %s = zext i32 %s to i64\n", []string{bytes64, bytesReg})
+    emitfmt(cg, "  %s = mul i64 %s, %s\n", []string{bytes64, strconv.Itoa(n), i64Operand(cg, elemSize)})
     arrDtorName := getOrCreateArrayDtor(cg, elemLL)
     rawReg := nextReg(cg)
     if str.Len(arrDtorName) > 0 {
@@ -4221,18 +4236,17 @@ fn emitMapIndexAssignment(cg: *CodeGen, mapReg: string, keyReg: string, keyLL: s
     keyElemSize := emitElemSize(cg, keyLL)
     valElemSize := emitElemSize(cg, valLL)
 
-    newKeysBytes := nextReg(cg)
-    emitfmt(cg, "  %s = mul i32 %s, %s\n", []string{newKeysBytes, newCap, keyElemSize})
+    // i64 byte counts — newCap is a runtime i32; the product must not
+    // wrap at 32 bits (VULN-03).
+    newCap64 := i64Operand(cg, newCap)
     newKeysBytes64 := nextReg(cg)
-    emitfmt(cg, "  %s = zext i32 %s to i64\n", []string{newKeysBytes64, newKeysBytes})
+    emitfmt(cg, "  %s = mul i64 %s, %s\n", []string{newKeysBytes64, newCap64, i64Operand(cg, keyElemSize)})
     newKeysRaw := emitMapArrayAlloc(cg, keyLL, newKeysBytes64)
     newKeysPtr := nextReg(cg)
     emitfmt(cg, "  %s = bitcast i8* %s to %s*\n", []string{newKeysPtr, newKeysRaw, keyLL})
 
-    newValsBytes := nextReg(cg)
-    emitfmt(cg, "  %s = mul i32 %s, %s\n", []string{newValsBytes, newCap, valElemSize})
     newValsBytes64 := nextReg(cg)
-    emitfmt(cg, "  %s = zext i32 %s to i64\n", []string{newValsBytes64, newValsBytes})
+    emitfmt(cg, "  %s = mul i64 %s, %s\n", []string{newValsBytes64, newCap64, i64Operand(cg, valElemSize)})
     newValsRaw := emitMapArrayAlloc(cg, valLL, newValsBytes64)
     newValsPtr := nextReg(cg)
     emitfmt(cg, "  %s = bitcast i8* %s to %s*\n", []string{newValsPtr, newValsRaw, valLL})
@@ -5128,18 +5142,32 @@ fn resolveImportAliasCG(cg: *CodeGen, name: string) -> string {
 // === Type Alias Resolution ===
 
 // resolveAliasCG resolves a type alias to its underlying checker type.
+// Iterative with a hop cap: a cyclic cg.aliases chain (type A = B;
+// type B = A) previously recursed until stack exhaustion (VULN-19).
 fn resolveAliasCG(cg: *CodeGen, t: checker.TType) -> checker.TType {
-    if t.kind != checker.TK_NAMED {
-        return t
+    hops := 0
+    for t.kind == checker.TK_NAMED && hops < 128 {
+        // Check if this is a known alias
+        underlying := cg.aliases[t.name]
+        ok := mapStringTTypeHasKeyCG(cg.aliases, t.name)
+        if ok {
+            t = underlying
+            hops = hops + 1
+            continue
+        }
+        // Also check checker's aliases (which terminates on cycles by
+        // returning the visited NAMED type unchanged).
+        r := checker.resolveAlias(cg.checker, t)
+        if r.kind == checker.TK_NAMED && str.Equal(r.name, t.name) {
+            return r
+        }
+        t = r
+        hops = hops + 1
     }
-    // Check if this is a known alias
-    underlying := cg.aliases[t.name]
-    ok := mapStringTTypeHasKeyCG(cg.aliases, t.name)
-    if ok {
-        return resolveAliasCG(cg, underlying)
+    if hops >= 128 {
+        errorf(cg, "cyclic type alias")
     }
-    // Also check checker's aliases
-    return checker.resolveAlias(cg.checker, t)
+    return t
 }
 
 // === Expression Emission ===
@@ -7386,36 +7414,28 @@ fn emitValAsString(cg: *CodeGen, val: string, llType: string) -> string {
     return val
 }
 
-// emitIntToString converts an i32 value to a string using snprintf with "%d".
+// emitIntToString converts an i32 value to a heap-allocated RC string.
+// The old code formatted into a stack alloca and returned the pointer —
+// a use-after-return once the frame exited, and repeated calls inside a
+// loop grew the stack without bound (VULN-02).
 fn emitIntToString(cg: *CodeGen, val: string) -> string {
-    bufReg := emitAlloca(cg, "[32 x i8]")
     ptrReg := nextReg(cg)
-    emitfmt(cg, "  %s = getelementptr inbounds [32 x i8], [32 x i8]* %s, i64 0, i64 0\n", []string{ptrReg, bufReg})
-    fmtReg := emitStringLiteral(cg, "%d")
-    retReg := nextReg(cg)
-    emitfmt(cg, "  %s = call i32 (i8*, i64, i8*, ...) @snprintf(i8* %s, i64 32, i8* %s, i32 %s)\n", []string{retReg, ptrReg, fmtReg, val})
+    emitfmt(cg, "  %s = call i8* @Skink_format_i32(i32 %s)\n", []string{ptrReg, val})
     return ptrReg
 }
 
-// emitInt64ToString converts an i64 value to a string using snprintf with "%ld".
+// emitInt64ToString converts an i64 value to a heap-allocated RC string.
 fn emitInt64ToString(cg: *CodeGen, val: string) -> string {
-    bufReg := emitAlloca(cg, "[32 x i8]")
     ptrReg := nextReg(cg)
-    emitfmt(cg, "  %s = getelementptr inbounds [32 x i8], [32 x i8]* %s, i64 0, i64 0\n", []string{ptrReg, bufReg})
-    fmtReg := emitStringLiteral(cg, "%ld")
-    retReg := nextReg(cg)
-    emitfmt(cg, "  %s = call i32 (i8*, i64, i8*, ...) @snprintf(i8* %s, i64 32, i8* %s, i64 %s)\n", []string{retReg, ptrReg, fmtReg, val})
+    emitfmt(cg, "  %s = call i8* @Skink_format_i64(i64 %s)\n", []string{ptrReg, val})
     return ptrReg
 }
 
-// emitFloatToString converts a double value to a string using snprintf with "%g".
+// emitFloatToString converts a double value to a heap-allocated RC
+// string using "%g" (the historical ToString representation).
 fn emitFloatToString(cg: *CodeGen, val: string) -> string {
-    bufReg := emitAlloca(cg, "[64 x i8]")
     ptrReg := nextReg(cg)
-    emitfmt(cg, "  %s = getelementptr inbounds [64 x i8], [64 x i8]* %s, i64 0, i64 0\n", []string{ptrReg, bufReg})
-    fmtReg := emitStringLiteral(cg, "%g")
-    retReg := nextReg(cg)
-    emitfmt(cg, "  %s = call i32 (i8*, i64, i8*, ...) @snprintf(i8* %s, i64 64, i8* %s, double %s)\n", []string{retReg, ptrReg, fmtReg, val})
+    emitfmt(cg, "  %s = call i8* @Skink_format_double_g(double %s)\n", []string{ptrReg, val})
     return ptrReg
 }
 
@@ -8115,23 +8135,18 @@ fn emitCastToString(cg: *CodeGen, expr: ast.Expr) -> string {
         srcType = "i32"
     }
     if str.Equal(srcType, "i32") {
-        fmtReg := emitStringLiteral(cg, "%d")
-        bufReg := nextReg(cg)
-        emitfmt(cg, "  %s = alloca [32 x i8]\n", []string{bufReg})
+        // RC-heap formatting: the old stack alloca + sprintf produced a
+        // pointer into the current frame — a use-after-return whenever
+        // the string outlived the call (VULN-02).
         ptrReg := nextReg(cg)
-        emitfmt(cg, "  %s = getelementptr inbounds [32 x i8], [32 x i8]* %s, i64 0, i64 0\n", []string{ptrReg, bufReg})
-        retReg := nextReg(cg)
-        emitfmt(cg, "  %s = call i32 (i8*, ...) @sprintf(i8* %s, i8* %s, i32 %s)\n", []string{retReg, ptrReg, fmtReg, operand})
+        emitfmt(cg, "  %s = call i8* @Skink_format_i32(i32 %s)\n", []string{ptrReg, operand})
         return ptrReg
     }
     if str.Equal(srcType, "double") {
-        fmtReg := emitStringLiteral(cg, "%f")
-        bufReg := nextReg(cg)
-        emitfmt(cg, "  %s = alloca [32 x i8]\n", []string{bufReg})
+        // Same RC-heap fix; "%f" on a large-magnitude double overflows
+        // any fixed stack buffer (up to ~317 bytes) — VULN-02.
         ptrReg := nextReg(cg)
-        emitfmt(cg, "  %s = getelementptr inbounds [32 x i8], [32 x i8]* %s, i64 0, i64 0\n", []string{ptrReg, bufReg})
-        retReg := nextReg(cg)
-        emitfmt(cg, "  %s = call i32 (i8*, ...) @sprintf(i8* %s, i8* %s, double %s)\n", []string{retReg, ptrReg, fmtReg, operand})
+        emitfmt(cg, "  %s = call i8* @Skink_format_double_f(double %s)\n", []string{ptrReg, operand})
         return ptrReg
     }
     if str.Equal(srcType, "i32") || str.Equal(srcType, "i64") {
@@ -10738,10 +10753,18 @@ fn emitFromEndExpr(cg: *CodeGen, e: ast.Expr) -> string {
     // Compute len(arr)
     lenReg := emitLenCallRaw(cg, target, leftType, e.indexTarget[0])
 
-    // Compute len(arr) - index
-    idxExpr := emitExpression(cg, e.indexExpr[0])
+    // Compute len(arr) - index (the index is coerced to i32 first — an
+    // i64 index would otherwise produce a mismatched `sub i32`).
+    idxExpr := emitIndexAsI32(cg, emitExpression(cg, e.indexExpr[0]), e.indexExpr[0])
     realIdx := nextReg(cg)
     emitfmt(cg, "  %s = sub i32 %s, %s\n", []string{realIdx, lenReg, idxExpr})
+
+    // Bounds-check the resolved index (VULN-04): arr[^0] maps to len
+    // (out of range), i > len underflows to a negative index, and
+    // negative i overshoots — all must panic rather than read OOB.
+    hiReg := nextReg(cg)
+    emitfmt(cg, "  %s = add i32 %s, 1\n", []string{hiReg, realIdx})
+    emitfmt(cg, "  call void @Skink_bounds_check(i32 %s, i32 %s, i32 %s)\n", []string{realIdx, hiReg, lenReg})
 
     // String and byte-slice indexing
     if str.Equal(leftType, "i8*") {
@@ -10855,6 +10878,19 @@ fn emitIndexAsI32(cg: *CodeGen, idxReg: string, idxExpr: ast.Expr) -> string {
         return r
     }
     return idxReg
+}
+
+// i64Operand widens an i32 operand to i64: register values get a zext,
+// constant literals are returned verbatim for use directly in an i64
+// instruction. Used to compute byte counts in 64-bit arithmetic so
+// count*elemSize products cannot wrap at 32 bits (VULN-03).
+fn i64Operand(cg: *CodeGen, op32: string) -> string {
+    if str.StartsWith(op32, "%") {
+        r := nextReg(cg)
+        emitfmt(cg, "  %s = zext i32 %s to i64\n", []string{r, op32})
+        return r
+    }
+    return op32
 }
 
 // emitIndexBoundsCheck emits Skink_bounds_check(i, i+1, len) before an
@@ -11503,28 +11539,56 @@ fn emitMakeExpr(cg: *CodeGen, e: ast.Expr) -> string {
         nReg := "0"
         if len(e.makeSize) > 0 {
             nReg = emitExpression(cg, e.makeSize[0])
+            nReg = emitIndexAsI32(cg, nReg, e.makeSize[0])
         }
+        // A negative length would zero-extend into a ~4-billion element
+        // request — panic instead (VULN-03).
+        negCmp := nextReg(cg)
+        emitfmt(cg, "  %s = icmp slt i32 %s, 0\n", []string{negCmp, nReg})
+        negLabel := nextLabel(cg)
+        makeOkLabel := nextLabel(cg)
+        emitCondBranch(cg, negCmp, negLabel, makeOkLabel)
+        emitLabel(cg, negLabel)
+        negMsg := emitStringLiteral(cg, "negative make length")
+        emitfmt(cg, "  call void @Skink_panic(i8* %s)\n", []string{negMsg})
+        emitln(cg, "  unreachable")
+        emitLabel(cg, makeOkLabel)
+
         elemSize := emitElemSize(cg, elemLL)
+        // Compute the byte count in i64 so n*elemSize cannot wrap at 32
+        // bits — a wrapped count used to allocate a tiny block while the
+        // slice header recorded the full length, defeating bounds checks
+        // (VULN-03).
+        nReg64 := i64Operand(cg, nReg)
+        elem64 := i64Operand(cg, elemSize)
         bytesReg := nextReg(cg)
-        emitfmt(cg, "  %s = mul i32 %s, %s\n", []string{bytesReg, nReg, elemSize})
-        bytes64 := nextReg(cg)
-        emitfmt(cg, "  %s = zext i32 %s to i64\n", []string{bytes64, bytesReg})
+        emitfmt(cg, "  %s = mul i64 %s, %s\n", []string{bytesReg, nReg64, elem64})
         // Use typed allocation with array destructor if the element type
         // holds heap-reachable values.
         arrDtorName := getOrCreateArrayDtor(cg, elemLL)
         rawReg := nextReg(cg)
         if str.Len(arrDtorName) > 0 {
             arrDtorPtr := str.Concat("i8* bitcast (void (i8*)* @", str.Concat(arrDtorName, " to i8*)"))
-            emitfmt(cg, "  %s = call i8* @Skink_rc_alloc_typed(i64 %s, %s)\n", []string{rawReg, bytes64, arrDtorPtr})
+            emitfmt(cg, "  %s = call i8* @Skink_rc_alloc_typed(i64 %s, %s)\n", []string{rawReg, bytesReg, arrDtorPtr})
         } else {
-            emitfmt(cg, "  %s = call i8* @Skink_rc_alloc(i64 %s)\n", []string{rawReg, bytes64})
+            emitfmt(cg, "  %s = call i8* @Skink_rc_alloc(i64 %s)\n", []string{rawReg, bytesReg})
         }
+        // Panic on OOM before the payload-8 write dereferences NULL
+        // (VULN-03).
+        allocNull := nextReg(cg)
+        emitfmt(cg, "  %s = icmp eq i8* %s, null\n", []string{allocNull, rawReg})
+        oomLabel := nextLabel(cg)
+        allocOkLabel := nextLabel(cg)
+        emitCondBranch(cg, allocNull, oomLabel, allocOkLabel)
+        emitLabel(cg, oomLabel)
+        oomMsg := emitStringLiteral(cg, "make: out of memory")
+        emitfmt(cg, "  call void @Skink_panic(i8* %s)\n", []string{oomMsg})
+        emitln(cg, "  unreachable")
+        emitLabel(cg, allocOkLabel)
 
         // Store the backing capacity at payload - 8 (the array destructor
         // scans that many slots; unwritten slots are zeroed and release to
         // no-ops).
-        nReg64 := nextReg(cg)
-        emitfmt(cg, "  %s = zext i32 %s to i64\n", []string{nReg64, nReg})
         lenPtr := nextReg(cg)
         emitfmt(cg, "  %s = getelementptr inbounds i8, i8* %s, i64 -8\n", []string{lenPtr, rawReg})
         typedLenPtr := nextReg(cg)
@@ -12480,8 +12544,10 @@ fn emitAssignStmt(cg: *CodeGen, stmt: ast.Stmt) {
         return
     }
 
-    // Index assignment: arr[i] = val  (or compound: arr[i] += val)
-    if target.kind == ast.EX_INDEX {
+    // Index assignment: arr[i] = val  (or compound: arr[i] += val).
+    // arr[^i] = val arrives as EX_FROM_END and resolves its index in
+    // emitIndexAssignment.
+    if target.kind == ast.EX_INDEX || target.kind == ast.EX_FROM_END {
         emitIndexAssignment(cg, target, valReg, valType, stmt.assignOp, stmt.assignValue[0])
         return
     }
@@ -12685,7 +12751,25 @@ fn emitIndexAssignment(cg: *CodeGen, target: ast.Expr, valReg: string, valType: 
     arrReg := emitExpression(cg, arrExpr)
     leftType := exprLLType(cg, arrExpr)
 
-    idxReg := emitExpression(cg, idxExpr)
+    var idxReg string
+    if target.kind == ast.EX_FROM_END {
+        // arr[^i] = v — resolve len(arr) - i and bounds-check it, the
+        // same index math emitFromEndExpr uses for reads (VULN-04).
+        lenReg := emitLenCallRaw(cg, arrReg, leftType, arrExpr)
+        rawIdx := emitIndexAsI32(cg, emitExpression(cg, idxExpr), idxExpr)
+        idxReg = nextReg(cg)
+        emitfmt(cg, "  %s = sub i32 %s, %s\n", []string{idxReg, lenReg, rawIdx})
+        hiReg := nextReg(cg)
+        emitfmt(cg, "  %s = add i32 %s, 1\n", []string{hiReg, idxReg})
+        emitfmt(cg, "  call void @Skink_bounds_check(i32 %s, i32 %s, i32 %s)\n", []string{idxReg, hiReg, lenReg})
+        // The resolved register is already i32; downstream emitIndexAsI32
+        // calls derive their coercion type from idxExpr, so give them a
+        // synthesized int literal (an i64 idxExpr would emit `trunc i64`
+        // on the i32 register — invalid IR).
+        idxExpr = ast.newExpr(ast.EX_INT, target.line, target.col)
+    } else {
+        idxReg = emitExpression(cg, idxExpr)
+    }
     elemType := exprLLType(cg, target)
 
     // String byte assignment: string is i8*, element is i8 (not i32).
@@ -13039,27 +13123,43 @@ fn stmtsContainDefer(stmts: []ast.Stmt) -> bool {
 
 // emitPanicPrologue emits the setjmp-based panic handler installation for
 // functions that contain defer statements. Layout:
-//   %jb = alloca [264 x i8]
-//   %r  = call i32 @setjmp(%jb)     ; 0 = normal entry, !0 = caught panic
+//   %slot = call i8* @Skink_panic_acquire()   ; runtime-owned jmp_buf
+//   br %slot != null -> setjmp_blk : oom_blk
+//   oom_blk:   Skink_panic("...") ; unreachable   (OOM only — pool grows)
+//   setjmp_blk:
+//   %r  = call i32 @setjmp(%slot)  ; 0 = normal entry, !0 = caught panic
 //   br %caught -> panic_landing : normal_entry
 //   normal_entry:
-//   call Skink_panic_push_handler(%jb)
+//   call Skink_panic_commit()     ; activates the slot
 //   <body>
 //   panic_landing:  (emitted by emitPanicEpilogue after the body)
+// The jmp_buf lives in the runtime's growable pool rather than a fixed
+// 264-byte stack alloca — correct sizeof on every platform (VULN-06) and
+// no depth cap to desynchronize push/pop (VULN-07).
 fn emitPanicPrologue(cg: *CodeGen) {
     cg.needPanicLanding = true
     cg.panicLandingLabel = nextLabel(cg)
     cg.normalEntryLabel = nextLabel(cg)
-    jbAlloca := emitAlloca(cg, "[264 x i8]")
-    jbPtr := nextReg(cg)
-    emitfmt(cg, "  %s = getelementptr inbounds [264 x i8], [264 x i8]* %s, i64 0, i64 0\n", []string{jbPtr, jbAlloca})
+    slotReg := nextReg(cg)
+    emitfmt(cg, "  %s = call i8* @Skink_panic_acquire()\n", []string{slotReg})
+    okReg := nextReg(cg)
+    emitfmt(cg, "  %s = icmp ne i8* %s, null\n", []string{okReg, slotReg})
+    oomLabel := nextLabel(cg)
+    sjLabel := nextLabel(cg)
+    emitCondBranch(cg, okReg, sjLabel, oomLabel)
+    // Pool growth only fails on OOM — panic (prints + exits); no recovery.
+    emitLabel(cg, oomLabel)
+    oomMsg := emitStringLiteral(cg, "panic handler pool exhausted")
+    emitfmt(cg, "  call void @Skink_panic(i8* %s)\n", []string{oomMsg})
+    emitln(cg, "  unreachable")
+    emitLabel(cg, sjLabel)
     sjReg := nextReg(cg)
-    emitfmt(cg, "  %s = call i32 @setjmp(i8* %s)\n", []string{sjReg, jbPtr})
+    emitfmt(cg, "  %s = call i32 @setjmp(i8* %s)\n", []string{sjReg, slotReg})
     caughtReg := nextReg(cg)
     emitfmt(cg, "  %s = icmp ne i32 %s, 0\n", []string{caughtReg, sjReg})
     emitCondBranch(cg, caughtReg, cg.panicLandingLabel, cg.normalEntryLabel)
     emitLabel(cg, cg.normalEntryLabel)
-    emitfmt(cg, "  call i32 @Skink_panic_push_handler(i8* %s)\n", []string{jbPtr})
+    emitln(cg, "  call void @Skink_panic_commit()")
 }
 
 // emitPanicEpilogue emits the panic landing pad: drain the defer stack,
@@ -15646,10 +15746,24 @@ pub fn emitProgram(cg: *CodeGen, decls: []ast.Stmt) -> string {
         if decls[i].kind == ast.ST_EMBED {
             // Collect the embed spec now; the data blobs and the
             // @_skink_embed_init registration function are emitted in
-            // emitRuntimeMain once every decl is collected.
+            // emitRuntimeMain once every decl is collected. The root is
+            // canonicalized and must stay inside the directory of the
+            // declaring source file — `embed "../../etc"` or a symlink
+            // escape must not read arbitrary build-host files into the
+            // binary (VULN-09).
             srcDir := dirNameCG(decls[i].filePath)
-            spec := embedSpec{srcRoot: joinPathCG(srcDir, d.embedPath), virtRoot: cleanEmbedRoot(d.embedPath)}
-            cg.embeds = append(cg.embeds, spec)
+            canonSrc := canonicalPathCG(srcDir)
+            canonEmbed := canonicalPathCG(joinPathCG(srcDir, d.embedPath))
+            if str.Len(canonSrc) == 0 {
+                errorf(cg, str.Concat("embed: cannot resolve source directory ", srcDir))
+            } else if str.Len(canonEmbed) == 0 {
+                errorf(cg, str.Concat("embed: cannot resolve path ", d.embedPath))
+            } else if !str.Equal(canonEmbed, canonSrc) && !str.StartsWith(canonEmbed, str.Concat(canonSrc, "/")) {
+                errorf(cg, str.Concat("embed path escapes source directory: ", d.embedPath))
+            } else {
+                spec := embedSpec{srcRoot: canonEmbed, virtRoot: cleanEmbedRoot(d.embedPath)}
+                cg.embeds = append(cg.embeds, spec)
+            }
         }
         // Emit global variables (ST_VARDECL stores data on Stmt, not Decl)
         if decls[i].kind == ast.ST_VARDECL {
@@ -16069,6 +16183,19 @@ fn dirNameCG(p: string) -> string {
     return str.Substr(p, 0, idx)
 }
 
+// canonicalPathCG returns the canonical absolute form of p via realpath,
+// or "" when the path cannot be resolved. Skink strings are writable
+// byte buffers, so a 4096-padded string serves as the resolved buffer
+// (PATH_MAX).
+fn canonicalPathCG(p: string) -> string {
+    buf := str.Repeat(" ", 4096)
+    r := realpath(p, buf)
+    if int64(r) == 0 {
+        return ""
+    }
+    return r
+}
+
 // joinPathCG joins two path segments with a single slash.
 fn joinPathCG(a: string, b: string) -> string {
     if str.Len(a) == 0 || str.Equal(a, ".") {
@@ -16098,9 +16225,14 @@ fn cleanEmbedRoot(s: string) -> string {
 
 // walkEmbedDir collects every regular file under srcDir, recursing into
 // subdirectories. Each file's virtual path is virtPrefix + "/" + name.
-// Unreadable inputs surface as codegen errors.
-fn walkEmbedDir(cg: *CodeGen, srcDir: string, virtPrefix: string) -> []embedFile {
+// Unreadable inputs surface as codegen errors. depth caps recursion so
+// a symlinked directory cycle cannot loop forever (VULN-09).
+fn walkEmbedDir(cg: *CodeGen, srcDir: string, virtPrefix: string, depth: int) -> []embedFile {
     var out []embedFile
+    if depth > 64 {
+        errorf(cg, "embed: directory nesting too deep (possible symlink cycle)")
+        return out
+    }
     entries, err := fs.ReadDir(srcDir)
     if err.message != "" {
         errorf(cg, str.Concat("embed: cannot read directory ", srcDir))
@@ -16115,7 +16247,7 @@ fn walkEmbedDir(cg: *CodeGen, srcDir: string, virtPrefix: string) -> []embedFile
             virtPath = str.Concat(virtPrefix, str.Concat("/", name))
         }
         if entries[i].IsDir {
-            sub := walkEmbedDir(cg, srcPath, virtPath)
+            sub := walkEmbedDir(cg, srcPath, virtPath, depth + 1)
             j := 0
             for j < len(sub) {
                 out = append(out, sub[j])
@@ -16159,7 +16291,7 @@ fn emitEmbedTables(cg: *CodeGen) {
     var seen []string
     i := 0
     for i < len(cg.embeds) {
-        found := walkEmbedDir(cg, cg.embeds[i].srcRoot, cg.embeds[i].virtRoot)
+        found := walkEmbedDir(cg, cg.embeds[i].srcRoot, cg.embeds[i].virtRoot, 0)
         j := 0
         for j < len(found) {
             dup := false
@@ -16453,11 +16585,18 @@ fn emitRuntimeDecls(cg: *CodeGen) {
     emitHeader(cg, "declare void @Skink_panic(i8*)\n")
     emitHeader(cg, "declare void @Skink_bounds_check(i32, i32, i32)\n")
     emitHeader(cg, "declare i32 @setjmp(i8*) returns_twice\n")
+    emitHeader(cg, "declare i8* @Skink_panic_acquire()\n")
+    emitHeader(cg, "declare void @Skink_panic_commit()\n")
     emitHeader(cg, "declare i32 @Skink_panic_push_handler(i8*)\n")
     emitHeader(cg, "declare void @Skink_panic_pop_handler()\n")
     emitHeader(cg, "declare i32 @Skink_panic_pending()\n")
     emitHeader(cg, "declare i8* @Skink_panic_recover()\n")
     emitHeader(cg, "declare void @Skink_panic_reraise()\n")
+    emitHeader(cg, "declare i8* @Skink_format_i32(i32)\n")
+    emitHeader(cg, "declare i8* @Skink_format_i64(i64)\n")
+    emitHeader(cg, "declare i8* @Skink_format_double_f(double)\n")
+    emitHeader(cg, "declare i8* @Skink_format_double_g(double)\n")
+    emitHeader(cg, "declare i8* @Skink_rc_alloc_array(i64, i64)\n")
     emitHeader(cg, "declare i8* @Skink_chan_make(i32, i32)\n")
     emitHeader(cg, "declare void @Skink_chan_close(i8*)\n")
     emitHeader(cg, "declare void @Skink_chan_send(i8*, i8*)\n")
@@ -16484,8 +16623,12 @@ fn emitRuntimeDecls(cg: *CodeGen) {
         "Skink_slice_base", "Skink_slice_hdr", "Skink_slice_sub",
         "Skink_str_from_slice", "Skink_arr_count", "Skink_rc_capacity",
         "Skink_panic", "Skink_bounds_check", "setjmp",
+        "Skink_panic_acquire", "Skink_panic_commit",
         "Skink_panic_push_handler", "Skink_panic_pop_handler",
         "Skink_panic_pending", "Skink_panic_recover", "Skink_panic_reraise",
+        "Skink_format_i32", "Skink_format_i64",
+        "Skink_format_double_f", "Skink_format_double_g",
+        "Skink_rc_alloc_array",
         "Skink_chan_make", "Skink_chan_close", "Skink_chan_send",
         "Skink_chan_recv", "Skink_chan_select", "Skink_spawn", "Skink_free",
         "Skink_future_make", "Skink_future_set", "Skink_future_get",

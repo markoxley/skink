@@ -115,3 +115,33 @@ pub fn TestFileServerRejectsTraversal() {
         Errorf("FileServer should return 403 for traversal attempts")
     }
 }
+
+// TestFileServerRejectsDoubleSlash guards VULN-26: a "//etc/passwd"
+// request path used to slip an absolute filesystem path past the
+// one-slash strip when the root was "". It must now resolve inside the
+// canonical root — 403 or 404, but never the file's contents.
+pub fn TestFileServerRejectsDoubleSlash() {
+    makeStaticFixture()
+    defer removeStaticFixture()
+    w := get("//etc/passwd")
+    if w.Status() == 200 {
+        Errorf("FileServer served //etc/passwd — absolute-path escape")
+    }
+    if str.Contains(w.ResponseBody(), "root:") {
+        Errorf("FileServer leaked /etc/passwd contents via // path")
+    }
+}
+
+// TestFileServerRejectsNestedTraversal guards VULN-26: traversal hidden
+// mid-path ("/a/../..") must not escape the canonical root.
+pub fn TestFileServerRejectsNestedTraversal() {
+    makeStaticFixture()
+    defer removeStaticFixture()
+    w := get("/a/../../etc/passwd")
+    if w.Status() == 200 {
+        Errorf("FileServer served nested-traversal path")
+    }
+    if str.Contains(w.ResponseBody(), "root:") {
+        Errorf("FileServer leaked /etc/passwd via nested traversal")
+    }
+}

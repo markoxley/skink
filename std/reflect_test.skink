@@ -394,3 +394,35 @@ pub fn TestSliceVsPointerFields() {
         Errorf("ElemType(pinners) should be " + fPinner.type_name + ", got " + reflect.ElemType(fPinners))
     }
 }
+
+// --- VULN-17 security regression ---
+
+var rtInt = 12345
+
+// TestErasedGenericHeuristic guards VULN-17: when the type name is an
+// erased generic parameter ("K" — as inside HashMap<K,V>), reflect
+// used to guess "string vs int" by probing whether the i8* value
+// pointed into mapped memory and then strcmp'ing it — crashing on
+// PROT_NONE pages and misclassifying integer-valued pointers. The
+// heuristic is now fault-probed and RC-registry checked. An
+// address-valued "string" must be treated as an integer (pointer
+// identity), not dereferenced.
+pub fn TestErasedGenericHeuristic() {
+    // &rtInt is a mapped address — under the old heuristic it was
+    // treated as a C string and strcmp'd over arbitrary bytes.
+    fakeStr := string(int64(&rtInt))
+    // Pointer identity: equal addresses are equal, differing ones are
+    // not — even if the addressed bytes were identical text.
+    testing.AssertTrue(reflect.Equals(fakeStr, fakeStr, "K"), "same address equals under generic")
+    other := string(int64(&rtInt) + int64(8))
+    testing.AssertTrue(!reflect.Equals(fakeStr, other, "K"), "different addresses differ under generic")
+    // Hashing an address-valued key must be deterministic and must not
+    // dereference the pointer.
+    h1 := reflect.Hash(fakeStr, "K")
+    h2 := reflect.Hash(fakeStr, "K")
+    testing.AssertEqualInt(h1, h2, "generic hash deterministic")
+    // Genuine strings still compare by content under erased generics.
+    a := "same"
+    b := str.Concat("sa", "me")
+    testing.AssertTrue(reflect.Equals(a, b, "K"), "string content equality under generic")
+}

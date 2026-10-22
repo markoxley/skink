@@ -90,13 +90,21 @@ pub struct Connection {
         Skink_set_socket_timeouts(self.fd, recvMs, sendMs)
     }
 
-    // Recv reads up to maxLen bytes from the socket into a freshly allocated buffer.
+    // Recv reads up to maxLen bytes from the socket into a freshly
+    // allocated, NUL-terminated buffer. calloc zeroes the tail so bytes
+    // past bytesRead can never leak uninitialized heap memory, and the
+    // explicit terminator keeps the buffer safe as a C string (VULN-16).
     pub fn Recv(self: *Connection, maxLen: int) -> (string, errors.Error) {
-        buf := libc.malloc(maxLen + 1)
+        if maxLen <= 0 {
+            return "", errors.New("invalid max length")
+        }
+        buf := libc.calloc(maxLen + 1, 1)
         bytesRead := recv(self.fd, buf, maxLen, 0)
         if bytesRead <= 0 {
+            libc.free(buf)
             return "", errors.New("recv failed")
         }
+        buf[bytesRead] = 0
         return buf, errors.New("")
     }
 

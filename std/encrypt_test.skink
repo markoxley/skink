@@ -24,6 +24,7 @@
 module encrypt_test
 
 import "std/encrypt"
+import "std/libc"
 import "std/str"
 import "std/strconv"
 import "testing"
@@ -234,5 +235,55 @@ pub fn TestRSANoPublicKey() {
     _, e := rsa.Encrypt("dummy", 5)
     if e.message == "" {
         Errorf("RSA Encrypt without public key should fail")
+    }
+}
+
+// --- VULN-22 security regressions ---
+
+// TestAESLenNulKey guards VULN-22: keys containing NUL bytes were
+// measured with strlen, silently truncating the key material. Two keys
+// that differ only after an interior NUL must produce different
+// ciphers — proven by a cross-decrypt that must fail authentication.
+pub fn TestAESLenNulKey() {
+    k1 := libc.malloc(16)
+    k2 := libc.malloc(16)
+    for i := 0; i < 16; i = i + 1 {
+        k1[i] = 65
+        k2[i] = 65
+    }
+    k1[5] = 0
+    k2[5] = 0
+    k1[6] = 66 // differ only after the NUL
+    k2[6] = 67
+    c1 := encrypt.NewAESLen(k1, 16)
+    c2 := encrypt.NewAESLen(k2, 16)
+    plaintext := "secret data"
+    enc, e1 := c1.Encrypt(plaintext, 11)
+    if e1.message != "" {
+        Errorf("AESLen encrypt failed: " + e1.message)
+    }
+    // Decrypting under the post-NUL-differing key must fail GCM auth —
+    // with strlen keys both truncated to "AAAAA" and this would succeed.
+    _, e2 := c2.Decrypt(enc.data, enc.length)
+    if e2.message == "" {
+        Errorf("post-NUL key difference was ignored (strlen key truncation)")
+    }
+    libc.free(k1)
+    libc.free(k2)
+}
+
+// TestAESGCMTagReject guards VULN-22: a corrupted authentication tag
+// must fail decryption and leave no unauthenticated plaintext behind.
+pub fn TestAESGCMTagReject() {
+    aes := encrypt.NewAES(aesKey128)
+    enc, e1 := aes.Encrypt("authenticated", 13)
+    if e1.message != "" {
+        Errorf("encrypt failed: " + e1.message)
+    }
+    // Layout is nonce(12) || tag(16) || ciphertext — corrupt a tag byte.
+    enc.data[20] = (int(enc.data[20]) + 1) % 256
+    _, e2 := aes.Decrypt(enc.data, enc.length)
+    if e2.message == "" {
+        Errorf("corrupted GCM tag decrypted successfully")
     }
 }

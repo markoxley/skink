@@ -130,3 +130,55 @@ pub fn TestReadAll() {
     b.Free()
     libc.free(out)
 }
+
+// --- VULN-11 security regressions ---
+
+var btPanicMsg: string
+
+// btSavePanic captures the panic message recovered inside btInvoke.
+fn btSavePanic(s: string) { btPanicMsg = s }
+
+// btInvoke runs f inside a recoverable frame.
+fn btInvoke(f: fn()) {
+    defer fn() { btSavePanic(recover()) }()
+    f()
+}
+
+// btExpectPanic asserts that f panics (VULN-11 converts the old silent
+// ensureCap early-return — a guaranteed heap overflow — into a panic).
+fn btExpectPanic(f: fn(), what: string) {
+    btPanicMsg = ""
+    btInvoke(f)
+    if str.Len(btPanicMsg) == 0 {
+        Errorf("expected panic: " + what)
+    }
+}
+
+var btBuf = buf.NewBuffer()
+
+fn btWriteNegative() {
+    btBuf.Write("abc", -1)
+}
+
+fn btWriteOverflow() {
+    // len + extra overflows int32 — previously returned silently while
+    // Write memcpy'd the full len into insufficient storage (VULN-11).
+    // The buffer is pre-filled so len + extra crosses INT_MAX before
+    // any memcpy happens; a bare huge `extra` would OOB-read instead.
+    btBuf.Write("x", 2147483640)
+}
+
+// TestWriteSizeSafety guards VULN-11: negative and overflowing write
+// sizes must panic rather than silently corrupt the heap.
+pub fn TestWriteSizeSafety() {
+    btExpectPanic(btWriteNegative, "buf.Write with negative length")
+    // Seed 16 bytes so len + extra overflows int32 inside ensureCap.
+    btBuf.Write("0123456789abcdef", 16)
+    btExpectPanic(btWriteOverflow, "buf.Write with overflowing length")
+    // Ordinary writes still work.
+    b := buf.NewBuffer()
+    b.Write("hello", 5)
+    if b.Len() != 5 {
+        Errorf("buf.Write normal case broken")
+    }
+}

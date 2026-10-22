@@ -284,3 +284,22 @@ pub fn TestRawQuery() {
     }
     conn.Close()
 }
+
+// --- VULN-20 security regression ---
+
+// TestIdentifierInjection guards VULN-20: table/column identifiers are
+// interpolated into generated SQL, so an injected identifier must be
+// rejected at mapping time instead of reaching sqlite3_exec.
+pub fn TestIdentifierInjection() {
+    conn, _ := orm.Open(":memory:")
+    defer conn.Close()
+    u := User{}
+    _, err := orm.TableNamed(conn, reflect.TypeOf<User>(u), "users; DROP TABLE users;--")
+    testing.AssertTrue(str.Len(err.String()) > 0, "injected table name must error")
+    _, err2 := orm.TableNamed(conn, reflect.TypeOf<User>(u), `users"x`)
+    testing.AssertTrue(str.Len(err2.String()) > 0, "quote in table name must error")
+    // A legal name still maps.
+    tbl, err3 := orm.TableNamed(conn, reflect.TypeOf<User>(u), "users_ok")
+    testing.AssertTrue(str.Len(err3.String()) == 0, "legal table name works")
+    _ = tbl
+}

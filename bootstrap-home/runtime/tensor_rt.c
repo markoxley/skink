@@ -36,6 +36,7 @@
 // with Skink_slice_data before dereferencing elements.
 extern int64_t Skink_slice_len(void *ptr);
 extern void *Skink_slice_data(void *ptr);
+extern void Skink_panic(char *msg);
 
 // Tensor represents a 2D matrix with row-major double-precision data.
 typedef struct {
@@ -44,8 +45,20 @@ typedef struct {
   double *data;
 } Tensor;
 
+// skink_tensor_check_dims validates tensor creation dimensions: both
+// must be positive and their product must fit in int, otherwise the
+// element-count multiply wraps and a small allocation gets a large
+// write loop (VULN-21).
+static void skink_tensor_check_dims(int rows, int cols) {
+  if (rows <= 0 || cols <= 0 ||
+      (int64_t)rows * (int64_t)cols > (int64_t)INT32_MAX) {
+    Skink_panic((char *)"tensor: invalid dimensions");
+  }
+}
+
 // Skink_tensor_ones creates a tensor filled with 1.0 values.
 void *Skink_tensor_ones(int rows, int cols) {
+  skink_tensor_check_dims(rows, cols);
   Tensor *t = malloc(sizeof(Tensor));
   if (!t)
     return NULL;
@@ -64,6 +77,7 @@ void *Skink_tensor_ones(int rows, int cols) {
 
 // Skink_tensor_zeros creates a tensor filled with 0.0 values.
 void *Skink_tensor_zeros(int rows, int cols) {
+  skink_tensor_check_dims(rows, cols);
   Tensor *t = malloc(sizeof(Tensor));
   if (!t)
     return NULL;
@@ -499,24 +513,30 @@ void *Skink_tensor_inv(void *t_ptr) {
 }
 
 // Skink_math_diff computes the numerical derivative of f at x using central differences.
-double Skink_math_diff(double (*f)(double), double x) {
+// f is a Skink closure handle — a block whose first field is the code
+// pointer, invoked as code(f, x). Calling the handle itself executes
+// heap data as code (VULN-05).
+double Skink_math_diff(void *f, double x) {
+  double (*code)(void *, double) = *(double (**)(void *, double))f;
   double h = 1e-5;
-  return (f(x + h) - f(x - h)) / (2.0 * h);
+  return (code(f, x + h) - code(f, x - h)) / (2.0 * h);
 }
 
 // Skink_math_integrate computes the definite integral of f from a to b using the trapezoidal rule.
-double Skink_math_integrate(double (*f)(double), double a, double b) {
+double Skink_math_integrate(void *f, double a, double b) {
+  double (*code)(void *, double) = *(double (**)(void *, double))f;
   int n = 1000;
   double h = (b - a) / n;
-  double sum = 0.5 * (f(a) + f(b));
+  double sum = 0.5 * (code(f, a) + code(f, b));
   for (int i = 1; i < n; i++) {
-    sum += f(a + i * h);
+    sum += code(f, a + i * h);
   }
   return sum * h;
 }
 
 // Skink_tensor_gradient computes the numerical gradient of f with respect to the tensor x.
-void *Skink_tensor_gradient(double (*f)(double *), void *x_ptr) {
+void *Skink_tensor_gradient(void *f, void *x_ptr) {
+  double (*code)(void *, double *) = *(double (**)(void *, double *))f;
   Tensor *x = (Tensor *)x_ptr;
   Tensor *res = malloc(sizeof(Tensor));
   if (!res)
@@ -542,9 +562,9 @@ void *Skink_tensor_gradient(double (*f)(double *), void *x_ptr) {
   for (int i = 0; i < n; i++) {
     double old = temp[i];
     temp[i] = old + h;
-    double f1 = f(temp);
+    double f1 = code(f, temp);
     temp[i] = old - h;
-    double f2 = f(temp);
+    double f2 = code(f, temp);
     temp[i] = old;
     res->data[i] = (f1 - f2) / (2.0 * h);
   }
@@ -875,6 +895,18 @@ void Skink_tensor_softmax_data(const double *a_data, int rows, int cols,
   }
 }
 
+// skink_check_conv_dims validates conv/pool parameters: stride==0 used
+// to fault with SIGFPE, and kernel>input produced a negative output
+// dimension and unchecked negative indexing (VULN-21).
+static void skink_check_conv_dims(int in_h, int in_w, int kernel, int stride) {
+  if (stride <= 0) {
+    Skink_panic((char *)"tensor: stride must be positive");
+  }
+  if (kernel <= 0 || in_h <= 0 || in_w <= 0 || kernel > in_h || kernel > in_w) {
+    Skink_panic((char *)"tensor: kernel size exceeds input dimensions");
+  }
+}
+
 // 2D Convolution with tiling
 void Skink_tensor_conv2d_data(const double *input_data, int batch, int in_ch,
                               int in_h, int in_w, const double *filter_data,
@@ -883,6 +915,7 @@ void Skink_tensor_conv2d_data(const double *input_data, int batch, int in_ch,
   input_data = (const double *)Skink_slice_data((void *)input_data);
   filter_data = (const double *)Skink_slice_data((void *)filter_data);
   output_data = (double *)Skink_slice_data((void *)output_data);
+  skink_check_conv_dims(in_h, in_w, kernel, stride);
   int out_h = (in_h - kernel) / stride + 1;
   int out_w = (in_w - kernel) / stride + 1;
 
@@ -918,6 +951,7 @@ void Skink_tensor_maxpool2d_data(const double *input_data, int batch,
                                  int stride, double *output_data) {
   input_data = (const double *)Skink_slice_data((void *)input_data);
   output_data = (double *)Skink_slice_data((void *)output_data);
+  skink_check_conv_dims(in_h, in_w, kernel, stride);
   int out_h = (in_h - kernel) / stride + 1;
   int out_w = (in_w - kernel) / stride + 1;
 

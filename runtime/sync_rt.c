@@ -360,3 +360,56 @@ int Skink_atomic_cas(int *ptr, int *expected, int desired) {
   return __atomic_compare_exchange_n(ptr, expected, desired, 0,
                                      __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
 }
+
+/* ---------------------------------------------------------------------------
+ * PRNG seeding (VULN-27)
+ * ---------------------------------------------------------------------------
+ */
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <time.h>
+#include <unistd.h>
+#endif
+
+/* skink_do_seed performs the actual srand(): prefer OS entropy so two
+ * processes started in the same second get different sequences; fall
+ * back to time^pid^address entropy. libc rand() is process-global and
+ * not cryptographically secure regardless — see std/rand docs.
+ */
+static void skink_do_seed(void) {
+  unsigned int seed = 0;
+#ifdef _WIN32
+  /* rand_s is the MSVCRT cryptographic rand; _CRT_RAND_S must be defined
+   * before <stdlib.h> — it may not be here, so declare it directly. */
+  extern int rand_s(unsigned int *);
+  if (rand_s(&seed) != 0)
+    seed = 0;
+#else
+  int fd = open("/dev/urandom", O_RDONLY);
+  if (fd >= 0) {
+    ssize_t n = read(fd, &seed, sizeof(seed));
+    close(fd);
+    if (n != (ssize_t)sizeof(seed))
+      seed = 0;
+  }
+#endif
+  if (seed == 0) {
+    seed = (unsigned int)time(NULL) ^ (unsigned int)(uintptr_t)&seed;
+#ifndef _WIN32
+    seed ^= (unsigned int)getpid() * 2654435761u;
+#endif
+  }
+  srand(seed);
+}
+
+/*
+ * Skink_rand_seed_once seeds the process-global libc rand() exactly
+ * once, guarded by pthread_once so racing callers cannot reseed
+ * mid-sequence (VULN-27). An explicit rand.Seed(s) call afterwards
+ * still overrides for reproducible tests.
+ */
+void Skink_rand_seed_once(void) {
+  static pthread_once_t once = PTHREAD_ONCE_INIT;
+  pthread_once(&once, skink_do_seed);
+}

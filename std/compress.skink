@@ -55,6 +55,14 @@ pub struct GzipWriter {
         if self.closed {
             return 0, errors.New("write to closed GzipWriter")
         }
+        if len < 0 {
+            return 0, errors.New("GzipWriter.Write: negative length")
+        }
+        // 64-bit math: bufLen + len can wrap int32, defeating the growth
+        // check and letting the copy write past the buffer (VULN-13).
+        if int64(self.bufLen) + int64(len) > int64(2147483647) {
+            return 0, errors.New("GzipWriter: size overflow")
+        }
         // Grow buffer until it can hold the new data
         for self.bufLen + len > self.bufCap {
             self.grow()
@@ -108,13 +116,17 @@ pub struct GzipWriter {
     }
 
     fn grow(self: *GzipWriter) {
-        // Double capacity, with a minimum of 256 bytes
-        newCap := self.bufCap * 2
+        // Double capacity, with a minimum of 256 bytes. int64 math so
+        // bufCap * 2 cannot wrap negative near INT32_MAX (VULN-13).
+        newCap := int64(self.bufCap) * 2
         if newCap < 256 {
             newCap = 256
         }
-        self.buf = libc.realloc(self.buf, newCap)
-        self.bufCap = newCap
+        if newCap > int64(2147483647) {
+            panic("GzipWriter: size overflow")
+        }
+        self.buf = libc.realloc(self.buf, int(newCap))
+        self.bufCap = int(newCap)
     }
 }
 
@@ -125,7 +137,15 @@ pub struct Deflater {
 
     // Compress returns the compressed data and its byte length.
     pub fn Compress(self: *Deflater, data: string, len: int) -> (string, int) {
+        if len < 0 {
+            // A negative len became a huge uLong in zlib — bounds-check
+            // before it reaches C (VULN-13).
+            return "", 0
+        }
         bound := Skink_compress_bound(len)
+        if bound <= 0 {
+            return "", 0
+        }
         out := libc.calloc(bound + 1, 1)
         compressedLen := Skink_compress(data, len, out, bound)
         if compressedLen < 0 {
@@ -141,6 +161,12 @@ pub struct Deflater {
 pub struct Inflater {
     // Decompress inflates data of length dataLen into a buffer of capacity outCap.
     pub fn Decompress(self: Inflater, data: string, dataLen: int, outCap: int) -> string {
+        // Negative sizes became huge uLong values in zlib — a caller-
+        // supplied outCap of -1 made calloc(0) succeed and then zlib
+        // wrote unboundedly (VULN-13).
+        if dataLen < 0 || outCap <= 0 {
+            return ""
+        }
         out := libc.calloc(outCap + 1, 1)
         rc := Skink_uncompress(data, dataLen, out, outCap)
         if rc < 0 {
@@ -184,26 +210,47 @@ pub fn Compress(data: string) -> (string, errors.Error) {
     return out, errors.New("")
 }
 
-// Decompress reverses Compress: reads the 8-byte size header and inflates
-// the zlib payload back to the original bytes.
-pub fn Decompress(data: string) -> (string, errors.Error) {
-    origSize := int(data[0]) | (int(data[1]) << 8) | (int(data[2]) << 16) | (int(data[3]) << 24)
-    clen := int(data[4]) | (int(data[5]) << 8) | (int(data[6]) << 16) | (int(data[7]) << 24)
-    if origSize < 0 || clen <= 0 || clen > 268435456 {
+// DecompressBuf reverses Compress: reads the 8-byte size header and
+// inflates the zlib payload back to the original bytes. dataLen is the
+// real byte length of data (which may contain NULs); it bounds every
+// header and payload read, and the claimed sizes are validated before
+// any allocation — a crafted header can no longer cause an OOB read,
+// an origSize+1 wrap, or a multi-gigabyte "decompression bomb"
+// allocation (VULN-13).
+pub fn DecompressBuf(data: string, dataLen: int) -> (string, errors.Error) {
+    if dataLen < 8 {
         return "", errors.New("not a compress.Compress buffer")
     }
-    // Extract the payload bytes (indexing is byte-accurate even when the
-    // buffer contains NULs, unlike str.Len/Substr).
-    payload := libc.malloc(clen + 1)
-    for i := 0; i < clen; i = i + 1 {
+    origSize := int64(int(data[0])) | (int64(int(data[1])) << 8) | (int64(int(data[2])) << 16) | (int64(int(data[3])) << 24)
+    clen := int64(int(data[4])) | (int64(int(data[5])) << 8) | (int64(int(data[6])) << 16) | (int64(int(data[7])) << 24)
+    // The header fields are u32: reject sign-bit values, a payload
+    // extending past the caller-provided length, and absurd output sizes.
+    if origSize < 0 || origSize > int64(268435456) {
+        return "", errors.New("not a compress.Compress buffer")
+    }
+    if clen <= 0 || clen > int64(dataLen) - 8 {
+        return "", errors.New("not a compress.Compress buffer")
+    }
+    payload := libc.malloc(int(clen) + 1)
+    for i := 0; i < int(clen); i = i + 1 {
         payload[i] = data[i + 8]
     }
-    out := libc.calloc(origSize + 1, 1)
-    rc := Skink_uncompress(payload, clen, out, origSize)
+    out := libc.calloc(int(origSize) + 1, 1)
+    rc := Skink_uncompress(payload, int(clen), out, int(origSize))
     libc.free(payload)
     if rc < 0 {
         libc.free(out)
         return "", errors.New("decompression failed")
     }
     return out, errors.New("")
+}
+
+// Decompress reverses Compress.
+//
+// Deprecated: unsafe — a string cannot carry the real byte length of
+// data containing NULs, so this delegates with str.Len(data), which
+// stops at the first NUL and rejects most real Compress output rather
+// than reading out of bounds. Use DecompressBuf with the true length.
+pub fn Decompress(data: string) -> (string, errors.Error) {
+    return DecompressBuf(data, str.Len(data))
 }

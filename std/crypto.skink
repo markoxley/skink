@@ -30,6 +30,9 @@ import "std/libc"
 extern fn MD5(d: string, n: int64, md: string) -> string
 extern fn SHA1(d: string, n: int64, md: string) -> string
 extern fn SHA256(d: string, n: int64, md: string) -> string
+// OPENSSL_cleanse scrubs memory so the compiler cannot optimize the
+// wipe away — used to destroy key material before freeing (VULN-22).
+extern fn OPENSSL_cleanse(ptr: string, n: int64)
 
 // Deprecated: MD5 is cryptographically broken and should not be used for
 // security purposes. Use Sha256 instead.
@@ -69,12 +72,22 @@ pub fn Sha1Hex(data: string) -> string {
     return bytesToHex(raw, 20)
 }
 
-// Sha256 computes the SHA-256 hash of data and returns the 32-byte raw digest.
-pub fn Sha256(data: string) -> string {
-    len := str.Len(data)
+// Sha256Bytes computes the SHA-256 hash of data[0..dataLen) and returns
+// the 32-byte raw digest. data may contain NUL bytes — Sha256 uses
+// strlen and silently hashes only the prefix (VULN-22).
+pub fn Sha256Bytes(data: string, dataLen: int) -> string {
     out := libc.malloc(32)
-    SHA256(data, len, out)
+    SHA256(data, dataLen, out)
     return out
+}
+
+// Sha256 computes the SHA-256 hash of data and returns the 32-byte raw digest.
+//
+// Deprecated: unsafe for binary data — the length is taken from
+// strlen(data), so input containing NUL bytes hashes only the prefix.
+// Use Sha256Bytes for byte-exact input.
+pub fn Sha256(data: string) -> string {
+    return Sha256Bytes(data, str.Len(data))
 }
 
 // Sha256Hex computes the SHA-256 hash of data and returns it as a 64-character
@@ -84,15 +97,14 @@ pub fn Sha256Hex(data: string) -> string {
     return bytesToHex(raw, 32)
 }
 
-// HmacSha256 computes HMAC-SHA256 per RFC 2104.
-// Returns the 32-byte raw HMAC digest.
-pub fn HmacSha256(key: string, message: string) -> string {
+// HmacSha256Bytes computes HMAC-SHA256 over explicit-length key and
+// message buffers — both may contain NUL bytes (VULN-22). Key-derived
+// intermediate buffers are wiped with OPENSSL_cleanse before freeing.
+pub fn HmacSha256Bytes(key: string, keyLen: int, message: string, msgLen: int) -> string {
     blockSize := 64
-    keyLen := str.Len(key)
-
     // If key is longer than block size, hash it down to 32 bytes
     if keyLen > blockSize {
-        key = Sha256(key)
+        key = Sha256Bytes(key, keyLen)
         keyLen = 32
     }
 
@@ -109,7 +121,6 @@ pub fn HmacSha256(key: string, message: string) -> string {
     }
 
     // Inner hash: H(ipad || message)
-    msgLen := str.Len(message)
     innerData := libc.calloc(blockSize + msgLen, 1)
     libc.memcpy(innerData, ipad, blockSize)
     libc.memcpy(string(int64(innerData) + int64(blockSize)), message, msgLen)
@@ -125,7 +136,12 @@ pub fn HmacSha256(key: string, message: string) -> string {
 
     result := libc.malloc(32)
     SHA256(resultData, blockSize + 32, result)
-    // Free all intermediate buffers
+    // Scrub all key-derived intermediates before freeing (VULN-22).
+    OPENSSL_cleanse(resultData, int64(blockSize + 32))
+    OPENSSL_cleanse(opad, int64(blockSize))
+    OPENSSL_cleanse(ipad, int64(blockSize))
+    OPENSSL_cleanse(paddedKey, int64(blockSize))
+    OPENSSL_cleanse(inner, int64(32))
     libc.free(resultData)
     libc.free(opad)
     libc.free(ipad)
@@ -133,6 +149,16 @@ pub fn HmacSha256(key: string, message: string) -> string {
     libc.free(inner)
 
     return result
+}
+
+// HmacSha256 computes HMAC-SHA256 per RFC 2104.
+// Returns the 32-byte raw HMAC digest.
+//
+// Deprecated: unsafe for binary key/message — both lengths come from
+// strlen, so NUL bytes silently truncate the inputs. Use
+// HmacSha256Bytes for byte-exact inputs.
+pub fn HmacSha256(key: string, message: string) -> string {
+    return HmacSha256Bytes(key, str.Len(key), message, str.Len(message))
 }
 
 // HexEncode encodes raw bytes to a lowercase hex string.

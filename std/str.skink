@@ -110,17 +110,29 @@ pub fn Free(self: *Builder) {
 
 // ensure grows the backing allocation if there is not enough room for extra bytes.
 fn ensure(self: *Builder, extra: int) {
-    need := self.len + extra + 1
-    if need <= self.cap {
+    // 64-bit math: len + extra + 1 overflows int32 for large writes,
+    // making need <= cap falsely true and letting callers memcpy past
+    // the allocation (VULN-11).
+    need64 := int64(self.len) + int64(extra) + 1
+    if need64 <= int64(self.cap) {
         return
     }
-    // Double the capacity, or use the exact requirement if larger.
-    newCap := self.cap * 2
-    if newCap < need {
-        newCap = need
+    if need64 > int64(2147483647) {
+        panic("str.Builder: size overflow")
     }
-    self.buf = libc.realloc(self.buf, newCap)
-    self.cap = newCap
+    // Double the capacity, or use the exact requirement if larger.
+    newCap := int64(self.cap) * 2
+    if newCap < need64 {
+        newCap = need64
+    }
+    // An unchecked realloc NULL would leave self.buf zeroed while len
+    // still points into freed memory — fail loudly instead (VULN-11).
+    grown := libc.realloc(self.buf, int(newCap))
+    if int64(grown) == 0 {
+        panic("str.Builder: out of memory")
+    }
+    self.buf = grown
+    self.cap = int(newCap)
 }
 
 // Len returns the length of s in bytes (excluding the null terminator).
@@ -152,7 +164,9 @@ pub fn Contains(s: string, needle: string) -> bool {
     if needle == "" { return true }
     if s == "" { return false }
     // strstr returns a non-null pointer if the substring is found.
-    return int(libc.strstr(s, needle)) != 0
+    // Compare in int64: truncating to int could zero the low bits of a
+    // page-aligned pointer and report a false negative (VULN-25).
+    return int64(libc.strstr(s, needle)) != 0
 }
 
 // Concat returns a new string that is the concatenation of a and b.
@@ -344,9 +358,12 @@ pub fn Repeat(s: string, count: int) -> string {
     if count <= 0 { return Concat("", "") }
     n := Len(s)
     if n == 0 { return Concat("", "") }
-    // Check for integer overflow: n * count must not exceed INT_MAX
-    if n > 2147483647 / count {
-        return Concat("", "")
+    // Check for integer overflow: n * count + 1 must not exceed INT_MAX.
+    // The previous bound allowed n * count == INT_MAX, where the +1 for
+    // the terminator itself overflowed (VULN-11). Silently returning an
+    // empty string hid the bug — a size failure is a hard panic.
+    if int64(n) * int64(count) > int64(2147483646) {
+        panic("str.Repeat: size overflow")
     }
     total := n * count
     result := managedAlloc(total + 1)

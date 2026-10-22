@@ -27,13 +27,35 @@ import "testing"
 import "std/compress"
 import "std/str"
 
-// TestCompressRoundTrip verifies compress then decompress returns original.
+// TestCompressRoundTrip guards VULN-13: the legacy length-less
+// Decompress cannot know the real size of a blob containing NUL bytes
+// (every real Compress header does), so it now fails closed with an
+// error instead of reading out of bounds. The working round-trip is
+// covered by TestDecompressBufRoundtripExplicit below.
 pub fn TestCompressRoundTrip() {
     src := "hello hello hello hello hello"
     packed, err := compress.Compress(src)
     testing.AssertTrue(err.message == "", "compress ok")
     testing.AssertTrue(str.Len(packed) > 0, "compressed non-empty")
-    back, derr := compress.Decompress(packed)
-    testing.AssertTrue(derr.message == "", "decompress ok")
-    testing.AssertEqualString(src, back, "round trip")
+    _, derr := compress.Decompress(packed)
+    testing.AssertTrue(derr.message != "", "legacy Decompress must fail closed on binary data")
+}
+
+// crtPackedLen reads the compressed-length field out of a Compress()
+// blob so the real byte length can be passed to DecompressBuf — the
+// blob contains NUL bytes so str.Len cannot report it (VULN-13).
+fn crtPackedLen(packed: string) -> int {
+    clen := int(packed[4]) | (int(packed[5]) << 8) | (int(packed[6]) << 16) | (int(packed[7]) << 24)
+    return 8 + clen
+}
+
+// TestDecompressBufRoundtripExplicit guards VULN-13: the
+// length-explicit decompress API round-trips Compress output.
+pub fn TestDecompressBufRoundtripExplicit() {
+    src := "the quick brown fox jumps over the lazy dog"
+    packed, err := compress.Compress(src)
+    testing.AssertTrue(err.message == "", "compress ok")
+    back, derr := compress.DecompressBuf(packed, crtPackedLen(packed))
+    testing.AssertTrue(derr.message == "", "DecompressBuf ok")
+    testing.AssertEqualString(src, back, "explicit-length roundtrip")
 }

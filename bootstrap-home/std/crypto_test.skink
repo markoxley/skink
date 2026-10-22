@@ -25,6 +25,7 @@ module crypto_test
 
 import "std/crypto"
 import "std/str"
+import "std/libc"
 import "testing"
 
 // TestHexEncode verifies that HexEncode produces correct hex strings.
@@ -78,4 +79,43 @@ pub fn TestHmacSha256() {
     if str.Len(crypto.HexEncode(hmac, 32)) != 64 {
         Errorf("HmacSha256 hex should be 64 characters")
     }
+}
+
+// --- VULN-22 security regressions ---
+
+// TestSha256BytesBinary guards VULN-22: hashing must take an explicit
+// byte length so data containing NULs isn't truncated at the first
+// NUL the way a strlen-based measurement would be.
+pub fn TestSha256BytesBinary() {
+    b := libc.malloc(4)
+    b[0] = 97  // 'a'
+    b[1] = 98  // 'b'
+    b[2] = 0   // interior NUL — invisible to strlen
+    b[3] = 99  // 'c'
+    full := crypto.Sha256Bytes(b, 4)
+    trunc := crypto.Sha256Bytes(b, 2)
+    testing.AssertTrue(!str.Equal(full, trunc), "NUL-containing input must differ from truncated")
+    libc.free(b)
+}
+
+// TestHmacSha256BytesBinary guards VULN-22: HMAC keys and messages may
+// contain NUL bytes; the explicit-length API must hash all of them.
+pub fn TestHmacSha256BytesBinary() {
+    k := libc.malloc(4)
+    k[0] = 107 // 'k'
+    k[1] = 0
+    k[2] = 101 // 'e'
+    k[3] = 121 // 'y'
+    m := libc.malloc(4)
+    m[0] = 109 // 'm'
+    m[1] = 0
+    m[2] = 115 // 's'
+    m[3] = 103 // 'g'
+    full := crypto.HmacSha256Bytes(k, 4, m, 4)
+    trunc := crypto.HmacSha256Bytes(k, 1, m, 1)
+    testing.AssertTrue(!str.Equal(full, trunc), "NUL-containing HMAC inputs must differ from truncated")
+    // The digest is raw binary (may contain NULs) — non-empty suffices.
+    testing.AssertTrue(str.Len(full) > 0, "HMAC-SHA256 output non-empty")
+    libc.free(k)
+    libc.free(m)
 }

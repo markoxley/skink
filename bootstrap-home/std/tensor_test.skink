@@ -25,6 +25,7 @@ module tensor_test
 
 import "std/tensor"
 import "std/math"
+import "std/str"
 import "testing"
 
 // TestZeros verifies Zeros creates a tensor filled with 0.
@@ -317,4 +318,87 @@ pub fn TestLSTMCellTrain() {
     if math.Abs(h.Get([0, 0]) - 1.0) > 0.15 {
         Errorf("LSTMCell output should approach target")
     }
+}
+
+// --- VULN-21 security regressions ---
+
+var ttPanicMsg: string
+
+// ttSavePanic captures the panic message recovered inside ttInvoke.
+fn ttSavePanic(s: string) { ttPanicMsg = s }
+
+// ttInvoke runs f inside a recoverable frame.
+fn ttInvoke(f: fn()) {
+    defer fn() { ttSavePanic(recover()) }()
+    f()
+}
+
+// ttExpectPanic asserts that f panics (VULN-21 converts unchecked
+// tensor index/shape arithmetic into panics).
+fn ttExpectPanic(f: fn(), what: string) {
+    ttPanicMsg = ""
+    ttInvoke(f)
+    if str.Len(ttPanicMsg) == 0 {
+        Errorf("expected panic: " + what)
+    }
+}
+
+var ttT = tensor.Zeros([2, 3])
+
+fn ttGetOOB() {
+    _ = ttT.Get([5, 0])
+}
+
+fn ttGetNeg() {
+    _ = ttT.Get([0, -1])
+}
+
+fn ttSetOOB() {
+    ttT.Set([2, 0], 1.0)
+}
+
+fn ttZerosNegDim() {
+    _ = tensor.Zeros([-2, 3])
+}
+
+fn ttConvZeroStride() {
+    c := tensor.NewConv2D(1, 1, 3, 0)
+    input := tensor.Zeros([1, 1, 5, 5])
+    _ = c.Forward(input)
+}
+
+fn ttPoolZeroStride() {
+    p := tensor.NewMaxPool2D(2, 0)
+    input := tensor.Zeros([1, 1, 5, 5])
+    _ = p.Forward(input)
+}
+
+fn ttConvBigKernel() {
+    c := tensor.NewConv2D(1, 1, 9, 1)
+    input := tensor.Zeros([1, 1, 5, 5])
+    _ = c.Forward(input)
+}
+
+// TestTensorBounds guards VULN-21: out-of-range, negative, and
+// rank-mismatched indices panic instead of computing a wrapped offset
+// into the backing store.
+pub fn TestTensorBounds() {
+    ttExpectPanic(ttGetOOB, "tensor.Get index beyond dim")
+    ttExpectPanic(ttGetNeg, "tensor.Get negative index")
+    ttExpectPanic(ttSetOOB, "tensor.Set index beyond dim")
+    ttExpectPanic(ttZerosNegDim, "tensor.Zeros negative dim")
+    // In-range access still works.
+    ttT.Set([1, 2], 4.5)
+    if ttT.Get([1, 2]) != 4.5 {
+        Errorf("tensor Get/Set in-range broken")
+    }
+}
+
+// TestTensorStrideSafety guards VULN-21: zero strides were a SIGFPE
+// (integer divide by zero) and oversized kernels produced negative
+// output dims wrapping to huge allocations — all panic now.
+pub fn TestTensorStrideSafety() {
+    ttExpectPanic(ttConvZeroStride, "Conv2D stride 0")
+    ttExpectPanic(ttPoolZeroStride, "MaxPool2D stride 0")
+    ttExpectPanic(ttConvBigKernel, "Conv2D kernel > input")
 }

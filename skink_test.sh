@@ -32,8 +32,20 @@ run_one() {
     f="$1"
     dir=$(dirname "$f")
     base=$(basename "$f" .skink)
-    main=$dir/__skink_test_main.skink
-    bin=$dir/__skink_test_bin
+
+    # The basename is interpolated into generated Skink source
+    # (import "$base" and $base.$fn()); anything outside the identifier
+    # grammar would inject code into the compiled test main (VULN-23).
+    case "$base" in
+        *[!A-Za-z0-9_]* | "" | [0-9]*)
+            echo "SKIP $f (unsafe module name '$base')"
+            return 0
+            ;;
+    esac
+    # PID-unique generated names so concurrent runs in the same dir
+    # cannot clobber each other's mains/binaries.
+    main=$dir/__skink_test_main_$$.skink
+    bin=$dir/__skink_test_bin_$$
 
     fns=$(grep -oE '^pub fn (Test[A-Za-z0-9_]+)' "$f" | sed 's/pub fn //' | tr '\n' ' ')
     if [ -z "$fns" ]; then

@@ -37,7 +37,15 @@
 #include <unistd.h>
 #endif
 
-#define MAX_PANIC_DEPTH 64
+// PANIC_POOL_INITIAL is the initial capacity (in slots) of the growable
+// panic-handler pool. The pool is a thread-local heap array of real
+// jmp_buf objects, so the emitter no longer stack-allocates a fixed-size
+// buffer for setjmp — the old [264 x i8] alloca overflowed the stack on
+// platforms where sizeof(jmp_buf) > 264 (Linux arm64: 312) — VULN-06.
+// Because the pool grows on demand there is no depth cap: the old fixed
+// MAX_PANIC_DEPTH=64 let push fail while return-path pop still ran,
+// desynchronizing panic_depth and longjmp'ing into a dead frame — VULN-07.
+#define PANIC_POOL_INITIAL 64
 
 // panic_jmps stores the setjmp/longjmp recovery points for nested panic handlers.
 // All panic state is thread-local (__thread): a panic in a spawned thread
@@ -45,7 +53,11 @@
 // longjmp into a jmp_buf installed by another thread would be undefined
 // behavior, and a shared depth/pending counter would corrupt under
 // concurrent push/pop (comp_error.md #46).
-static __thread jmp_buf panic_jmps[MAX_PANIC_DEPTH];
+// realloc may move the array, but slots are always referenced by index
+// (panic_jmps[depth-1]) so relocation is safe.
+static __thread jmp_buf *panic_jmps = NULL;
+// panic_jmps_cap is the allocated capacity of panic_jmps in slots.
+static __thread int panic_jmps_cap = 0;
 // panic_depth tracks the current number of active panic recovery handlers.
 static __thread int panic_depth = 0;
 // panic_msg_storage holds the message from the most recent panic.
@@ -53,14 +65,42 @@ static __thread char *panic_msg_storage = NULL;
 // panic_pending is non-zero while a panic is being unwound.
 static __thread int panic_pending = 0;
 
+// Skink_panic_acquire reserves a panic-handler slot and returns a pointer
+// to its real jmp_buf storage. The caller passes this pointer to setjmp
+// and then calls Skink_panic_commit on the normal-entry path. Returns
+// NULL only on allocation failure; the pool grows without bound so depth
+// overflow is impossible.
+void *Skink_panic_acquire(void) {
+  if (panic_depth >= panic_jmps_cap) {
+    int new_cap = panic_jmps_cap ? panic_jmps_cap * 2 : PANIC_POOL_INITIAL;
+    jmp_buf *p = (jmp_buf *)realloc(panic_jmps, (size_t)new_cap * sizeof(jmp_buf));
+    if (!p) {
+      return NULL;
+    }
+    panic_jmps = p;
+    panic_jmps_cap = new_cap;
+  }
+  return (void *)(panic_jmps + panic_depth);
+}
+
+// Skink_panic_commit activates the slot reserved by Skink_panic_acquire
+// after setjmp has returned 0. On the longjmp path panic_depth was
+// already decremented by Skink_panic, so commit must only run on the
+// normal-entry edge.
+void Skink_panic_commit(void) { panic_depth++; }
+
 // Skink_panic_push_handler installs a recovery point. Returns 1 if a
-// handler is now active, 0 if the stack is full.
+// handler is now active, 0 on allocation failure.
+// Compatibility shim: stage-0 binaries emit a 264-byte stack alloca +
+// setjmp + push_handler sequence for defer frames. sizeof(jmp_buf) is 200
+// on x86_64 glibc, so the memcpy stays within that alloca; new-emitter
+// output uses acquire/commit and never calls this.
 int Skink_panic_push_handler(void *jmp_buf_ptr) {
-  if (panic_depth >= MAX_PANIC_DEPTH) {
+  void *slot = Skink_panic_acquire();
+  if (!slot) {
     return 0;
   }
-  // Copy the jmp_buf into our stack
-  memcpy(panic_jmps[panic_depth], jmp_buf_ptr, sizeof(jmp_buf));
+  memcpy(slot, jmp_buf_ptr, sizeof(jmp_buf));
   panic_depth++;
   return 1;
 }
@@ -148,6 +188,67 @@ char *Skink_format_float(double f, int prec) {
     return NULL;
   snprintf(buf, 64, "%.*f", prec, f);
   return buf;
+}
+
+// skink_snprintf_rc formats into an RC-managed buffer sized exactly by a
+// snprintf length probe. Replaces the old emitCastToString/emitIntToString
+// codegen that sprintf'd into a fixed 32-byte stack alloca — a buffer
+// overflow for large doubles and a use-after-return whenever the produced
+// string outlived the frame (VULN-02).
+static char *skink_snprintf_rc(const char *fmt, double d, long long i, int is_double) {
+  int n;
+  if (is_double) {
+    n = snprintf(NULL, 0, fmt, d);
+  } else {
+    n = snprintf(NULL, 0, fmt, i);
+  }
+  if (n < 0)
+    return NULL;
+  char *buf = (char *)Skink_rc_alloc((int64_t)n + 1);
+  if (!buf)
+    return NULL;
+  if (is_double) {
+    snprintf(buf, (size_t)n + 1, fmt, d);
+  } else {
+    snprintf(buf, (size_t)n + 1, fmt, i);
+  }
+  return buf;
+}
+
+// Skink_format_i32 returns an RC-managed "%d" string for a 32-bit int.
+char *Skink_format_i32(int v) {
+  return skink_snprintf_rc("%lld", 0.0, (long long)v, 0);
+}
+
+// Skink_format_i64 returns an RC-managed "%lld" string for a 64-bit int.
+char *Skink_format_i64(long long v) {
+  return skink_snprintf_rc("%lld", 0.0, v, 0);
+}
+
+// Skink_format_double_f returns an RC-managed "%f" string — the
+// representation the string(float) cast has always produced.
+char *Skink_format_double_f(double v) {
+  return skink_snprintf_rc("%f", v, 0, 1);
+}
+
+// Skink_format_double_prec returns an RC-managed "%.*f" string for an
+// arbitrary precision. Used by strconv.FormatFloat and fmt's %.*f —
+// the previous manual scale-by-10^precision implementation overflowed
+// int64 for precision > ~18 (and overflowed a fixed 64-byte buffer
+// before that — VULN-12). snprintf probes the exact size, so any
+// precision up to the caller's clamp is safe.
+char *Skink_format_double_prec(double v, int prec) {
+  if (prec < 0)
+    prec = 0;
+  char fmt[16];
+  snprintf(fmt, sizeof fmt, "%%.%df", prec);
+  return skink_snprintf_rc(fmt, v, 0, 1);
+}
+
+// Skink_format_double_g returns an RC-managed "%g" string — the
+// representation used by float-to-string conversions (ToString, print).
+char *Skink_format_double_g(double v) {
+  return skink_snprintf_rc("%g", v, 0, 1);
 }
 
 // Skink_test_failnow prints a FailNow message and exits the process.

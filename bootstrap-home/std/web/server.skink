@@ -389,14 +389,29 @@ pub struct Server {
         contentLen := 0
         clStr := req.Header("Content-Length")
         if str.Len(clStr) > 0 {
-            n, ok := strconv.ParseInt(clStr)
-            if !ok || n < 0 {
+            // Strict Content-Length: RFC 9110 allows DIGITs only, parsed
+            // in int64 so >2GB values are rejected rather than wrapping
+            // the i32 contentLen into a small copy bound (VULN-14).
+            n64, ok := parseContentLength(clStr)
+            if !ok {
                 return empty, 400
             }
-            contentLen = n
+            if n64 > int64(r.max) {
+                return empty, 413
+            }
+            contentLen = int(n64)
         }
-        chunked := str.Contains(str.ToLower(req.Header("Transfer-Encoding")), "chunked")
-        if bodyStart - r.head + contentLen > r.max {
+        // Transfer-Encoding must contain "chunked" as an exact comma-
+        // list token — a substring match let "xchunkedx" smuggle a
+        // chunked body past the CL path (VULN-14).
+        chunked := hasChunkedToken(str.ToLower(req.Header("Transfer-Encoding")))
+        if chunked && str.Len(clStr) > 0 {
+            // CL and TE chunked together are ambiguous — front-end and
+            // back-end can disagree on the body boundary (request
+            // smuggling). Reject outright per RFC 9112 §6.3.3.
+            return empty, 400
+        }
+        if int64(bodyStart - r.head) + int64(contentLen) > int64(r.max) {
             return empty, 413
         }
         // 4. Answer Expect: 100-continue so the client proceeds with the
@@ -571,7 +586,7 @@ struct connReader {
                     pos = le + 1
                 }
             }
-            if bodyLen + size > self.max {
+            if int64(bodyLen) + int64(size) > int64(self.max) {
                 return body, 0, 413
             }
             // Wait for the chunk data plus its trailing line ending.
@@ -580,8 +595,11 @@ struct connReader {
                 if n == -2 { return body, 0, 413 }
                 if n <= 0 { return body, 0, 0 }
             }
-            if bodyLen + size > bodyCap {
-                for bodyLen + size > bodyCap {
+            // Reserve one extra byte for the caller's NUL terminator:
+            // bodyLen + size == bodyCap previously left no room, so
+            // body[blen]=0 wrote one byte past the allocation (VULN-14).
+            if bodyLen + size + 1 > bodyCap {
+                for bodyLen + size + 1 > bodyCap {
                     bodyCap = bodyCap * 2
                 }
                 body = Skink_mem_realloc(body, int64(bodyCap))
@@ -639,6 +657,73 @@ fn hexVal(c: int) -> int {
     if c >= 65 && c <= 70 { return c - 55 }
     if c >= 97 && c <= 102 { return c - 87 }
     return -1
+}
+
+// parseContentLength parses a Content-Length header value: ASCII digits
+// only (no sign, no whitespace), accumulated in int64 so values beyond
+// 2 GiB are rejected instead of wrapping (VULN-14). Returns (value, ok).
+fn parseContentLength(s: string) -> (int64, bool) {
+    n := int(libc.strlen(s))
+    // 18 digits max: at most 999999999999999999, comfortably inside
+    // int64, so accumulation cannot overflow before a bound check.
+    if n == 0 || n > 18 {
+        return int64(0), false
+    }
+    result := int64(0)
+    for i := 0; i < n; i = i + 1 {
+        c := int(s[i])
+        if c < 48 || c > 57 {
+            return int64(0), false
+        }
+        result = result * 10 + int64(c - 48)
+    }
+    return result, true
+}
+
+// hasChunkedToken reports whether the Transfer-Encoding header value
+// contains "chunked" as a whole comma-separated list element (allowing
+// surrounding whitespace), preventing substring bypasses like
+// "xchunkedx" (VULN-14). s must already be lowercased.
+fn hasChunkedToken(s: string) -> bool {
+    n := int(libc.strlen(s))
+    tokLen := 0
+    i := 0
+    for i <= n {
+        c := 44 // ','
+        if i < n {
+            c = int(s[i])
+        }
+        if c == 44 || i == n {
+            // Examine the just-ended token s[i-tokLen..i), trimming
+            // spaces and tabs.
+            t0 := i - tokLen
+            t1 := i
+            for t0 < t1 && (s[t0] == 32 || s[t0] == 9) {
+                t0 = t0 + 1
+            }
+            for t1 > t0 && (s[t1 - 1] == 32 || s[t1 - 1] == 9) {
+                t1 = t1 - 1
+            }
+            if t1 - t0 == 7 {
+                eq := true
+                exp := "chunked"
+                for j := 0; j < 7; j = j + 1 {
+                    if s[t0 + j] != exp[j] {
+                        eq = false
+                        break
+                    }
+                }
+                if eq {
+                    return true
+                }
+            }
+            tokLen = 0
+        } else {
+            tokLen = tokLen + 1
+        }
+        i = i + 1
+    }
+    return false
 }
 
 // parseChunkSize parses a hexadecimal chunk-size line buf[start..end),

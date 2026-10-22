@@ -89,3 +89,41 @@ pub fn TestSetenvRoundtrip() {
         Errorf("Unsetenv should clear value")
     }
 }
+
+// --- VULN-05 security regression ---
+
+extern fn getpid() -> int
+extern fn kill(pid: int, sig: int) -> int
+
+var osSigFired = 0
+
+// osSigHandler is registered as the SIGUSR1 (10) handler. It only sets
+// a flag — a Skink fn() is a closure handle ({code, env}), not a C
+// function pointer, so invoking it directly jumped into data memory
+// before VULN-05 was fixed.
+fn osSigHandler() {
+    osSigFired = 1
+}
+
+// TestOnSignalFires guards VULN-05: registering a Skink fn() as a
+// signal handler must dispatch through the closure code pointer.
+// Pre-fix this crashed (or executed garbage) on signal delivery.
+pub fn TestOnSignalFires() {
+    osSigFired = 0
+    if !os.OnSignal(10, osSigHandler) {
+        Errorf("OnSignal registration failed")
+        return
+    }
+    if kill(getpid(), 10) != 0 {
+        Errorf("kill failed")
+        return
+    }
+    // Signal delivery is synchronous on the receiving thread but may
+    // land on another thread — poll briefly.
+    for i := 0; i < 1000000; i = i + 1 {
+        if osSigFired == 1 {
+            return
+        }
+    }
+    Errorf("signal handler did not run")
+}

@@ -25,6 +25,7 @@ module rand_test
 
 import "std/rand"
 import "std/libc"
+import "std/time"
 import "testing"
 
 // TestIntnRange verifies Intn returns a value in [0, n).
@@ -353,4 +354,58 @@ pub fn TestSeedReproducibility() {
     if a2 != b2 {
         Errorf("Same seed should produce same second value")
     }
+}
+
+// --- VULN-27 security regression ---
+
+// Separate completion flags: a shared counter would be a racy
+// read-modify-write that could lose an update and hang the join loop.
+var rtDoneA = false
+var rtDoneB = false
+
+// rtWorkerA / rtWorkerB hammer the PRNG from spawned threads: the old
+// unsync'd first-use seed check raced two racing initializers (and two
+// callers could observe the same seed). The runtime now seeds under
+// pthread_once.
+fn rtWorkerA() {
+    for i := 0; i < 10000; i = i + 1 {
+        _ = rand.Int()
+        _ = rand.Intn(97)
+    }
+    rtDoneA = true
+}
+
+fn rtWorkerB() {
+    for i := 0; i < 10000; i = i + 1 {
+        _ = rand.Int()
+        _ = rand.Intn(97)
+    }
+    rtDoneB = true
+}
+
+// TestConcurrentRand guards VULN-27: concurrent first-use callers must
+// not crash or corrupt the seeding path.
+pub fn TestConcurrentRand() {
+    rtDoneA = false
+    rtDoneB = false
+    spawn rtWorkerA()
+    spawn rtWorkerB()
+    for i := 0; i < 10000; i = i + 1 {
+        _ = rand.Int()
+    }
+    // Join both workers; they cannot outlive the test process.
+    for !(rtDoneA && rtDoneB) {
+        time.SleepMs(1)
+    }
+    testing.AssertTrue(true, "concurrent rand did not crash")
+}
+
+// TestSeedStillWorks guards VULN-27: explicit seeding still produces a
+// deterministic sequence.
+pub fn TestSeedStillWorks() {
+    rand.Seed(int64(1234))
+    a := rand.Int()
+    rand.Seed(int64(1234))
+    b := rand.Int()
+    testing.AssertEqualInt(a, b, "same seed must give same sequence")
 }

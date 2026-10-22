@@ -1,0 +1,194 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/codegen_safety_test.skink
+// Purpose: Security regression tests for compiler code generation:
+//            VULN-02 — string(...) casts used to sprintf into a fixed
+//              32-byte stack buffer (overflow for %f of large doubles)
+//              and returned a dangling stack pointer (use-after-return).
+//            VULN-03 — make([]T, n) multiplied the element count by the
+//              element size in i32 before widening, so n*size could wrap
+//              to a tiny allocation under a huge length, giving a heap
+//              out-of-bounds read/write primitive.
+//            VULN-04 — from-end indexing arr[^i] performed no bounds
+//              check at all.
+//          Runs standalone (module main); panics are caught with
+//          defer/recover wrappers.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/str"
+import "std/strconv"
+
+var cgFailures = 0
+
+// cgFail records a failed check and prints a diagnostic.
+fn cgFail(msg: string) {
+    cgFailures = cgFailures + 1
+    println(str.Concat("FAIL: ", msg))
+}
+
+// cgCheck asserts cond, reporting msg on failure.
+fn cgCheck(cond: bool, msg: string) {
+    if !cond {
+        cgFail(msg)
+    }
+}
+
+// cgPanicMsg stores the message captured by the recover() inside
+// cgInvoke's deferred function. One slot is enough: tests run
+// single-threaded and re-arm it per invocation.
+var cgPanicMsg: string
+
+// cgSave is the deferred closure body that captures a panic message.
+fn cgSave(s: string) {
+    cgPanicMsg = s
+}
+
+// cgInvoke runs f inside a panic handler; any panic raised by f is
+// recovered into cgPanicMsg instead of terminating the process.
+fn cgInvoke(f: fn()) {
+    defer fn() { cgSave(recover()) }()
+    f()
+}
+
+// cgExpectPanic asserts that f panics (VULN-03/04 regressions convert
+// silent memory corruption into panics).
+fn cgExpectPanic(f: fn(), what: string) {
+    cgPanicMsg = ""
+    cgInvoke(f)
+    if str.Len(cgPanicMsg) == 0 {
+        cgFail(str.Concat("expected panic: ", what))
+    }
+}
+
+// --- VULN-02: string() cast buffer overflow / use-after-return ---
+
+// cgReturnCast returns a string produced by a string() cast so the
+// produced buffer must outlive this frame — the regression is a
+// dangling stack pointer.
+fn cgReturnCast(v: int) -> string {
+    return string(v)
+}
+
+// Skink_format_double_f is the runtime helper the emitter now uses for
+// float-to-string conversion — it replaces the old 32-byte stack
+// sprintf that overflowed on large doubles (VULN-02).
+extern fn Skink_format_double_f(v: float) -> string
+
+fn testCastOverflow() {
+    // %f of 1e300 is ~309 bytes — far past the old 32-byte stack buffer.
+    s := Skink_format_double_f(1e300)
+    cgCheck(str.Len(s) > 300, str.Concat("format(1e300) truncated: len=", strconv.Itoa(str.Len(s))))
+}
+
+fn testCastLifetime() {
+    s := cgReturnCast(42)
+    cgCheck(str.Equal(s, "42"), str.Concat("returned string(42) == ", s))
+    // Churn: many casts in a loop must not exhaust/corrupt the stack —
+    // the old code emitted a fresh alloca inside a loop body.
+    i := 0
+    for i < 100000 {
+        t := string(i)
+        if str.Len(t) == 0 {
+            cgFail("empty string(i) in loop")
+            return
+        }
+        i = i + 1
+    }
+}
+
+// --- VULN-03: make([]T, n) allocation-size overflow ---
+
+fn mkNegInt() {
+    a := make([]int, -1)
+    a[0] = 1
+}
+
+fn mkNegI64() {
+    a := make([]int64, -5)
+    a[0] = 1
+}
+
+fn mkOverflow() {
+    // 2^29 * 8 bytes = 4 GiB: wrapped to 0 in the old i32 mul, giving a
+    // 0-byte allocation under a 536M-element header. With the fix the
+    // full allocation is made (Linux overcommit keeps this cheap — only
+    // the two touched pages materialize).
+    a := make([]int64, 536870912)
+    a[0] = 7
+    a[536870911] = 9
+    if a[0] != 7 || a[536870911] != 9 {
+        cgFail("4GiB-slice elements corrupted")
+    }
+    if len(a) != 536870912 {
+        cgFail("4GiB-slice len wrong")
+    }
+}
+
+fn testMakeSafety() {
+    cgExpectPanic(mkNegInt, "make([]int, -1) must panic")
+    cgExpectPanic(mkNegI64, "make([]int64, -5) must panic")
+    // Normal allocation still works.
+    ok := make([]int, 3)
+    ok[2] = 5
+    cgCheck(ok[2] == 5 && len(ok) == 3, "make([]int, 3) broken")
+    mkOverflow()
+}
+
+// --- VULN-04: from-end indexing bounds checks ---
+
+var cgArr = []int{10, 20, 30, 40}
+
+fn idxZero() { _ = cgArr[^0] }
+fn idxTooFar() { _ = cgArr[^5] }
+fn idxNeg() { _ = cgArr[^(-2)] }
+
+fn testFromEnd() {
+    // arr[^i] lowers to arr[len-i]: i==0 and negatives land past the
+    // end, i>len lands before the start — all must panic now.
+    cgExpectPanic(idxZero, "arr[^0] must panic (indexes len)")
+    cgExpectPanic(idxTooFar, "arr[^5] on len-4 slice must panic")
+    cgExpectPanic(idxNeg, "arr[^(-2)] must panic")
+    cgCheck(cgArr[^1] == 40, "arr[^1] != last element")
+    cgCheck(cgArr[^4] == 10, "arr[^4] on len-4 != first element")
+}
+
+fn testFromEndString() {
+    s := "abc"
+    cgCheck(s[^1] == 99, "s[^1] != 'c'")
+    // In-range from-end writes still work.
+    cgArr[^1] = 99
+    cgCheck(cgArr[3] == 99, "arr[^1] write broken")
+}
+
+fn main() -> int {
+    testCastOverflow()
+    testCastLifetime()
+    testMakeSafety()
+    testFromEnd()
+    testFromEndString()
+    if cgFailures > 0 {
+        println(str.Concat("codegen_safety_test: ", strconv.Itoa(cgFailures)))
+        return 1
+    }
+    println("codegen_safety_test: all checks passed")
+    return 0
+}

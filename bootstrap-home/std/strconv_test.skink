@@ -24,6 +24,7 @@
 module strconv_test
 
 import "std/strconv"
+import "std/str"
 import "testing"
 
 // TestParseInt verifies ParseInt parses valid and rejects invalid input.
@@ -241,4 +242,46 @@ pub fn TestParseInt64() {
     maxv, ok7 := strconv.ParseInt64("9223372036854775807")
     testing.AssertTrue(ok7, "ParseInt64 INT64_MAX should parse")
     testing.AssertTrue(maxv == int64(9223372036854775807), "ParseInt64 INT64_MAX value")
+}
+
+// TestFormatFloatLargePrecision guards VULN-12: precision used to be
+// written into a fixed 64-byte buffer — precision >= 62 overflowed it.
+// The buffer is now sized exactly and precision is clamped to 340.
+pub fn TestFormatFloatLargePrecision() {
+    s := strconv.FormatFloat(1.5, 100)
+    if str.Len(s) < 100 {
+        Errorf("FormatFloat(1.5, 100) too short: len=" + strconv.Itoa(str.Len(s)))
+    }
+    if str.Substr(s, 0, 3) != "1.5" {
+        Errorf("FormatFloat(1.5, 100) wrong digits: " + str.Substr(s, 0, 10))
+    }
+    s = strconv.FormatFloat(0.25, 340)
+    if str.Len(s) < 340 {
+        Errorf("FormatFloat(0.25, 340) too short")
+    }
+}
+
+var scPanicMsg: string
+
+// scSavePanic captures the panic message recovered inside scInvoke.
+fn scSavePanic(s: string) { scPanicMsg = s }
+
+// scInvoke runs f inside a recoverable frame.
+fn scInvoke(f: fn()) {
+    defer fn() { scSavePanic(recover()) }()
+    f()
+}
+
+fn scFormatTooBig() {
+    _ = strconv.FormatFloat(1.0, 100000)
+}
+
+// TestFormatFloatPrecisionLimit guards VULN-12: absurd precision values
+// panic rather than allocating an unbounded buffer.
+pub fn TestFormatFloatPrecisionLimit() {
+    scPanicMsg = ""
+    scInvoke(scFormatTooBig)
+    if str.Len(scPanicMsg) == 0 {
+        Errorf("expected panic: FormatFloat precision > 340")
+    }
 }

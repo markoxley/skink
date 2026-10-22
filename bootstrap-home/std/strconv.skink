@@ -319,66 +319,26 @@ pub fn Itoa64(n: int64) -> string {
 // FormatFloat converts a float to its decimal string representation with
 // the specified number of digits after the decimal point.
 // The caller owns the returned string.
+//
+// precision is clamped to [0, 340]: it sizes the output buffer, so an
+// unbounded value overflowed the old fixed 64-byte buffer (VULN-12).
+// 340 exceeds the largest fraction a finite f64 can usefully represent
+// (~325 digits). The formatting itself is delegated to snprintf via the
+// runtime: the former scale-by-10^precision manual algorithm overflowed
+// int64 for precision > ~18.
 pub fn FormatFloat(f: float, precision: int) -> string {
-    buf := libc.malloc(64)
-    pos := 0
-    // Handle negative values by writing '-' and negating.
-    if f < 0.0 {
-        buf[pos] = 45 // '-'
-        pos = pos + 1
-        f = -f
+    if precision < 0 {
+        precision = 0
     }
-    // Scale by 10^precision and round to the nearest integer with ties to
-    // even — the same convention as fmt's %.*f formatting. Digit-extraction
-    // without rounding visibly drifts (9.9125 formatted to "9.9124999999").
-    scale := 1.0
-    for i := 0; i < precision; i = i + 1 {
-        scale = scale * 10.0
+    if precision > 340 {
+        panic("strconv.FormatFloat: precision too large")
     }
-    scaled := f * scale
-    flr := float(int64(scaled))
-    diff := scaled - flr
-    rounded := flr
-    if diff > 0.5 {
-        rounded = flr + 1.0
-    } else if diff == 0.5 {
-        if int64(flr) % 2 != 0 {
-            rounded = flr + 1.0
-        }
-    }
-    // Emit the rounded scaled value as integer + fractional digits, padding
-    // the fraction with leading zeros when needed.
-    digits := Itoa64(int64(rounded))
-    digLen := int(libc.strlen(digits))
-    if precision <= 0 {
-        libc.memcpy(string(int64(buf) + int64(pos)), digits, digLen)
-        pos = pos + digLen
-    } else {
-        split := digLen - precision
-        if split <= 0 {
-            buf[pos] = 48 // '0'
-            pos = pos + 1
-            buf[pos] = 46 // '.'
-            pos = pos + 1
-            for i := split; i < 0; i = i + 1 {
-                buf[pos] = 48 // '0'
-                pos = pos + 1
-            }
-            libc.memcpy(string(int64(buf) + int64(pos)), digits, digLen)
-            pos = pos + digLen
-        } else {
-            libc.memcpy(string(int64(buf) + int64(pos)), digits, split)
-            pos = pos + split
-            buf[pos] = 46 // '.'
-            pos = pos + 1
-            libc.memcpy(string(int64(buf) + int64(pos)), string(int64(digits) + int64(split)), digLen - split)
-            pos = pos + digLen - split
-        }
-    }
-    libc.free(digits)
-    buf[pos] = 0
-    return buf
+    return Skink_format_double_prec(f, precision)
 }
+
+// Skink_format_double_prec is the runtime snprintf-probed %.*f
+// formatter used by FormatFloat and fmt's formatFloatPrec.
+extern fn Skink_format_double_prec(v: float, precision: int) -> string
 
 // ParseBool parses a string as a boolean. Returns (value, ok).
 // Accepts "true"/"false" (case-insensitive) and "1"/"0".

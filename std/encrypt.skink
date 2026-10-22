@@ -43,6 +43,10 @@ extern fn EVP_DecryptUpdate(ctx: string, out: string, outl: string, input: strin
 extern fn EVP_DecryptFinal_ex(ctx: string, out: string, outl: string) -> int
 extern fn EVP_CIPHER_CTX_ctrl(ctx: string, ctrlType: int, arg: int, ptr: string) -> int
 extern fn RAND_bytes(buf: string, num: int) -> int
+// OPENSSL_cleanse scrubs memory so the compiler cannot optimize the
+// wipe away — used to destroy unauthenticated plaintext and key
+// material before freeing (VULN-22).
+extern fn OPENSSL_cleanse(ptr: string, n: int64)
 
 // --- OpenSSL RSA API (PEM keys, OAEP padding) ---
 
@@ -243,6 +247,8 @@ pub struct AESCipher {
         if EVP_DecryptUpdate(ctx, outBuf, dummyLen, ctStart, ctDataLen) != 1 {
             EVP_CIPHER_CTX_free(ctx)
             libc.free(dummyLen)
+            OPENSSL_cleanse(outBuf, int64(ctDataLen))
+            libc.free(outBuf)
             return CipherResult{}, errors.New("decrypt update failed")
         }
 
@@ -250,15 +256,21 @@ pub struct AESCipher {
         if EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, GCM_TAG_SIZE, tag) != 1 {
             EVP_CIPHER_CTX_free(ctx)
             libc.free(dummyLen)
+            OPENSSL_cleanse(outBuf, int64(ctDataLen))
+            libc.free(outBuf)
             return CipherResult{}, errors.New("set tag failed")
         }
 
-        // Final verifies the tag; returns 1 on success, 0 on tag mismatch
+        // Final verifies the tag; returns 1 on success, 0 on tag mismatch.
+        // On failure outBuf holds UNVERIFIED plaintext — scrub and free
+        // it so forged data never lingers readable in the heap (VULN-22).
         finalLen := libc.malloc(4)
         if EVP_DecryptFinal_ex(ctx, string(int64(outBuf) + int64(ctDataLen)), finalLen) != 1 {
             EVP_CIPHER_CTX_free(ctx)
             libc.free(dummyLen)
             libc.free(finalLen)
+            OPENSSL_cleanse(outBuf, int64(ctDataLen))
+            libc.free(outBuf)
             return CipherResult{}, errors.New("authentication tag verification failed (wrong key or tampered data)")
         }
 
@@ -337,10 +349,22 @@ pub struct RSACipher {
     }
 }
 
+// NewAESLen creates an AES cipher with an explicit key length. The key
+// may contain NUL bytes — NewAES derives the length via strlen and
+// silently truncates such keys to a weaker prefix (VULN-22).
+// keyLen must be 16, 24, or 32 bytes (128, 192, or 256 bits).
+pub fn NewAESLen(key: string, keyLen: int) -> AESCipher {
+    return AESCipher{key: key, keyLen: keyLen}
+}
+
 // NewAES creates an AES cipher with the given key.
 // Key must be 16, 24, or 32 bytes (128, 192, or 256 bits).
+//
+// Deprecated: unsafe for binary keys — the length is taken from
+// strlen(key), so a key containing NUL bytes is silently truncated to
+// its prefix. Use NewAESLen for byte-exact keys.
 pub fn NewAES(key: string) -> AESCipher {
-    return AESCipher{key: key, keyLen: str.Len(key)}
+    return NewAESLen(key, str.Len(key))
 }
 
 // AESEncrypt is a one-shot convenience wrapper matching the book's

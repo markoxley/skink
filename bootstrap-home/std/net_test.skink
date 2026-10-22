@@ -24,6 +24,7 @@
 module net_test
 
 import "std/net"
+import "std/str"
 import "testing"
 
 // TestConnect verifies that Connect compiles and returns a result.
@@ -78,4 +79,50 @@ pub fn TestConnectInvalidPort() {
     if err.message == "" && conn.fd == 0 {
         Errorf("Connect to port 0 should fail")
     }
+}
+
+// --- VULN-16 / VULN-18 security regressions ---
+
+// TestRecvExactLength guards VULN-16: Recv must return exactly the
+// bytes received, NUL-terminated, with no stale-heap tail — the old
+// code returned the whole maxLen-sized buffer including uninitialized
+// memory.
+pub fn TestRecvExactLength() {
+    listener, lerr := net.Listen("127.0.0.1", 18240)
+    testing.AssertTrue(lerr.message == "", "listen ok")
+    defer listener.Close()
+
+    conn, cerr := net.Connect("127.0.0.1", 18240)
+    testing.AssertTrue(cerr.message == "", "connect ok")
+    defer conn.Close()
+
+    srv, aerr := net.Accept(listener)
+    testing.AssertTrue(aerr.message == "", "accept ok")
+    defer srv.Close()
+
+    // Send 5 bytes with no trailing NUL, then read them back.
+    conn.SendAll("hello", 5)
+    data, rerr := srv.Recv(64)
+    testing.AssertTrue(rerr.message == "", "recv ok")
+    // The string must be exactly 5 bytes: a stale tail would inflate
+    // str.Len past the received count and could disclose heap bytes.
+    testing.AssertEqualInt(5, str.Len(data), "Recv returns exactly the received bytes")
+    testing.AssertEqualString("hello", data, "Recv content")
+}
+
+// TestConnectWithTimeoutLoopback guards VULN-18: the poll-based
+// connect-with-timeout path still works against a loopback listener
+// (the old select/fd_set code stack-smashed on fds >= FD_SETSIZE).
+pub fn TestConnectWithTimeoutLoopback() {
+    listener, lerr := net.Listen("127.0.0.1", 18241)
+    testing.AssertTrue(lerr.message == "", "listen ok")
+    defer listener.Close()
+
+    conn, cerr := net.ConnectWithTimeout("127.0.0.1", 18241, 3000)
+    testing.AssertTrue(cerr.message == "", "ConnectWithTimeout ok")
+    defer conn.Close()
+
+    srv, aerr := net.Accept(listener)
+    testing.AssertTrue(aerr.message == "", "accept ok")
+    srv.Close()
 }

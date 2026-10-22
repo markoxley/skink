@@ -1,0 +1,12 @@
+// expect: embed path escapes
+// VULN-09 regression: an embed path resolving outside the source
+// directory must be rejected even when the canonical path exists.
+// "../.." from std/compilefail is the repo root — outside the module
+// directory — so the compiler must refuse it.
+module main
+
+embed "../.."
+
+fn main() -> int {
+    return 0
+}

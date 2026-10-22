@@ -41,6 +41,44 @@ import "std/ast"
 import "std/stridx"
 import "std/io"
 
+// realpath canonicalizes a filesystem path (POSIX realpath; _fullpath on
+// Windows). Used to confine `embed` roots to the declaring file's
+// directory under `-check` — the compilefail harness only type-checks,
+// so the emitter's identical check never runs there (VULN-09).
+extern fn realpath(path: string, resolved: string) -> string
+
+// ckDirName returns the directory portion of a path ("a/b/c" -> "a/b").
+fn ckDirName(p: string) -> string {
+    idx := str.LastIndexOf(p, "/")
+    if idx < 0 {
+        return "."
+    }
+    return str.Substr(p, 0, idx)
+}
+
+// ckCanonical returns the canonical absolute form of p via realpath, or
+// "" when the path cannot be resolved. The 4096-byte buffer serves as
+// the resolved buffer (PATH_MAX).
+fn ckCanonical(p: string) -> string {
+    buf := str.Repeat(" ", 4096)
+    r := realpath(p, buf)
+    if int64(r) == 0 {
+        return ""
+    }
+    return r
+}
+
+// ckJoin joins two path segments with a single slash.
+fn ckJoin(a: string, b: string) -> string {
+    if str.Len(a) == 0 || str.Equal(a, ".") {
+        return b
+    }
+    if str.EndsWith(a, "/") {
+        return str.Concat(a, b)
+    }
+    return str.Concat(a, str.Concat("/", b))
+}
+
 // === Type Kind Constants ===
 
 pub const TK_BUILTIN      = 1  // builtin type kind
@@ -2077,6 +2115,15 @@ pub fn checkProgram(c: *Checker, decls: []ast.Stmt) -> bool {
                 if resolved.kind != TK_UNKNOWN {
                     c.aliases.Set(d.aliasName, resolved)
                     declare(c, d.aliasName, resolved)
+                    // Reject alias cycles (type A = B; type B = A): the
+                    // resolver stops on a visited name and returns a
+                    // NAMED type that is still itself an alias — a cycle
+                    // used to loop silently and then blow up codegen
+                    // recursion (VULN-19).
+                    resolvedChain := resolveAlias(c, namedType(d.aliasName))
+                    if resolvedChain.kind == TK_NAMED && c.aliases.Get(resolvedChain.name).kind != 0 {
+                        report(c, str.Concat("cyclic type alias \"", str.Concat(d.aliasName, "\"")))
+                    }
                 }
             }
         } else if decl.kind == ast.ST_CONST {
@@ -2409,6 +2456,22 @@ fn checkDeclaration(c: *Checker, stmt: ast.Stmt) {
         checkTemplateDecl(c, stmt.decl)
     } else if stmt.kind == ast.ST_VARDECL {
         checkVarDecl(c, stmt)
+    } else if stmt.kind == ast.ST_EMBED {
+        // Confinement check mirroring the emitter: `embed "../.."` or a
+        // symlink escape must not bake arbitrary build-host files into
+        // the binary. Duplicated here because `-check` mode never
+        // reaches codegen (VULN-09).
+        d := stmt.decl
+        srcDir := ckDirName(stmt.filePath)
+        canonSrc := ckCanonical(srcDir)
+        canonEmbed := ckCanonical(ckJoin(srcDir, d.embedPath))
+        if str.Len(canonSrc) == 0 {
+            reportAt(c, stmt.line, stmt.col, str.Concat("embed: cannot resolve source directory ", srcDir))
+        } else if str.Len(canonEmbed) == 0 {
+            reportAt(c, stmt.line, stmt.col, str.Concat("embed: cannot resolve path ", d.embedPath))
+        } else if !str.Equal(canonEmbed, canonSrc) && !str.StartsWith(canonEmbed, str.Concat(canonSrc, "/")) {
+            reportAt(c, stmt.line, stmt.col, str.Concat("embed path escapes source directory: ", d.embedPath))
+        }
     }
 }
 
@@ -2520,9 +2583,45 @@ fn checkStructDecl(c: *Checker, d: ast.Decl) {
     if !hasShort {
         c.structs.Set(shortName, d)
     }
+    // Reject cycles of by-value struct fields — struct A { b: B };
+    // struct B { a: A } has infinite size and sent layout/codegen into
+    // unbounded recursion (VULN-19).
+    visiting := make(map[string]bool)
+    if structValueCycle(c, d.structName, visiting) {
+        reportAt(c, c.currentLine, c.currentCol, str.Concat("struct \"", str.Concat(d.structName, "\" contains a cyclic value-type field chain")))
+    }
     for i := 0; i < len(d.structMethods); i = i + 1 {
         checkFnDecl(c, d.structMethods[i])
     }
+}
+
+// structValueCycle reports whether a by-value struct-field path from
+// name loops back onto itself. Only TK_NAMED fields recurse — pointer,
+// slice, map, set, chan, tensor, and fn fields are indirections that
+// give the containing struct a finite size (VULN-19).
+fn structValueCycle(c: *Checker, name: string, visiting: map[string]bool) -> bool {
+    if visiting[name] {
+        return true
+    }
+    decl := c.structs.Get(name)
+    if decl.kind == 0 {
+        return false
+    }
+    visiting[name] = true
+    for i := 0; i < len(decl.structFields); i = i + 1 {
+        if len(decl.structFields[i].typ) == 0 {
+            continue
+        }
+        ft := resolveAlias(c, astTypeToType(c, decl.structFields[i].typ[0]))
+        if ft.kind != TK_NAMED {
+            continue
+        }
+        if structValueCycle(c, ft.name, visiting) {
+            return true
+        }
+    }
+    delete(visiting, name)
+    return false
 }
 
 // checkTemplateDecl validates a template declaration's method signatures.

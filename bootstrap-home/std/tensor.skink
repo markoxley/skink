@@ -59,6 +59,11 @@ pub struct Tensor {
         stride := 1
         i := self.rank - 1
         for i >= 0 {
+            // Per-dim bounds check before the multiply: idx[i]*stride
+            // can wrap int32 to a valid-but-wrong offset (VULN-21/25).
+            if idx[i] < 0 || idx[i] >= self.shape[i] {
+                panic("tensor Get: index out of bounds")
+            }
             offset = offset + idx[i] * stride
             if i > 0 {
                 stride = stride * self.shape[i]
@@ -77,6 +82,9 @@ pub struct Tensor {
         stride := 1
         i := self.rank - 1
         for i >= 0 {
+            if idx[i] < 0 || idx[i] >= self.shape[i] {
+                panic("tensor Set: index out of bounds")
+            }
             offset = offset + idx[i] * stride
             if i > 0 {
                 stride = stride * self.shape[i]
@@ -121,11 +129,20 @@ pub struct Tensor {
 // Zeros creates a tensor filled with zeros.
 pub fn Zeros(shape: []int) -> Tensor {
     rank := len(shape)
-    total := 1
+    total := int64(1)
     for i := 0; i < rank; i = i + 1 {
-        total = total * shape[i]
+        // Dim must be positive and the running product must stay inside
+        // int32 — an unchecked multiply wrapped to a small allocation
+        // under a large shape header (VULN-21).
+        if shape[i] <= 0 {
+            panic("tensor.Zeros: dimensions must be positive")
+        }
+        total = total * int64(shape[i])
+        if total > int64(536870911) {
+            panic("tensor.Zeros: shape too large")
+        }
     }
-    data := make([]float, total)
+    data := make([]float, int(total))
     return Tensor{data: data, shape: shape, rank: rank}
 }
 
@@ -345,12 +362,24 @@ pub struct Conv2DLayer {
 
     // Forward computes the layer's output for the given input.
     pub fn Forward(self: Conv2DLayer, input: Tensor) -> Tensor {
+        // Validate before the stride division — s==0 was a SIGFPE and a
+        // kernel larger than the input produced negative output dims
+        // that wrapped to huge allocations (VULN-21).
+        s := self.stride
+        k := self.kernelSize
+        if s <= 0 || k <= 0 {
+            panic("tensor.Conv2DLayer.Forward: kernel and stride must be positive")
+        }
+        if len(input.shape) != 4 {
+            panic("tensor.Conv2DLayer.Forward: input must be rank 4")
+        }
         batch := input.shape[0]
         inCh := input.shape[1]
         inH := input.shape[2]
         inW := input.shape[3]
-        k := self.kernelSize
-        s := self.stride
+        if k > inH || k > inW {
+            panic("tensor.Conv2DLayer.Forward: kernel exceeds input dims")
+        }
         outH := (inH - k) / s + 1
         outW := (inW - k) / s + 1
         outShape := []int{batch, self.outChannels, outH, outW}
@@ -392,12 +421,23 @@ pub struct MaxPool2D {
 
     // Forward computes the layer's output for the given input.
     pub fn Forward(self: MaxPool2D, input: Tensor) -> Tensor {
+        // Validate before the stride division — s==0 was a SIGFPE
+        // (VULN-21).
+        k := self.kernelSize
+        s := self.stride
+        if s <= 0 || k <= 0 {
+            panic("tensor.MaxPool2D.Forward: kernel and stride must be positive")
+        }
+        if len(input.shape) != 4 {
+            panic("tensor.MaxPool2D.Forward: input must be rank 4")
+        }
         batch := input.shape[0]
         channels := input.shape[1]
         inH := input.shape[2]
         inW := input.shape[3]
-        k := self.kernelSize
-        s := self.stride
+        if k > inH || k > inW {
+            panic("tensor.MaxPool2D.Forward: kernel exceeds input dims")
+        }
         outH := (inH - k) / s + 1
         outW := (inW - k) / s + 1
         outShape := []int{batch, channels, outH, outW}

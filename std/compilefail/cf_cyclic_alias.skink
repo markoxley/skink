@@ -1,0 +1,12 @@
+// expect: cyclic type alias
+// VULN-19 regression: cyclic type aliases (AliasA = AliasB; AliasB =
+// AliasA) used to loop silently through alias resolution and then
+// overflow codegen recursion. The checker must reject the cycle.
+module main
+
+type AliasA = AliasB
+type AliasB = AliasA
+
+fn main() -> int {
+    return 0
+}

@@ -101,6 +101,13 @@ while [[ $# -gt 0 ]]; do
             INSTALL_DEPS=0
             shift
             ;;
+        --allow-unverified)
+            # Explicit opt-out of archive checksum verification. Without
+            # this flag the installer fails closed when it cannot verify
+            # the downloaded archive (VULN-28).
+            ALLOW_UNVERIFIED=1
+            shift
+            ;;
         --help|-h)
             cat <<EOF
 Skink installer — installs the Skink compiler toolset from GitHub releases.
@@ -114,6 +121,7 @@ Options:
   --repo <owner/repo>  GitHub repo hosting releases (default: markoxley/skink)
   --no-shell-rc      Skip updating shell config files
   --no-deps          Skip installing system dependencies
+  --allow-unverified Proceed even if the archive checksum cannot be verified
   --help             Show this help message
 
 Environment variables:
@@ -302,16 +310,37 @@ info "  ${DOWNLOAD_URL}"
 curl -fsSL -o "$ARCHIVE_PATH" "$DOWNLOAD_URL" \
     || fail "Download failed. Check that release v${SKINK_VERSION} exists for ${OS}/${ARCH}."
 
-# Verify the SHA256 checksum published alongside the archive. A missing
-# checksum file warns rather than fails so ad-hoc releases still install.
-if command -v sha256sum >/dev/null 2>&1; then
-    if curl -fsSL -o "${ARCHIVE_PATH}.sha256" "${DOWNLOAD_URL}.sha256"; then
-        info "Verifying checksum..."
-        (cd "$TMPDIR" && sha256sum -c "${ARCHIVE_NAME}.sha256") \
-            || fail "Checksum verification failed for ${ARCHIVE_NAME}"
+# Verify the SHA256 checksum published alongside the archive. Fails
+# closed: an unverifiable install (no checksum tool or no .sha256 file)
+# aborts unless --allow-unverified was given, so a tampered release or
+# stripped checksum can never silently install (VULN-28).
+ALLOW_UNVERIFIED="${ALLOW_UNVERIFIED:-0}"
+
+sha256_check() {
+    # $1 = .sha256 file, run inside TMPDIR. Prefer sha256sum; fall back
+    # to BSD/macOS shasum -a 256.
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum -c "$1"
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 -c "$1"
     else
-        warn "No checksum file found for v${SKINK_VERSION}; skipping verification"
+        return 127
     fi
+}
+
+if curl -fsSL -o "${ARCHIVE_PATH}.sha256" "${DOWNLOAD_URL}.sha256"; then
+    info "Verifying checksum..."
+    verify_rc=0
+    (cd "$TMPDIR" && sha256_check "${ARCHIVE_NAME}.sha256") || verify_rc=$?
+    if [[ $verify_rc -eq 127 && "$ALLOW_UNVERIFIED" == "1" ]]; then
+        warn "No sha256sum/shasum available; continuing unverified (--allow-unverified)"
+    elif [[ $verify_rc -ne 0 ]]; then
+        fail "Checksum verification failed for ${ARCHIVE_NAME}"
+    fi
+elif [[ "$ALLOW_UNVERIFIED" == "1" ]]; then
+    warn "No checksum file for v${SKINK_VERSION}; continuing unverified (--allow-unverified)"
+else
+    fail "No checksum file found for v${SKINK_VERSION} (refusing unverified install; pass --allow-unverified to override)"
 fi
 
 # ============================================================================

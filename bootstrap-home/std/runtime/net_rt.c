@@ -183,6 +183,7 @@ int Skink_net_resolve_and_connect(const char *host, int port, int timeoutMs) {
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <string.h>
@@ -311,14 +312,15 @@ int Skink_net_resolve_and_connect(const char *host, int port, int timeoutMs) {
         continue;
       }
       if (rc < 0) {
-        // Wait for the socket to become writable
-        fd_set writefds;
-        FD_ZERO(&writefds);
-        FD_SET(fd, &writefds);
-        struct timeval tv;
-        tv.tv_sec = timeoutMs / 1000;
-        tv.tv_usec = (timeoutMs % 1000) * 1000;
-        rc = select(fd + 1, NULL, &writefds, NULL, &tv);
+        // Wait for the socket to become writable. poll() is used instead
+        // of select(): FD_SET(fd) is an unchecked bitmap write, so a
+        // descriptor >= FD_SETSIZE (easy under a busy process's fd
+        // pressure) would smash the stack (VULN-18).
+        struct pollfd pfd;
+        pfd.fd = fd;
+        pfd.events = POLLOUT;
+        pfd.revents = 0;
+        rc = poll(&pfd, 1, timeoutMs);
         if (rc <= 0) {
           // Timeout or error
           close(fd);

@@ -33,9 +33,11 @@
 // === Windows includes ===
 #include <dirent.h>   // MinGW provides dirent.h
 #include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/stat.h>  // MinGW provides sys/stat.h
 #include <io.h>        // _access, _close, _read, _write, _dup2
 #include <process.h>   // _spawnvp, _cwait
@@ -46,9 +48,11 @@
 // === POSIX includes ===
 #include <dirent.h>
 #include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -254,39 +258,117 @@ int Skink_os_exec(const char **argv, int argc) {
   return rc;
 }
 
+// skink_append_cmdline_arg appends one argument to a CreateProcess
+// command line using MSVCRT quoting rules. Every argument is quoted
+// (safe and simpler than conditional quoting); inside quotes,
+// backslashes are doubled only when they precede a quote or close the
+// quoted section, and embedded quotes are backslash-escaped. When buf
+// is NULL the call only advances *pos (size-computation pass).
+static void skink_append_cmdline_arg(char *buf, size_t *pos,
+                                     const char *arg) {
+  size_t p = *pos;
+  if (buf)
+    buf[p] = '"';
+  p++;
+  size_t backslashes = 0;
+  for (const char *s = arg;; s++) {
+    char c = *s;
+    if (c == '\0' || c == '"') {
+      // Double backslashes before a quote or the closing quote.
+      for (size_t i = 0; i < backslashes; i++) {
+        if (buf)
+          buf[p] = '\\';
+        p++;
+      }
+      backslashes = 0;
+    }
+    if (c == '\0')
+      break;
+    if (c == '\\') {
+      backslashes++;
+    } else if (c == '"') {
+      if (buf) {
+        buf[p] = '\\';
+        buf[p + 1] = '"';
+      }
+      p += 2;
+    } else {
+      if (buf)
+        buf[p] = c;
+      p++;
+    }
+  }
+  if (buf)
+    buf[p] = '"';
+  p++;
+  if (buf)
+    buf[p] = ' ';
+  p++; // trailing space separator (harmless on the last arg)
+  *pos = p;
+}
+
 // Skink_os_exec_with_output — execute a program with an argument array,
 // capturing stdout. Returns the child exit status via *status_out and
 // the captured stdout as an RC-managed string (released by RC ownership).
 // On error returns NULL.
+//
+// Uses CreateProcess with the pipe write handle bound directly to the
+// child's stdout via STARTUPINFO. The previous implementation redirected
+// the PROCESS-global stdout fd with _dup2 — a data race that could
+// divert unrelated threads' output into the pipe or crash (VULN-24).
 char *Skink_os_exec_with_output(const char **argv, int argc, int *status_out) {
-  (void)argc;
   if (!argv || !argv[0] || !status_out) {
     if (status_out)
       *status_out = -1;
     return NULL;
   }
 
-  // Create a pipe to capture child stdout.
-  int pipefd[2];
-  if (_pipe(pipefd, 4096, O_BINARY) < 0) {
+  // Build the CreateProcess command line (it takes a string, not argv):
+  // one sizing pass, one writing pass.
+  size_t needed = 0;
+  for (int i = 0; i < argc && argv[i]; i++)
+    skink_append_cmdline_arg(NULL, &needed, argv[i]);
+  char *cmdline = (char *)malloc(needed + 1);
+  if (!cmdline) {
     *status_out = -1;
     return NULL;
   }
+  size_t pos = 0;
+  for (int i = 0; i < argc && argv[i]; i++)
+    skink_append_cmdline_arg(cmdline, &pos, argv[i]);
+  cmdline[pos] = '\0';
 
-  // Save current stdout, redirect stdout to the pipe write end.
-  int saved_stdout = _dup(_fileno(stdout));
-  _dup2(pipefd[1], _fileno(stdout));
-  _close(pipefd[1]);
+  // Create an inheritable pipe; keep the read end non-inheritable.
+  SECURITY_ATTRIBUTES sa;
+  sa.nLength = sizeof(sa);
+  sa.lpSecurityDescriptor = NULL;
+  sa.bInheritHandle = TRUE;
+  HANDLE read_h = NULL, write_h = NULL;
+  if (!CreatePipe(&read_h, &write_h, &sa, 0)) {
+    free(cmdline);
+    *status_out = -1;
+    return NULL;
+  }
+  SetHandleInformation(read_h, HANDLE_FLAG_INHERIT, 0);
 
-  // Spawn the child process (inherits redirected stdout).
-  intptr_t child = _spawnvp(_P_NOWAIT, argv[0], (const char *const *)argv);
+  STARTUPINFO si;
+  PROCESS_INFORMATION pi;
+  memset(&si, 0, sizeof(si));
+  si.cb = sizeof(si);
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdOutput = write_h;
+  si.hStdError = write_h;
+  si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+  memset(&pi, 0, sizeof(pi));
 
-  // Restore stdout immediately.
-  _dup2(saved_stdout, _fileno(stdout));
-  _close(saved_stdout);
-
-  if (child == -1) {
-    _close(pipefd[0]);
+  // Search PATH like _spawnvp did: lpApplicationName NULL + argv[0]
+  // resolves through the standard CreateProcess search order.
+  BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, 0, NULL, NULL,
+                           &si, &pi);
+  free(cmdline);
+  CloseHandle(write_h);
+  if (!ok) {
+    CloseHandle(read_h);
     *status_out = -1;
     return NULL;
   }
@@ -296,11 +378,11 @@ char *Skink_os_exec_with_output(const char **argv, int argc, int *status_out) {
   size_t len = 0;
   char *buf = (char *)malloc(cap);
   if (!buf) {
-    _close(pipefd[0]);
-    {
-      int st = 0;
-      _cwait(&st, child, 0); // reap the child to avoid a zombie
-    }
+    CloseHandle(read_h);
+    TerminateProcess(pi.hProcess, 1);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
     *status_out = -1;
     return NULL;
   }
@@ -310,32 +392,33 @@ char *Skink_os_exec_with_output(const char **argv, int argc, int *status_out) {
       char *tmp = (char *)realloc(buf, cap);
       if (!tmp) {
         free(buf);
-        _close(pipefd[0]);
-        {
-          int st = 0;
-          _cwait(&st, child, 0); // reap the child to avoid a zombie
-        }
+        CloseHandle(read_h);
+        TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
         *status_out = -1;
         return NULL;
       }
       buf = tmp;
     }
-    int n = _read(pipefd[0], buf + len, (unsigned int)(cap - len));
-    if (n <= 0)
+    DWORD n = 0;
+    if (!ReadFile(read_h, buf + len, (DWORD)(cap - len), &n, NULL) ||
+        n == 0)
       break;
     len += (size_t)n;
   }
-  _close(pipefd[0]);
+  CloseHandle(read_h);
 
   // Null-terminate.
   if (len == cap) {
     char *tmp = (char *)realloc(buf, cap + 1);
     if (!tmp) {
       free(buf);
-      {
-        int st = 0;
-        _cwait(&st, child, 0); // reap the child to avoid a zombie
-      }
+      TerminateProcess(pi.hProcess, 1);
+      WaitForSingleObject(pi.hProcess, INFINITE);
+      CloseHandle(pi.hProcess);
+      CloseHandle(pi.hThread);
       *status_out = -1;
       return NULL;
     }
@@ -343,10 +426,13 @@ char *Skink_os_exec_with_output(const char **argv, int argc, int *status_out) {
   }
   buf[len] = '\0';
 
-  // Wait for the child to exit.
-  int status = 0;
-  _cwait(&status, child, 0);
-  *status_out = status;
+  // Wait for the child to exit and collect its status.
+  WaitForSingleObject(pi.hProcess, INFINITE);
+  DWORD code = 1;
+  GetExitCodeProcess(pi.hProcess, &code);
+  CloseHandle(pi.hProcess);
+  CloseHandle(pi.hThread);
+  *status_out = (int)code;
   return skink_rc_copy_out(buf, len);
 }
 
@@ -473,6 +559,76 @@ char *Skink_os_exec_with_output(const char **argv, int argc, int *status_out) {
 
 #endif // _WIN32
 
+// === Temporary files ===
+
+// skink_mktemp_random mixes a pid/time/address/counter value so each
+// candidate name is unpredictable without depending on rand state.
+static unsigned long long skink_mktemp_random(int attempt) {
+  unsigned long long r = (unsigned long long)time(NULL);
+  r ^= (unsigned long long)(uintptr_t)&r >> 4;
+#ifdef _WIN32
+  r ^= (unsigned long long)_getpid() * 2654435761ULL;
+#else
+  r ^= (unsigned long long)getpid() * 2654435761ULL;
+#endif
+  r ^= (unsigned long long)attempt * 0x9E3779B97F4A7C15ULL;
+  r ^= r >> 33;
+  r *= 0xFF51AFD7ED558CCDULL;
+  r ^= r >> 33;
+  return r;
+}
+
+// Skink_fs_mktemp creates a uniquely-named file in the system temp
+// directory and returns an RC-managed path string. Candidates are opened
+// O_CREAT|O_EXCL|0600 so an attacker cannot pre-create or symlink the
+// name — used by the compiler driver for its intermediate .ll file,
+// which previously went to <outName>.ll in the working directory and
+// could clobber a user file or collide predictably (VULN-01).
+// Returns NULL on failure.
+char *Skink_fs_mktemp(const char *prefix, const char *suffix) {
+  if (!prefix)
+    prefix = "skink";
+  if (!suffix)
+    suffix = "";
+#ifdef _WIN32
+  const char *tmpdir = getenv("TEMP");
+  if (!tmpdir || !*tmpdir)
+    tmpdir = getenv("TMP");
+  if (!tmpdir || !*tmpdir)
+    tmpdir = ".";
+#else
+  const char *tmpdir = getenv("TMPDIR");
+  if (!tmpdir || !*tmpdir)
+    tmpdir = "/tmp";
+#endif
+  size_t plen = strlen(tmpdir) + strlen(prefix) + 20 + strlen(suffix) + 3;
+  for (int attempt = 0; attempt < 1000; attempt++) {
+    char *path = (char *)malloc(plen);
+    if (!path)
+      return NULL;
+    snprintf(path, plen, "%s/%s%llx%s", tmpdir, prefix,
+             skink_mktemp_random(attempt), suffix);
+#ifdef _WIN32
+    int fd = _open(path, _O_CREAT | _O_EXCL | _O_RDWR | _O_BINARY,
+                   _S_IREAD | _S_IWRITE);
+#else
+    int fd = open(path, O_CREAT | O_EXCL | O_RDWR, 0600);
+#endif
+    if (fd >= 0) {
+#ifdef _WIN32
+      _close(fd);
+#else
+      close(fd);
+#endif
+      return skink_rc_copy_out(path, strlen(path));
+    }
+    free(path);
+    if (errno != EEXIST)
+      return NULL;
+  }
+  return NULL;
+}
+
 // === Signal handling ===
 //
 // Skink_signal_handle registers a Skink function (passed as a C function
@@ -482,18 +638,28 @@ char *Skink_os_exec_with_output(const char **argv, int argc, int *status_out) {
 #ifndef _WIN32
 #include <signal.h>
 
-// skink_signal_handlers stores registered Skink signal handler callbacks indexed by signal number.
-static void (*skink_signal_handlers[64])(void);
+// skink_signal_handlers stores the registered Skink closure handle per
+// signal number. A Skink fn() value is NOT a C function pointer: it is a
+// pointer to a block whose first field is the code pointer, invoked as
+// code(handle). Treating the handle itself as the callee executed heap
+// data as code (VULN-05).
+static void *skink_signal_handlers[64];
 
 // skink_signal_tramp is the C signal handler trampoline that dispatches to the registered Skink callback.
 static void skink_signal_tramp(int sig) {
   if (sig >= 0 && sig < 64 && skink_signal_handlers[sig]) {
-    skink_signal_handlers[sig]();
+    void *handle = skink_signal_handlers[sig];
+    void (*code)(void *) = *(void (**)(void *))handle;
+    // NOTE: a Skink handler that allocates (RC ops, slice growth,
+    // string concat) is not async-signal-safe — handlers should only
+    // set flags or do trivial work. Documented in std/os.
+    code(handle);
   }
 }
 
-// Skink_signal_handle registers a Skink function as the handler for the given POSIX signal.
-int Skink_signal_handle(int sig, void (*fn)(void)) {
+// Skink_signal_handle registers a Skink function (closure handle) as the
+// handler for the given POSIX signal.
+int Skink_signal_handle(int sig, void *fn) {
   if (sig < 0 || sig >= 64 || !fn) {
     return -1;
   }
@@ -504,7 +670,7 @@ int Skink_signal_handle(int sig, void (*fn)(void)) {
 #else
 
 // Skink_signal_handle is a stub that always fails on Windows (signal handling not yet supported).
-int Skink_signal_handle(int sig, void (*fn)(void)) {
+int Skink_signal_handle(int sig, void *fn) {
   (void)sig;
   (void)fn;
   return -1; // not supported on Windows yet

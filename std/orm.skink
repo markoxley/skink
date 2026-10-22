@@ -81,6 +81,32 @@ fn columnType(typeName: string) -> string {
     return "INTEGER" // int, int64, bool
 }
 
+// validIdent reports whether s is a safe SQL identifier:
+// ^[A-Za-z_][A-Za-z0-9_]*$. Table and column names are interpolated
+// into generated SQL, so arbitrary caller text was an injection sink
+// (VULN-20). Restricting to the ident grammar makes quoting a formality.
+fn validIdent(s: string) -> bool {
+    n := str.Len(s)
+    if n == 0 {
+        return false
+    }
+    for i := 0; i < n; i = i + 1 {
+        c := int(s[i])
+        ok := (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == 95 ||
+            (i > 0 && c >= 48 && c <= 57)
+        if !ok {
+            return false
+        }
+    }
+    return true
+}
+
+// qident renders a validated identifier as a double-quoted SQL
+// identifier. validIdent guarantees no '"' can occur inside s.
+fn qident(s: string) -> string {
+    return str.Concat(str.Concat("\"", s), "\"")
+}
+
 // columnName resolves a field's column name: [column(name=x)] wins,
 // then [db(name=x)], otherwise the field name itself.
 fn columnName(f: reflect.Field) -> string {
@@ -114,6 +140,12 @@ pub fn TableOf(conn: db.Connection, t: reflect.Type) -> (Table, errors.Error) {
 pub fn TableNamed(conn: db.Connection, t: reflect.Type, name: string) -> (Table, errors.Error) {
     var cols []string
     var fields []reflect.Field
+    // Table/column names are interpolated into generated SQL — reject
+    // anything outside the safe identifier grammar (VULN-20).
+    if !validIdent(name) {
+        return Table{conn: conn, typ: t, name: name, typeName: "", cols: cols, fields: fields, pkIndex: -1, pkAuto: false},
+            errors.New("orm: invalid table name")
+    }
     pkIndex := -1
     pkAuto := false
     typeName := reflect.TypeName(t)
@@ -127,8 +159,13 @@ pub fn TableNamed(conn: db.Connection, t: reflect.Type, name: string) -> (Table,
             return Table{conn: conn, typ: t, name: name, typeName: typeName, cols: cols, fields: fields, pkIndex: -1, pkAuto: false},
                 errors.New(str.Concat(str.Concat("orm: unsupported field type \"", f.type_name), str.Concat("\" on field \"", str.Concat(f.name, "\""))))
         }
+        cname := columnName(f)
+        if !validIdent(cname) {
+            return Table{conn: conn, typ: t, name: name, typeName: typeName, cols: cols, fields: fields, pkIndex: -1, pkAuto: false},
+                errors.New(str.Concat(str.Concat("orm: invalid column name \"", cname), "\""))
+        }
         mapped := len(cols)
-        cols = append(cols, columnName(f))
+        cols = append(cols, cname)
         fields = append(fields, f)
         if reflect.TagHasFlag(f.tag, "db", "pk") || (str.Equal(f.name, "id") && pkIndex < 0) {
             pkIndex = mapped
@@ -147,13 +184,13 @@ pub fn Name(self: Table) -> string {
 pub fn Create(self: *Table) -> errors.Error {
     b := str.NewBuilder(256)
     b.Write("CREATE TABLE IF NOT EXISTS ")
-    b.Write(self.name)
+    b.Write(qident(self.name))
     b.Write(" (")
     for i := 0; i < len(self.cols); i = i + 1 {
         if i > 0 {
             b.Write(", ")
         }
-        b.Write(self.cols[i])
+        b.Write(qident(self.cols[i]))
         b.Write(" ")
         b.Write(columnType(self.fields[i].type_name))
         if i == self.pkIndex {
@@ -170,7 +207,7 @@ pub fn Create(self: *Table) -> errors.Error {
 
 // Drop issues DROP TABLE IF EXISTS.
 pub fn Drop(self: *Table) -> errors.Error {
-    _, err := self.conn.Exec(str.Concat("DROP TABLE IF EXISTS ", self.name))
+    _, err := self.conn.Exec(str.Concat("DROP TABLE IF EXISTS ", qident(self.name)))
     return err
 }
 
@@ -236,7 +273,7 @@ fn execBound(self: *Table, sql: string, ptr: int64, idxs: []int) -> errors.Error
 pub fn Insert(self: *Table, ptr: int64) -> errors.Error {
     b := str.NewBuilder(256)
     b.Write("INSERT INTO ")
-    b.Write(self.name)
+    b.Write(qident(self.name))
     b.Write(" (")
     var idxs []int
     for i := 0; i < len(self.cols); i = i + 1 {
@@ -249,7 +286,7 @@ pub fn Insert(self: *Table, ptr: int64) -> errors.Error {
         if i > 0 {
             b.Write(",")
         }
-        b.Write(self.cols[idxs[i]])
+        b.Write(qident(self.cols[idxs[i]]))
     }
     b.Write(") VALUES (")
     for i := 0; i < len(idxs); i = i + 1 {
@@ -295,7 +332,7 @@ pub fn Save(self: *Table, ptr: int64) -> errors.Error {
     }
     b := str.NewBuilder(256)
     b.Write("UPDATE ")
-    b.Write(self.name)
+    b.Write(qident(self.name))
     b.Write(" SET ")
     var idxs []int
     for i := 0; i < len(self.cols); i = i + 1 {
@@ -305,12 +342,12 @@ pub fn Save(self: *Table, ptr: int64) -> errors.Error {
         if len(idxs) > 0 {
             b.Write(",")
         }
-        b.Write(self.cols[i])
+        b.Write(qident(self.cols[i]))
         b.Write("=?")
         idxs = append(idxs, i)
     }
     b.Write(" WHERE ")
-    b.Write(self.cols[self.pkIndex])
+    b.Write(qident(self.cols[self.pkIndex]))
     b.Write("=?")
     idxs = append(idxs, self.pkIndex)
     return execBound(self, b.String(), ptr, idxs)
@@ -324,10 +361,10 @@ fn selectSQL(self: *Table, suffix: string) -> string {
         if i > 0 {
             b.Write(",")
         }
-        b.Write(self.cols[i])
+        b.Write(qident(self.cols[i]))
     }
     b.Write(" FROM ")
-    b.Write(self.name)
+    b.Write(qident(self.name))
     if str.Len(suffix) > 0 {
         b.Write(" ")
         b.Write(suffix)
@@ -342,7 +379,7 @@ pub fn Get(self: *Table, pk: int64, ptr: int64) -> bool {
     if self.pkIndex < 0 {
         return false
     }
-    res, err := self.conn.Query(str.Concat(str.Concat(selectSQL(self, "WHERE "), self.cols[self.pkIndex]), "=?"))
+    res, err := self.conn.Query(str.Concat(str.Concat(selectSQL(self, "WHERE "), qident(self.cols[self.pkIndex])), "=?"))
     if err.message != "" {
         return false
     }
@@ -360,7 +397,7 @@ pub fn Delete(self: *Table, pk: int64) -> errors.Error {
     if self.pkIndex < 0 {
         return errors.New("orm: table has no primary key")
     }
-    res, err := self.conn.Query(str.Concat(str.Concat("DELETE FROM ", self.name), str.Concat(str.Concat(" WHERE ", self.cols[self.pkIndex]), "=?")))
+    res, err := self.conn.Query(str.Concat(str.Concat("DELETE FROM ", qident(self.name)), str.Concat(str.Concat(" WHERE ", qident(self.cols[self.pkIndex])), "=?")))
     if err.message != "" {
         return err
     }
@@ -378,6 +415,10 @@ pub fn All(self: *Table) -> Rows {
 // The clause may contain ? placeholders bound in order from args; all
 // args are bound as text (SQLite column affinity coerces numeric
 // comparisons on typed columns). Pass an empty slice for no args.
+//
+// SECURITY: clause is raw SQL — never build it from user input with
+// string concatenation. Always pass untrusted values through args
+// (e.g. Where("name=?", []string{userInput})).
 pub fn Where(self: *Table, clause: string, args: []string) -> Rows {
     res, err := self.conn.Query(selectSQL(self, str.Concat("WHERE ", clause)))
     if err.message != "" {
@@ -392,6 +433,9 @@ pub fn Where(self: *Table, clause: string, args: []string) -> Rows {
 // Query returns a Rows over arbitrary SQL. Column names in the result
 // are matched to mapped fields by name, so any SELECT that produces
 // recognisable columns scans correctly.
+//
+// SECURITY: sql is executed verbatim — never interpolate untrusted
+// input into it (VULN-20). Use Where with ? args for filtered queries.
 pub fn Query(self: *Table, sql: string) -> Rows {
     res, _ := self.conn.Query(sql)
     return Rows{res: res, tbl: *self}
