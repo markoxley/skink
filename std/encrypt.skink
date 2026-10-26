@@ -6,8 +6,9 @@
 //
 // File:    std/encrypt.skink
 // Purpose: High-level encryption and decryption helpers built on OpenSSL's
-//          EVP (AES-GCM authenticated encryption) and RSA (PEM keys, OAEP
-//          padding) APIs.
+//          EVP (AES-GCM authenticated encryption with optional AAD) and RSA
+//          (PEM keys, OAEP padding, key generation, RSASSA-PKCS1-v1_5
+//          signing) APIs.
 // Author:  Mark Oxley
 // Created: 2026
 //
@@ -27,6 +28,7 @@ module encrypt
 import "std/libc"
 
 extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
+extern fn Skink_mem_byte(ptr: string, idx: int64) -> int
 import "std/errors"
 import "std/str"
 
@@ -61,6 +63,29 @@ extern fn RSA_private_decrypt(flen: int, src: string, to: string, rsa: string, p
 extern fn RSA_size(rsa: string) -> int
 extern fn RSA_free(rsa: string)
 
+// --- OpenSSL RSA API (key generation, PEM serialization, signing) ---
+
+extern fn RSA_new() -> string
+// cb is a BN_GENCB progress callback — always NULL here.
+extern fn RSA_generate_key_ex(rsa: string, bits: int, e: string, cb: string) -> int
+extern fn BN_new() -> string
+// BN_ULONG is unsigned long — 64-bit on all supported platforms.
+extern fn BN_set_word(bn: string, w: int64) -> int
+extern fn BN_free(bn: string)
+extern fn BIO_s_mem() -> string
+extern fn BIO_new(bioType: string) -> string
+extern fn BIO_read(bio: string, buf: string, dlen: int) -> int
+extern fn BIO_ctrl(bio: string, cmd: int, larg: int64, parg: string) -> int64
+extern fn PEM_write_bio_RSA_PUBKEY(bio: string, rsa: string) -> int
+extern fn PEM_write_bio_RSAPrivateKey(bio: string, rsa: string, enc: string, kstr: string, klen: int, cb: string, u: string) -> int
+// RSA_sign/RSA_verify implement RSASSA-PKCS1-v1_5 over a precomputed
+// digest; sigType is the digest NID (NID_sha256) and siglen is an
+// unsigned int out-param read back after signing.
+extern fn RSA_sign(sigType: int, m: string, mLen: int, sigret: string, siglen: string, rsa: string) -> int
+extern fn RSA_verify(sigType: int, m: string, mLen: int, sigbuf: string, siglen: int, rsa: string) -> int
+// SHA256 hashes n bytes from d into the 32-byte buffer md.
+extern fn SHA256(d: string, n: int64, md: string) -> string
+
 // RSA_PKCS1_OAEP_PADDING is the OpenSSL constant for OAEP padding mode.
 pub const RSA_PKCS1_OAEP_PADDING = 4
 // AES_BLOCK_SIZE is the AES block size in bytes (128 bits).
@@ -75,6 +100,22 @@ pub const EVP_CTRL_GCM_SET_IVLEN = 9
 pub const EVP_CTRL_GCM_GET_TAG = 16
 // EVP_CTRL_GCM_SET_TAG is the OpenSSL ctrl code to set the expected GCM tag.
 pub const EVP_CTRL_GCM_SET_TAG = 17
+// RSA_F4 is the conventional RSA public exponent 65537 (0x10001) used
+// for generated keys.
+pub const RSA_F4 = 65537
+// RSA_MIN_BITS is the smallest modulus GenerateRSAKeyPair accepts —
+// below 512 bits a SHA-256 DigestInfo cannot fit in a PKCS#1 v1.5
+// block, and OAEP envelopes need even more room.
+pub const RSA_MIN_BITS = 512
+// RSA_MAX_BITS bounds GenerateRSAKeyPair key sizes to keep generation
+// times reasonable.
+pub const RSA_MAX_BITS = 8192
+// NID_SHA256 is the OpenSSL numeric identifier (NID) for SHA-256, the
+// digest type argument expected by RSA_sign/RSA_verify.
+pub const NID_SHA256 = 672
+// BIO_CTRL_PENDING is the BIO ctrl command reporting how many bytes a
+// memory BIO has buffered (BIO_pending).
+pub const BIO_CTRL_PENDING = 10
 
 // CipherResult holds the output of an encryption or decryption operation.
 // The data field is a raw byte buffer (may contain null bytes); use length
@@ -104,11 +145,23 @@ pub struct AESCipher {
     // The result format is: nonce (12 bytes) || tag (16 bytes) || ciphertext.
     // The length field is the total byte count (nonce + tag + ciphertext).
     pub fn Encrypt(self: AESCipher, plaintext: string, ptLen: int) -> (CipherResult, errors.Error) {
+        return self.EncryptAAD(plaintext, ptLen, "", 0)
+    }
+
+    // EncryptAAD is Encrypt with additional authenticated data: the aad
+    // bytes are covered by the GCM authentication tag but are not
+    // encrypted or stored in the output — the caller must supply the
+    // same aad to DecryptAAD or authentication fails. Pass aadLen 0 for
+    // no AAD (equivalent to Encrypt).
+    pub fn EncryptAAD(self: AESCipher, plaintext: string, ptLen: int, aad: string, aadLen: int) -> (CipherResult, errors.Error) {
         if self.keyLen != 16 && self.keyLen != 24 && self.keyLen != 32 {
             return CipherResult{}, errors.New("AES key must be 16, 24, or 32 bytes")
         }
         if ptLen < 0 {
             return CipherResult{}, errors.New("plaintext length must be non-negative")
+        }
+        if aadLen < 0 {
+            return CipherResult{}, errors.New("AAD length must be non-negative")
         }
 
         // Generate random 12-byte nonce
@@ -160,6 +213,19 @@ pub struct AESCipher {
         libc.memcpy(outBuf, nonce, GCM_NONCE_SIZE)
         libc.free(nonce)
 
+        // Feed the AAD (if any) into the context with out=NULL before
+        // the plaintext so the GCM tag authenticates it.
+        if aadLen > 0 {
+            aadOutLen := libc.malloc(4)
+            if EVP_EncryptUpdate(ctx, string(int64(0)), aadOutLen, aad, aadLen) != 1 {
+                EVP_CIPHER_CTX_free(ctx)
+                libc.free(aadOutLen)
+                libc.free(outBuf)
+                return CipherResult{}, errors.New("AAD update failed")
+            }
+            libc.free(aadOutLen)
+        }
+
         // Encrypt: ciphertext starts after nonce+tag
         ctStart := string(int64(outBuf) + int64(GCM_NONCE_SIZE + GCM_TAG_SIZE))
         dummyLen := libc.malloc(4)
@@ -199,11 +265,21 @@ pub struct AESCipher {
     // The result length field is the plaintext length. If the tag
     // verification fails, an error is returned.
     pub fn Decrypt(self: AESCipher, ivCiphertext: string, ctLen: int) -> (CipherResult, errors.Error) {
+        return self.DecryptAAD(ivCiphertext, ctLen, "", 0)
+    }
+
+    // DecryptAAD is Decrypt with additional authenticated data: aad must
+    // byte-for-byte match the AAD passed to EncryptAAD or tag
+    // verification fails. Pass aadLen 0 for no AAD.
+    pub fn DecryptAAD(self: AESCipher, ivCiphertext: string, ctLen: int, aad: string, aadLen: int) -> (CipherResult, errors.Error) {
         if self.keyLen != 16 && self.keyLen != 24 && self.keyLen != 32 {
             return CipherResult{}, errors.New("AES key must be 16, 24, or 32 bytes")
         }
         if ctLen < GCM_NONCE_SIZE + GCM_TAG_SIZE {
             return CipherResult{}, errors.New("ciphertext too short (must include 12-byte nonce and 16-byte tag)")
+        }
+        if aadLen < 0 {
+            return CipherResult{}, errors.New("AAD length must be non-negative")
         }
 
         // Split input into nonce, tag, and ciphertext regions
@@ -242,6 +318,18 @@ pub struct AESCipher {
         if EVP_DecryptInit_ex(ctx, string(int64(0)), string(int64(0)), self.key, nonce) != 1 {
             EVP_CIPHER_CTX_free(ctx)
             return CipherResult{}, errors.New("set key/nonce failed")
+        }
+
+        // Feed the AAD (if any) with out=NULL before the ciphertext so
+        // the expected tag is computed over the same authenticated data.
+        if aadLen > 0 {
+            aadOutLen := libc.malloc(4)
+            if EVP_DecryptUpdate(ctx, string(int64(0)), aadOutLen, aad, aadLen) != 1 {
+                EVP_CIPHER_CTX_free(ctx)
+                libc.free(aadOutLen)
+                return CipherResult{}, errors.New("AAD update failed")
+            }
+            libc.free(aadOutLen)
         }
 
         outBuf := libc.malloc(ctDataLen + 1)
@@ -349,6 +437,87 @@ pub struct RSACipher {
         Skink_mem_write_byte(outBuf, int64(n), 0)
         return CipherResult{data: outBuf, length: n}, errors.New("")
     }
+
+    // Sign produces an RSASSA-PKCS1-v1_5 signature over the SHA-256
+    // digest of message[0..msgLen) using the private key. The result
+    // data is the raw signature (may contain NULs) of length
+    // RSA_size(rsa); verify it with Verify.
+    pub fn Sign(self: RSACipher, message: string, msgLen: int) -> (CipherResult, errors.Error) {
+        if str.Len(self.privKey) == 0 {
+            return CipherResult{}, errors.New("no private key available")
+        }
+        if msgLen < 0 {
+            return CipherResult{}, errors.New("message length must be non-negative")
+        }
+
+        // Parse the PEM-encoded private key via a memory BIO
+        bio := BIO_new_mem_buf(self.privKey, str.Len(self.privKey))
+        if int64(bio) == 0 {
+            return CipherResult{}, errors.New("failed to create BIO")
+        }
+        rsa := PEM_read_bio_RSAPrivateKey(bio, string(int64(0)), string(int64(0)), string(int64(0)))
+        BIO_free(bio)
+        if int64(rsa) == 0 {
+            return CipherResult{}, errors.New("failed to parse private key")
+        }
+
+        // RSASSA-PKCS1-v1_5 signs a DER-wrapped digest, not the raw
+        // message — hash with SHA-256 first.
+        digest := libc.malloc(32)
+        SHA256(message, int64(msgLen), digest)
+
+        rsaSize := RSA_size(rsa)
+        sigBuf := libc.malloc(rsaSize + 1)
+        sigLenBuf := libc.calloc(4, 1)
+        ok := RSA_sign(NID_SHA256, digest, 32, sigBuf, sigLenBuf, rsa)
+        RSA_free(rsa)
+        libc.free(digest)
+        if ok != 1 {
+            libc.free(sigLenBuf)
+            libc.free(sigBuf)
+            return CipherResult{}, errors.New("RSA sign failed")
+        }
+        // siglen is an unsigned int out-param — decode it little-endian.
+        sigLen := Skink_mem_byte(sigLenBuf, int64(0)) |
+            (Skink_mem_byte(sigLenBuf, int64(1)) << 8) |
+            (Skink_mem_byte(sigLenBuf, int64(2)) << 16) |
+            (Skink_mem_byte(sigLenBuf, int64(3)) << 24)
+        libc.free(sigLenBuf)
+        // Null-terminate for safe string comparison
+        Skink_mem_write_byte(sigBuf, int64(sigLen), 0)
+        return CipherResult{data: sigBuf, length: sigLen}, errors.New("")
+    }
+
+    // Verify checks an RSASSA-PKCS1-v1_5/SHA-256 signature produced by
+    // Sign against the public key. It returns true when the signature
+    // is valid; a bad signature returns false with no error — signature
+    // mismatch is an expected outcome, not a failure.
+    pub fn Verify(self: RSACipher, message: string, msgLen: int, sig: string, sigLen: int) -> (bool, errors.Error) {
+        if str.Len(self.pubKey) == 0 {
+            return false, errors.New("no public key available")
+        }
+        if msgLen < 0 || sigLen <= 0 {
+            return false, errors.New("invalid message or signature length")
+        }
+
+        // Parse the PEM-encoded public key via a memory BIO
+        bio := BIO_new_mem_buf(self.pubKey, str.Len(self.pubKey))
+        if int64(bio) == 0 {
+            return false, errors.New("failed to create BIO")
+        }
+        rsa := PEM_read_bio_RSA_PUBKEY(bio, string(int64(0)), string(int64(0)), string(int64(0)))
+        BIO_free(bio)
+        if int64(rsa) == 0 {
+            return false, errors.New("failed to parse public key")
+        }
+
+        digest := libc.malloc(32)
+        SHA256(message, int64(msgLen), digest)
+        ok := RSA_verify(NID_SHA256, digest, 32, sig, sigLen, rsa)
+        RSA_free(rsa)
+        libc.free(digest)
+        return ok == 1, errors.New("")
+    }
 }
 
 // NewAESLen creates an AES cipher with an explicit key length. The key
@@ -388,4 +557,90 @@ pub fn AESDecrypt(key: string, ivCiphertext: string, ctLen: int) -> (CipherResul
 // (e.g. encrypt-only with just a public key).
 pub fn NewRSA(pubKeyPEM: string, privKeyPEM: string) -> RSACipher {
     return RSACipher{pubKey: pubKeyPEM, privKey: privKeyPEM}
+}
+
+// RSAKeyPair holds a freshly generated PEM-encoded RSA key pair.
+// publicKey is SubjectPublicKeyInfo ("BEGIN PUBLIC KEY"); privateKey is
+// PKCS#1 ("BEGIN RSA PRIVATE KEY"). Both are NUL-terminated PEM text
+// accepted by NewRSA.
+pub struct RSAKeyPair {
+    publicKey: string  // the PEM-encoded public key
+    privateKey: string  // the PEM-encoded private key
+}
+
+// GenerateRSAKeyPair generates an RSA key pair of the requested modulus
+// size using the RSA_F4 (65537) public exponent and returns both keys
+// PEM-encoded, ready for NewRSA. bits must lie in
+// [RSA_MIN_BITS, RSA_MAX_BITS].
+pub fn GenerateRSAKeyPair(bits: int) -> (RSAKeyPair, errors.Error) {
+    if bits < RSA_MIN_BITS || bits > RSA_MAX_BITS {
+        return RSAKeyPair{}, errors.New("RSA key size must be between 512 and 8192 bits")
+    }
+    rsa := RSA_new()
+    if int64(rsa) == 0 {
+        return RSAKeyPair{}, errors.New("RSA_new failed")
+    }
+    exp := BN_new()
+    if int64(exp) == 0 {
+        RSA_free(rsa)
+        return RSAKeyPair{}, errors.New("BN_new failed")
+    }
+    if BN_set_word(exp, int64(RSA_F4)) != 1 {
+        BN_free(exp)
+        RSA_free(rsa)
+        return RSAKeyPair{}, errors.New("BN_set_word failed")
+    }
+    if RSA_generate_key_ex(rsa, bits, exp, string(int64(0))) != 1 {
+        BN_free(exp)
+        RSA_free(rsa)
+        return RSAKeyPair{}, errors.New("RSA key generation failed")
+    }
+    BN_free(exp)
+
+    pubPEM, e1 := rsaToPEM(rsa, true)
+    if e1.message != "" {
+        RSA_free(rsa)
+        return RSAKeyPair{}, e1
+    }
+    privPEM, e2 := rsaToPEM(rsa, false)
+    RSA_free(rsa)
+    if e2.message != "" {
+        return RSAKeyPair{}, e2
+    }
+    return RSAKeyPair{publicKey: pubPEM, privateKey: privPEM}, errors.New("")
+}
+
+// rsaToPEM serializes an RSA object to a NUL-terminated PEM string via
+// a memory BIO. isPublic selects SubjectPublicKeyInfo ("PUBLIC KEY")
+// versus PKCS#1 ("RSA PRIVATE KEY") encoding.
+fn rsaToPEM(rsa: string, isPublic: bool) -> (string, errors.Error) {
+    bio := BIO_new(BIO_s_mem())
+    if int64(bio) == 0 {
+        return "", errors.New("failed to create memory BIO")
+    }
+    ok := 0
+    if isPublic {
+        ok = PEM_write_bio_RSA_PUBKEY(bio, rsa)
+    } else {
+        // NULL cipher + NULL kstr = unencrypted PKCS#1 private key PEM.
+        ok = PEM_write_bio_RSAPrivateKey(bio, rsa, string(int64(0)), string(int64(0)), 0, string(int64(0)), string(int64(0)))
+    }
+    if ok != 1 {
+        BIO_free(bio)
+        return "", errors.New("failed to serialize RSA key to PEM")
+    }
+    pending := BIO_ctrl(bio, BIO_CTRL_PENDING, int64(0), string(int64(0)))
+    if pending <= int64(0) {
+        BIO_free(bio)
+        return "", errors.New("empty PEM serialization")
+    }
+    buf := libc.malloc(int(pending) + 1)
+    n := BIO_read(bio, buf, int(pending))
+    BIO_free(bio)
+    if n <= 0 {
+        libc.free(buf)
+        return "", errors.New("failed to read PEM from BIO")
+    }
+    Skink_mem_write_byte(buf, int64(n), 0)
+    return buf, errors.New("")
 }

@@ -289,3 +289,217 @@ pub fn TestAESGCMTagReject() {
         Errorf("corrupted GCM tag decrypted successfully")
     }
 }
+
+// --- AES-GCM additional authenticated data (AAD) ---
+
+// TestAESGCMAADRoundtrip verifies EncryptAAD/DecryptAAD restore the
+// plaintext when the same AAD is supplied on both sides.
+pub fn TestAESGCMAADRoundtrip() {
+    aes := encrypt.NewAES(aesKey128)
+    aad := "header:v1"
+    enc, e1 := aes.EncryptAAD("hello world", 11, aad, 9)
+    if e1.message != "" {
+        Errorf("EncryptAAD should not error: " + e1.message)
+    }
+    dec, e2 := aes.DecryptAAD(enc.data, enc.length, aad, 9)
+    if e2.message != "" {
+        Errorf("DecryptAAD should not error: " + e2.message)
+    }
+    if dec.length != 11 || bytesEqual(dec.data, "hello world", 11) == false {
+        Errorf("AAD roundtrip should restore plaintext")
+    }
+}
+
+// TestAESGCMAADMismatch verifies the GCM tag covers the AAD: decrypting
+// with a different AAD must fail authentication.
+pub fn TestAESGCMAADMismatch() {
+    aes := encrypt.NewAES(aesKey128)
+    enc, e1 := aes.EncryptAAD("secret", 6, "v1", 2)
+    if e1.message != "" {
+        Errorf("EncryptAAD should not error: " + e1.message)
+    }
+    _, e2 := aes.DecryptAAD(enc.data, enc.length, "v2", 2)
+    if e2.message == "" {
+        Errorf("DecryptAAD with wrong AAD should fail authentication")
+    }
+}
+
+// TestAESGCMAADRequired verifies AAD-bound ciphertext cannot be opened
+// without the AAD, and AAD-less ciphertext rejects a supplied AAD.
+pub fn TestAESGCMAADRequired() {
+    aes := encrypt.NewAES(aesKey128)
+    enc, _ := aes.EncryptAAD("secret", 6, "meta", 4)
+    _, e1 := aes.Decrypt(enc.data, enc.length)
+    if e1.message == "" {
+        Errorf("Decrypt without AAD should reject AAD-bound ciphertext")
+    }
+    enc2, _ := aes.Encrypt("secret", 6)
+    _, e2 := aes.DecryptAAD(enc2.data, enc2.length, "meta", 4)
+    if e2.message == "" {
+        Errorf("DecryptAAD with AAD should reject AAD-less ciphertext")
+    }
+}
+
+// TestAESGCMAADEmpty verifies EncryptAAD with aadLen 0 produces a
+// ciphertext the no-AAD Decrypt accepts — an empty AAD is no AAD.
+pub fn TestAESGCMAADEmpty() {
+    aes := encrypt.NewAES(aesKey128)
+    enc, e1 := aes.EncryptAAD("data", 4, "", 0)
+    if e1.message != "" {
+        Errorf("EncryptAAD with empty AAD should not error: " + e1.message)
+    }
+    dec, e2 := aes.Decrypt(enc.data, enc.length)
+    if e2.message != "" {
+        Errorf("Decrypt of empty-AAD ciphertext should not error: " + e2.message)
+    }
+    if dec.length != 4 || bytesEqual(dec.data, "data", 4) == false {
+        Errorf("empty-AAD roundtrip should restore plaintext")
+    }
+}
+
+// --- RSA key generation and signing ---
+
+// TestRSAKeyGenerate verifies GenerateRSAKeyPair emits PEM-labelled keys
+// that round-trip through Encrypt/Decrypt.
+pub fn TestRSAKeyGenerate() {
+    kp, e := encrypt.GenerateRSAKeyPair(2048)
+    if e.message != "" {
+        Errorf("GenerateRSAKeyPair should not error: " + e.message)
+    }
+    if str.Contains(kp.publicKey, "BEGIN PUBLIC KEY") == false {
+        Errorf("generated public key should carry the PUBLIC KEY PEM label")
+    }
+    if str.Contains(kp.privateKey, "BEGIN RSA PRIVATE KEY") == false {
+        Errorf("generated private key should carry the RSA PRIVATE KEY PEM label")
+    }
+    rsa := encrypt.NewRSA(kp.publicKey, kp.privateKey)
+    enc, e1 := rsa.Encrypt("hi", 2)
+    if e1.message != "" {
+        Errorf("generated-pair Encrypt should not error: " + e1.message)
+    }
+    dec, e2 := rsa.Decrypt(enc.data, enc.length)
+    if e2.message != "" {
+        Errorf("generated-pair Decrypt should not error: " + e2.message)
+    }
+    if dec.length != 2 || bytesEqual(dec.data, "hi", 2) == false {
+        Errorf("generated RSA pair should round-trip plaintext")
+    }
+}
+
+// TestRSAKeyGenerateRejectsSmallBits guards the modulus-size floor:
+// below 512 bits a SHA-256 DigestInfo cannot fit a v1.5 signature.
+pub fn TestRSAKeyGenerateRejectsSmallBits() {
+    _, e := encrypt.GenerateRSAKeyPair(256)
+    if e.message == "" {
+        Errorf("GenerateRSAKeyPair(256) should be rejected")
+    }
+}
+
+// TestRSAKeyGenerateUnique verifies successive generations produce
+// different key material.
+pub fn TestRSAKeyGenerateUnique() {
+    a, _ := encrypt.GenerateRSAKeyPair(1024)
+    b, _ := encrypt.GenerateRSAKeyPair(1024)
+    if str.Equal(a.publicKey, b.publicKey) {
+        Errorf("two generated key pairs should differ")
+    }
+}
+
+// TestRSASignVerify verifies Sign→Verify across separate private/public
+// cipher instances built from a generated pair.
+pub fn TestRSASignVerify() {
+    kp, e := encrypt.GenerateRSAKeyPair(2048)
+    if e.message != "" {
+        Errorf("GenerateRSAKeyPair should not error: " + e.message)
+    }
+    signer := encrypt.NewRSA("", kp.privateKey)
+    verifier := encrypt.NewRSA(kp.publicKey, "")
+    msg := "sign this message"
+    sig, e1 := signer.Sign(msg, str.Len(msg))
+    if e1.message != "" {
+        Errorf("RSA Sign should not error: " + e1.message)
+    }
+    if sig.length != 256 {
+        Errorf("2048-bit RSA signature should be 256 bytes, got " + strconv.Itoa(sig.length))
+    }
+    ok, e2 := verifier.Verify(msg, str.Len(msg), sig.data, sig.length)
+    if e2.message != "" {
+        Errorf("RSA Verify should not error: " + e2.message)
+    }
+    if ok == false {
+        Errorf("valid signature should verify")
+    }
+}
+
+// TestRSASignVerifyStaticKey exercises Sign/Verify on the fixed PEM pair.
+pub fn TestRSASignVerifyStaticKey() {
+    rsa := encrypt.NewRSA(rsaPubKey, rsaPrivKey)
+    msg := "static key message"
+    sig, e1 := rsa.Sign(msg, str.Len(msg))
+    if e1.message != "" {
+        Errorf("Sign with static key should not error: " + e1.message)
+    }
+    ok, _ := rsa.Verify(msg, str.Len(msg), sig.data, sig.length)
+    if ok == false {
+        Errorf("static-key signature should verify")
+    }
+}
+
+// TestRSASignVerifyTamperedMessage verifies a signature does not verify
+// against a modified message.
+pub fn TestRSASignVerifyTamperedMessage() {
+    rsa := encrypt.NewRSA(rsaPubKey, rsaPrivKey)
+    sig, _ := rsa.Sign("original", 8)
+    ok, _ := rsa.Verify("originaL", 8, sig.data, sig.length)
+    if ok {
+        Errorf("signature for a different message should not verify")
+    }
+}
+
+// TestRSASignVerifyTamperedSig verifies flipping a signature byte fails
+// verification.
+pub fn TestRSASignVerifyTamperedSig() {
+    rsa := encrypt.NewRSA(rsaPubKey, rsaPrivKey)
+    msg := "immutable"
+    sig, _ := rsa.Sign(msg, str.Len(msg))
+    Skink_mem_write_byte(sig.data, int64(0), (int(Skink_mem_byte(sig.data, int64(0))) + 1) % 256)
+    ok, _ := rsa.Verify(msg, str.Len(msg), sig.data, sig.length)
+    if ok {
+        Errorf("corrupted signature should not verify")
+    }
+}
+
+// TestRSASignVerifyWrongKey verifies a signature does not verify under
+// an unrelated public key.
+pub fn TestRSASignVerifyWrongKey() {
+    kp, _ := encrypt.GenerateRSAKeyPair(2048)
+    signer := encrypt.NewRSA("", kp.privateKey)
+    msg := "authentic"
+    sig, e1 := signer.Sign(msg, str.Len(msg))
+    if e1.message != "" {
+        Errorf("Sign should not error: " + e1.message)
+    }
+    verifier := encrypt.NewRSA(rsaPubKey, "")
+    ok, _ := verifier.Verify(msg, str.Len(msg), sig.data, sig.length)
+    if ok {
+        Errorf("signature should not verify under a different key")
+    }
+}
+
+// TestRSASignNoPrivateKey verifies signing requires a private key.
+pub fn TestRSASignNoPrivateKey() {
+    rsa := encrypt.NewRSA(rsaPubKey, "")
+    _, e := rsa.Sign("msg", 3)
+    if e.message == "" {
+        Errorf("Sign without private key should fail")
+    }
+}
+
+// TestRSAVerifyNoPublicKey verifies verification requires a public key.
+pub fn TestRSAVerifyNoPublicKey() {
+    rsa := encrypt.NewRSA("", rsaPrivKey)
+    _, e := rsa.Verify("msg", 3, "sig", 3)
+    if e.message == "" {
+        Errorf("Verify without public key should fail")
+    }
+}
