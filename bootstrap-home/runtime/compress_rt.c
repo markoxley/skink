@@ -46,9 +46,15 @@
  *   srcLen - the number of input bytes to be compressed.
  *
  * Returns:
- *   The maximum number of bytes that compression may produce.
+ *   The maximum number of bytes that compression may produce, or -1 for
+ *   a negative length or a length whose bound would overflow int32
+ *   (compressBound(srcLen) exceeds INT32_MAX for srcLen near 2 GiB —
+ *   a wrapped negative bound previously produced an undersized/NULL
+ *   destination and a zlib write into it; comp_error.md #154).
  */
 int Skink_compress_bound(int srcLen) {
+  if (srcLen < 0 || srcLen > INT32_MAX / 2)
+    return -1;
   return (int)compressBound(srcLen);
 }
 
@@ -69,6 +75,11 @@ int Skink_compress_bound(int srcLen) {
  *   The number of bytes written to `dest` on success, or -1 on failure.
  */
 int Skink_compress(const char *src, int srcLen, char *dest, int destCap) {
+  /* Negative lengths/capacities would become huge uLong values in zlib,
+   * reading/writing far outside the caller's buffers (comp_error.md
+   * #154). Defense in depth — std/compress already validates. */
+  if (srcLen < 0 || destCap < 0 || (src && !dest) || (!src && srcLen > 0))
+    return -1;
   /* zlib expects the destination length as an in/out parameter. */
   uLongf destLen = destCap;
 
@@ -96,6 +107,10 @@ int Skink_compress(const char *src, int srcLen, char *dest, int destCap) {
  *   The number of bytes written to `dest` on success, or -1 on failure.
  */
 int Skink_uncompress(const char *src, int srcLen, char *dest, int destCap) {
+  /* Negative lengths/capacities would become huge uLong values in zlib
+   * (comp_error.md #154). Defense in depth — std/compress validates. */
+  if (srcLen < 0 || destCap < 0 || (src && !dest) || (!src && srcLen > 0))
+    return -1;
   /* zlib expects the destination length as an in/out parameter. */
   uLongf destLen = destCap;
 
@@ -121,5 +136,7 @@ int Skink_uncompress(const char *src, int srcLen, char *dest, int destCap) {
  *   The 32-bit CRC checksum as a signed integer.
  */
 int Skink_crc32(const char *data, int len) {
+  if (len < 0)
+    return 0;
   return (int)crc32(0, (const Bytef *)data, len);
 }

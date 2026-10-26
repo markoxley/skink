@@ -26,6 +26,12 @@ module str
 import "std/libc"
 
 extern fn Skink_mem_alloc(size: int64) -> string
+// Skink_mem_write_byte stores a byte at ptr+idx WITHOUT the string
+// bounds check — used only for the NUL terminator byte at the end of a
+// freshly allocated buffer (index == allocation size - 1 == the semantic
+// string length, which the checked write path rejects; comp_error.md
+// #149). The caller guarantees the allocation covers idx+1 bytes.
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
 
 // managedAlloc allocates a GC-managed string of the given byte size.
 fn managedAlloc(size: int) -> string {
@@ -46,7 +52,7 @@ pub fn NewBuilder(cap: int) -> Builder {
         cap = 1
     }
     b := Builder{buf: managedAlloc(cap), len: 0, cap: cap}
-    b.buf[0] = 0
+    Skink_mem_write_byte(b.buf, int64(0), 0)
     return b
 }
 
@@ -59,15 +65,23 @@ pub fn Write(self: *Builder, s: string) {
         libc.memcpy(string(int64(self.buf) + int64(self.len)), s, n)
     }
     self.len = self.len + n
-    self.buf[self.len] = 0
+    // Terminator byte — index == the buffer's last byte (raw write).
+    Skink_mem_write_byte(self.buf, int64(self.len), 0)
 }
 
 // WriteByte appends a single byte b to the builder.
+// NUL bytes are rejected (comp_error.md #151): strings are NUL-terminated
+// C strings (Len is strlen), so an embedded NUL would silently truncate
+// every downstream operation.
 pub fn WriteByte(self: *Builder, b: int) {
+    if b == 0 {
+        panic("str.Builder: NUL byte in string")
+    }
     self.ensure(1)
     self.buf[self.len] = b
     self.len = self.len + 1
-    self.buf[self.len] = 0
+    // Terminator byte — index == the buffer's last byte (raw write).
+    Skink_mem_write_byte(self.buf, int64(self.len), 0)
 }
 
 // String returns a null-terminated copy of the builder's contents.
@@ -76,7 +90,8 @@ pub fn String(self: Builder) -> string {
     if self.len > 0 {
         libc.memcpy(result, self.buf, self.len)
     }
-    result[self.len] = 0
+    // Terminator byte (raw write — index == the allocation's last byte).
+    Skink_mem_write_byte(result, int64(self.len), 0)
     return result
 }
 
@@ -94,7 +109,8 @@ pub fn LenBuilder(self: Builder) -> int {
 pub fn Reset(self: *Builder) {
     self.len = 0
     if self.cap > 0 {
-        self.buf[0] = 0
+        // Terminator byte (raw write — buffer may have cap == 1).
+        Skink_mem_write_byte(self.buf, int64(0), 0)
     }
 }
 
@@ -179,11 +195,19 @@ pub fn Contains(s: string, needle: string) -> bool {
 pub fn Concat(a: string, b: string) -> string {
     la := Len(a)
     lb := Len(b)
+    // 64-bit math: la + lb + 1 can wrap int32 for ~2 GiB strings, which
+    // would allocate a tiny/negative block and memcpy past it
+    // (comp_error.md #152).
+    total := int64(la) + int64(lb) + 1
+    if total > int64(2147483647) {
+        panic("str.Concat: size overflow")
+    }
     result := managedAlloc(la + lb + 1)
     if la > 0 { libc.memcpy(result, a, la) }
     // Copy b after a in the result buffer.
     if lb > 0 { libc.memcpy(string(int64(result) + int64(la)), b, lb) }
-    result[la + lb] = 0
+    // Terminator byte (raw write — index == the allocation's last byte).
+    Skink_mem_write_byte(result, int64(la + lb), 0)
     return result
 }
 
@@ -201,12 +225,16 @@ pub fn Substr(s: string, start: int, length: int) -> string {
     if start < 0 { start = 0 }
     if start > n { start = n }
     if length < 0 { length = 0 }
-    if start + length > n { length = n - start }
+    // 64-bit math: start + length can wrap int32 for huge values, which
+    // would defeat the clamp and copy length bytes from past the end of
+    // the allocation (comp_error.md #152).
+    if int64(start) + int64(length) > int64(n) { length = n - start }
     result := managedAlloc(length + 1)
     if length > 0 {
         libc.memcpy(result, string(int64(s) + int64(start)), length)
     }
-    result[length] = 0
+    // Terminator byte (raw write — index == the allocation's last byte).
+    Skink_mem_write_byte(result, int64(length), 0)
     return result
 }
 
@@ -340,7 +368,8 @@ pub fn ToLower(s: string) -> string {
     n := Len(s)
     result := managedAlloc(n + 1)
     for i := 0; i < n; i = i + 1 { result[i] = libc.tolower(s[i]) }
-    result[n] = 0
+    // Terminator byte (raw write — index == the allocation's last byte).
+    Skink_mem_write_byte(result, int64(n), 0)
     return result
 }
 
@@ -349,7 +378,8 @@ pub fn ToUpper(s: string) -> string {
     n := Len(s)
     result := managedAlloc(n + 1)
     for i := 0; i < n; i = i + 1 { result[i] = libc.toupper(s[i]) }
-    result[n] = 0
+    // Terminator byte (raw write — index == the allocation's last byte).
+    Skink_mem_write_byte(result, int64(n), 0)
     return result
 }
 
@@ -373,6 +403,7 @@ pub fn Repeat(s: string, count: int) -> string {
             result[i * n + j] = s[j]
         }
     }
-    result[total] = 0
+    // Terminator byte (raw write — index == the allocation's last byte).
+    Skink_mem_write_byte(result, int64(total), 0)
     return result
 }

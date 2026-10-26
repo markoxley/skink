@@ -52,6 +52,8 @@ static void skink_regex_dtor(void *p) { regfree((regex_t *)p); free(p); }
 // Returns a malloc'd regex_t* (as void*), or NULL on failure.
 // error_buf is filled with the error message on failure (must be 256+ bytes).
 void *Skink_regex_compile(const char *pattern, char *error_buf, int error_buf_size) {
+    if (!pattern || !error_buf || error_buf_size <= 0)
+        return NULL;
     regex_t *re = (regex_t *)malloc(sizeof(regex_t));
     if (re == NULL) {
         strncpy(error_buf, "out of memory", error_buf_size - 1);

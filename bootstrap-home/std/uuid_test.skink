@@ -1,0 +1,384 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/uuid_test.skink
+// Purpose: Test suite for the uuid module — parsing in every accepted
+//          textual form (canonical, uppercase, bare hex, braced GUID,
+//          URN), formatting, Nil/Max sentinels, generation of versions
+//          1-8 per RFC 9562, name-based vector checks against the
+//          well-known RFC 4122 "python.org" digests, GUID byte-order
+//          marshaling, and ordering/uniqueness properties.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module uuid_test
+
+import "std/uuid"
+import "std/libc"
+import "std/str"
+import "std/testing"
+import "std/time"
+
+// TestParseCanonical verifies the hyphenated 8-4-4-4-12 form parses
+// and round-trips through String exactly.
+pub fn TestParseCanonical() {
+    u, err := uuid.Parse("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+    testing.AssertEqualString("", err.message, "canonical parse error")
+    testing.AssertEqualString("6ba7b810-9dad-11d1-80b4-00c04fd430c8", u.String(), "canonical round-trip")
+}
+
+// TestParseForms verifies the alternative accepted spellings —
+// uppercase, bare 32-digit hex, Microsoft braces, and the urn:uuid:
+// prefix in mixed case — all produce the same value.
+pub fn TestParseForms() {
+    expect := "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+    forms := []string{
+        "6BA7B810-9DAD-11D1-80B4-00C04FD430C8",
+        "6ba7b8109dad11d180b400c04fd430c8",
+        "6BA7B8109DAD11D180B400C04FD430C8",
+        "{6ba7b810-9dad-11d1-80b4-00c04fd430c8}",
+        "urn:uuid:6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+        "URN:UUID:6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+    }
+    for i := 0; i < len(forms); i = i + 1 {
+        u, err := uuid.Parse(forms[i])
+        testing.AssertEqualString("", err.message, "parse error for "+forms[i])
+        testing.AssertEqualString(expect, u.String(), "round-trip for "+forms[i])
+    }
+}
+
+// TestParseInvalid verifies malformed inputs are rejected with an
+// error rather than producing a garbage UUID.
+pub fn TestParseInvalid() {
+    bad := []string{
+        "",
+        "6ba7b810-9dad-11d1-80b4-00c04fd430c",   // one digit short
+        "6ba7b810-9dad-11d1-80b4-00c04fd430c88", // one digit long
+        "6ba7b810-9dad-11d1-80b4-00c04fd430cg",  // bad hex digit
+        "6ba7b8109dad-11d1-80b4-00c04fd430c8",   // hyphen in wrong slot
+        "{6ba7b810-9dad-11d1-80b4-00c04fd430c8", // unclosed brace
+        "urn:uuid:6ba7b810",                     // truncated URN
+        "not-a-uuid-at-all",
+        "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",      // 32 non-hex chars
+    }
+    for i := 0; i < len(bad); i = i + 1 {
+        _, err := uuid.Parse(bad[i])
+        testing.AssertFalse(err.message == "", "expected error for '"+bad[i]+"'")
+        testing.AssertFalse(uuid.IsValid(bad[i]), "IsValid should be false for '"+bad[i]+"'")
+    }
+}
+
+// TestIsValid exercises the IsValid predicate across accepted and
+// rejected spellings.
+pub fn TestIsValid() {
+    testing.AssertTrue(uuid.IsValid("6ba7b810-9dad-11d1-80b4-00c04fd430c8"), "canonical valid")
+    testing.AssertTrue(uuid.IsValid("6ba7b8109dad11d180b400c04fd430c8"), "bare hex valid")
+    testing.AssertTrue(uuid.IsValid("{6ba7b810-9dad-11d1-80b4-00c04fd430c8}"), "braced valid")
+    testing.AssertFalse(uuid.IsValid("hello"), "garbage invalid")
+}
+
+// TestNilAndMax verifies the two RFC 9562 sentinel values.
+pub fn TestNilAndMax() {
+    n := uuid.Nil()
+    testing.AssertTrue(n.IsNil(), "Nil reports IsNil")
+    testing.AssertFalse(n.IsMax(), "Nil is not Max")
+    testing.AssertEqualString("00000000-0000-0000-0000-000000000000", n.String(), "Nil text")
+    testing.AssertEqualInt(0, n.Version(), "Nil version is 0")
+
+    m := uuid.Max()
+    testing.AssertTrue(m.IsMax(), "Max reports IsMax")
+    testing.AssertFalse(m.IsNil(), "Max is not Nil")
+    testing.AssertEqualString("ffffffff-ffff-ffff-ffff-ffffffffffff", m.String(), "Max text")
+
+    // Max must sort after every other UUID per RFC 9562.
+    v4 := uuid.New()
+    testing.AssertEqualInt(1, m.Compare(v4), "Max > v4")
+    testing.AssertEqualInt(-1, n.Compare(m), "Nil < Max")
+}
+
+// TestFormat verifies every textual projection of a known UUID.
+pub fn TestFormat() {
+    u := uuid.MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+    testing.AssertEqualString("6ba7b810-9dad-11d1-80b4-00c04fd430c8", u.String(), "String")
+    testing.AssertEqualString("6ba7b8109dad11d180b400c04fd430c8", u.Hex(), "Hex")
+    testing.AssertEqualString("urn:uuid:6ba7b810-9dad-11d1-80b4-00c04fd430c8", u.Urn(), "Urn")
+    testing.AssertEqualString("{6ba7b810-9dad-11d1-80b4-00c04fd430c8}", u.Braced(), "Braced")
+    testing.AssertEqualInt(uuid.VariantRFC4122, u.Variant(), "variant is RFC 4122")
+}
+
+// TestBytesRoundTrip verifies Bytes -> FromBytes is the identity,
+// including the error path for short buffers.
+pub fn TestBytesRoundTrip() {
+    u := uuid.MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+    b := u.Bytes()
+    // First octet of the text form is 0x6b, last is 0xc8.
+    testing.AssertEqualInt(0x6b, int(b[0]) & 0xFF, "first octet")
+    testing.AssertEqualInt(0xc8, int(b[15]) & 0xFF, "last octet")
+    u2, err := uuid.FromBytes(b, 16)
+    testing.AssertEqualString("", err.message, "FromBytes error")
+    testing.AssertTrue(u.Equal(u2), "byte round-trip preserves value")
+    libc.free(b)
+
+    _, err2 := uuid.FromBytes("short", 5)
+    testing.AssertFalse(err2.message == "", "short buffer must error")
+}
+
+// TestGUIDBytes verifies the Windows GUID memory-struct byte order:
+// Data1/Data2/Data3 are byte-reversed little-endian, Data4 unchanged.
+pub fn TestGUIDBytes() {
+    u := uuid.MustParse("00112233-4455-6677-8899-aabbccddeeff")
+    g := u.GUIDBytes()
+    // Data1 (u32) little-endian: 33 22 11 00
+    testing.AssertEqualInt(0x33, int(g[0]) & 0xFF, "guid byte 0")
+    testing.AssertEqualInt(0x22, int(g[1]) & 0xFF, "guid byte 1")
+    testing.AssertEqualInt(0x11, int(g[2]) & 0xFF, "guid byte 2")
+    testing.AssertEqualInt(0x00, int(g[3]) & 0xFF, "guid byte 3")
+    // Data2 (u16) little-endian: 55 44
+    testing.AssertEqualInt(0x55, int(g[4]) & 0xFF, "guid byte 4")
+    testing.AssertEqualInt(0x44, int(g[5]) & 0xFF, "guid byte 5")
+    // Data3 (u16) little-endian: 77 66
+    testing.AssertEqualInt(0x77, int(g[6]) & 0xFF, "guid byte 6")
+    testing.AssertEqualInt(0x66, int(g[7]) & 0xFF, "guid byte 7")
+    // Data4 unchanged.
+    testing.AssertEqualInt(0x88, int(g[8]) & 0xFF, "guid byte 8")
+    testing.AssertEqualInt(0xee, int(g[14]) & 0xFF, "guid byte 14")
+    testing.AssertEqualInt(0xff, int(g[15]) & 0xFF, "guid byte 15")
+
+    // Round-trip through the GUID byte order.
+    u2, err := uuid.FromGUIDBytes(g, 16)
+    testing.AssertEqualString("", err.message, "FromGUIDBytes error")
+    testing.AssertTrue(u.Equal(u2), "GUID byte round-trip preserves value")
+    libc.free(g)
+
+    _, err2 := uuid.FromGUIDBytes("tiny", 4)
+    testing.AssertFalse(err2.message == "", "short GUID buffer must error")
+}
+
+// TestNewV4 verifies random UUIDs: version/variant bits, uniqueness,
+// and parse round-trip.
+pub fn TestNewV4() {
+    a := uuid.New()
+    b := uuid.NewV4()
+    testing.AssertEqualInt(4, a.Version(), "v4 version")
+    testing.AssertEqualInt(uuid.VariantRFC4122, a.Variant(), "v4 variant")
+    testing.AssertFalse(a.Equal(b), "two random UUIDs must differ")
+    testing.AssertFalse(a.IsNil(), "v4 not Nil")
+
+    reparsed, err := uuid.Parse(a.String())
+    testing.AssertEqualString("", err.message, "v4 String reparse")
+    testing.AssertTrue(a.Equal(reparsed), "v4 String round-trip")
+}
+
+// TestNewV3Vectors checks v3 (MD5) against the well-known RFC 4122
+// name-based test vector: MD5 namespace DNS + "python.org".
+pub fn TestNewV3Vectors() {
+    u := uuid.NewV3(uuid.NamespaceDNS(), "python.org")
+    testing.AssertEqualString("6fa459ea-ee8a-3ca4-894e-db77e160355e", u.String(), "v3 python.org")
+    testing.AssertEqualInt(3, u.Version(), "v3 version")
+    testing.AssertEqualInt(uuid.VariantRFC4122, u.Variant(), "v3 variant")
+}
+
+// TestNewV5Vectors checks v5 (SHA-1) against the RFC 4122 Appendix B
+// vector and determinism/namespacing properties.
+pub fn TestNewV5Vectors() {
+    u := uuid.NewV5(uuid.NamespaceDNS(), "python.org")
+    testing.AssertEqualString("886313e1-3b8a-5372-9b90-0c9aee199e5d", u.String(), "v5 python.org")
+    testing.AssertEqualInt(5, u.Version(), "v5 version")
+    testing.AssertEqualInt(uuid.VariantRFC4122, u.Variant(), "v5 variant")
+
+    // Deterministic: same inputs give the same UUID.
+    u2 := uuid.NewV5(uuid.NamespaceDNS(), "python.org")
+    testing.AssertTrue(u.Equal(u2), "v5 deterministic")
+
+    // Different namespace → different UUID.
+    u3 := uuid.NewV5(uuid.NamespaceURL(), "python.org")
+    testing.AssertFalse(u.Equal(u3), "v5 differs across namespaces")
+}
+
+// TestNamespaces verifies the four RFC 9562 Appendix C name-space
+// constants.
+pub fn TestNamespaces() {
+    testing.AssertEqualString("6ba7b810-9dad-11d1-80b4-00c04fd430c8", uuid.NamespaceDNS().String(), "DNS namespace")
+    testing.AssertEqualString("6ba7b811-9dad-11d1-80b4-00c04fd430c8", uuid.NamespaceURL().String(), "URL namespace")
+    testing.AssertEqualString("6ba7b812-9dad-11d1-80b4-00c04fd430c8", uuid.NamespaceOID().String(), "OID namespace")
+    testing.AssertEqualString("6ba7b814-9dad-11d1-80b4-00c04fd430c8", uuid.NamespaceX500().String(), "X.500 namespace")
+}
+
+// TestNewV1 verifies the time+node layout: version, variant, a valid
+// 14-bit clock sequence, a 6-octet node consistent between calls, a
+// timestamp close to now, and uniqueness of consecutive values.
+pub fn TestNewV1() {
+    a := uuid.NewV1()
+    testing.AssertEqualInt(1, a.Version(), "v1 version")
+    testing.AssertEqualInt(uuid.VariantRFC4122, a.Variant(), "v1 variant")
+
+    seq := a.ClockSequence()
+    testing.AssertTrue(seq >= 0 && seq <= 0x3FFF, "v1 clock sequence is 14-bit")
+
+    // The embedded timestamp must be close to the wall clock.
+    nowMs := int64(time.Timestamp()) * int64(1000)
+    gotMs := a.UnixMilli()
+    diff := gotMs - nowMs
+    if diff < 0 {
+        diff = -diff
+    }
+    testing.AssertTrue(diff < int64(10000), "v1 timestamp within 10s of now")
+
+    // Same node across calls (the node id is resolved once).
+    b := uuid.NewV1()
+    na := a.Node()
+    nb := b.Node()
+    same := true
+    for i := 0; i < 6; i = i + 1 {
+        if na[i] != nb[i] {
+            same = false
+        }
+    }
+    testing.AssertTrue(same, "v1 node id stable across calls")
+    libc.free(na)
+    libc.free(nb)
+
+    testing.AssertFalse(a.Equal(b), "consecutive v1 UUIDs differ")
+    testing.AssertTrue(uuid.NewV4().Timestamp() == int64(-1), "Timestamp is v1/v6 only")
+}
+
+// TestNewV2 verifies the DCE Security layout: local domain and local
+// identifier round-trip, and bad arguments are rejected.
+pub fn TestNewV2() {
+    u, err := uuid.NewV2(uuid.DomainPerson, int64(1000))
+    testing.AssertEqualString("", err.message, "v2 person creation")
+    testing.AssertEqualInt(2, u.Version(), "v2 version")
+    testing.AssertEqualInt(uuid.VariantRFC4122, u.Variant(), "v2 variant")
+    testing.AssertEqualInt(uuid.DomainPerson, u.LocalDomain(), "v2 domain")
+    testing.AssertTrue(u.LocalIdentifier() == int64(1000), "v2 local id")
+
+    g, err2 := uuid.NewV2(uuid.DomainGroup, int64(0xFFFFFFFE))
+    testing.AssertEqualString("", err2.message, "v2 group creation")
+    testing.AssertEqualInt(uuid.DomainGroup, g.LocalDomain(), "v2 group domain")
+    testing.AssertTrue(g.LocalIdentifier() == int64(0xFFFFFFFE), "v2 group local id")
+
+    _, err3 := uuid.NewV2(256, int64(1))
+    testing.AssertFalse(err3.message == "", "domain > 255 must error")
+    _, err4 := uuid.NewV2(-1, int64(1))
+    testing.AssertFalse(err4.message == "", "negative domain must error")
+    _, err5 := uuid.NewV2(0, int64(0x100000000))
+    testing.AssertFalse(err5.message == "", "local id > 32 bits must error")
+}
+
+// TestNewV6 verifies the reordered-Gregorian version: correct fields
+// and chronological ordering of consecutive values.
+pub fn TestNewV6() {
+    a := uuid.NewV6()
+    testing.AssertEqualInt(6, a.Version(), "v6 version")
+    testing.AssertEqualInt(uuid.VariantRFC4122, a.Variant(), "v6 variant")
+
+    seq := a.ClockSequence()
+    testing.AssertTrue(seq >= 0 && seq <= 0x3FFF, "v6 clock sequence is 14-bit")
+
+    nowMs := int64(time.Timestamp()) * int64(1000)
+    diff := a.UnixMilli() - nowMs
+    if diff < 0 {
+        diff = -diff
+    }
+    testing.AssertTrue(diff < int64(10000), "v6 timestamp within 10s of now")
+
+    b := uuid.NewV6()
+    testing.AssertFalse(a.Equal(b), "consecutive v6 UUIDs differ")
+    testing.AssertTrue(a.Compare(b) <= 0, "v6 values are chronologically ordered")
+}
+
+// TestNewV7 verifies Unix-epoch UUIDs: version/variant, embedded
+// timestamp, and — per RFC 9562 section 6.2 — strictly increasing
+// ordering even for a burst within one millisecond.
+pub fn TestNewV7() {
+    a := uuid.NewV7()
+    testing.AssertEqualInt(7, a.Version(), "v7 version")
+    testing.AssertEqualInt(uuid.VariantRFC4122, a.Variant(), "v7 variant")
+
+    nowMs := int64(time.Timestamp()) * int64(1000)
+    diff := a.UnixMilli() - nowMs
+    if diff < 0 {
+        diff = -diff
+    }
+    testing.AssertTrue(diff < int64(10000), "v7 timestamp within 10s of now")
+
+    // A burst of 2000 generations must be strictly increasing —
+    // exercises the rand_a monotonic counter for same-ms collisions.
+    prev := a
+    for i := 0; i < 2000; i = i + 1 {
+        cur := uuid.NewV7()
+        testing.AssertTrue(cur.Compare(prev) > 0, "v7 sequence strictly increasing")
+        prev = cur
+    }
+}
+
+// TestNewV8 verifies the custom-content version: caller bytes are
+// preserved except the version nibble and variant bits.
+pub fn TestNewV8() {
+    data := libc.malloc(16)
+    for i := 0; i < 16; i = i + 1 {
+        data[i] = int8(i * 16 + i)
+    }
+    u, err := uuid.NewV8(data, 16)
+    testing.AssertEqualString("", err.message, "v8 creation")
+    testing.AssertEqualInt(8, u.Version(), "v8 version")
+    testing.AssertEqualInt(uuid.VariantRFC4122, u.Variant(), "v8 variant")
+
+    // Payload bytes outside the version/variant fields are verbatim.
+    b := u.Bytes()
+    testing.AssertEqualInt(0x00, int(b[0]) & 0xFF, "v8 byte 0 verbatim")
+    testing.AssertEqualInt(0x55, int(b[5]) & 0xFF, "v8 byte 5 verbatim")
+    testing.AssertEqualInt(0x77, int(b[7]) & 0xFF, "v8 byte 7 verbatim")
+    testing.AssertEqualInt(0x99, int(b[9]) & 0xFF, "v8 byte 9 verbatim")
+    testing.AssertEqualInt(0xff, int(b[15]) & 0xFF, "v8 byte 15 verbatim")
+    libc.free(b)
+    libc.free(data)
+
+    _, err2 := uuid.NewV8("too-short", 9)
+    testing.AssertFalse(err2.message == "", "v8 non-16-byte input must error")
+}
+
+// TestCompareOrdering verifies unsigned 128-bit ordering used for
+// sortable UUID keys.
+pub fn TestCompareOrdering() {
+    a := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+    b := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+    high := uuid.MustParse("ff000000-0000-0000-0000-000000000000")
+    testing.AssertEqualInt(-1, a.Compare(b), "a < b")
+    testing.AssertEqualInt(1, b.Compare(a), "b > a")
+    testing.AssertEqualInt(0, b.Compare(b), "b == b")
+    // Signed hi word (0xff... is negative as int64) must still order
+    // as the largest — proves the comparison is byte-wise unsigned.
+    testing.AssertEqualInt(1, high.Compare(b), "0xff-prefixed > low value")
+    testing.AssertTrue(a.Equal(uuid.MustParse("00000000-0000-0000-0000-000000000001")), "Equal on reparsed")
+}
+
+// TestUniqueness generates a batch of v4 UUIDs and asserts no two
+// produced the same value.
+pub fn TestUniqueness() {
+    var seen map[string]bool
+    seen = make(map[string]bool)
+    for i := 0; i < 500; i = i + 1 {
+        s := uuid.New().String()
+        if seen[s] {
+            testing.Fail()
+        }
+        seen[s] = true
+    }
+    testing.AssertTrue(true, "500 unique v4 UUIDs")
+}

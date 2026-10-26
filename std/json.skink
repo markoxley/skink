@@ -102,6 +102,19 @@ pub fn FromObject(keys: []string, vals: []Value) -> Value {
 
 // Accessors
 
+// Kind tags for the kind field — returned by Kind(v).
+pub const KIND_NULL   = 0
+pub const KIND_BOOL   = 1
+pub const KIND_NUMBER = 2
+pub const KIND_STRING = 3
+pub const KIND_ARRAY  = 4
+pub const KIND_OBJECT = 5
+
+// Kind returns the value's kind tag (KIND_* constants).
+pub fn Kind(v: Value) -> int {
+    return v.kind
+}
+
 // IsNull returns true if the Value represents a JSON null.
 pub fn IsNull(v: Value) -> bool {
     return v.kind == 0

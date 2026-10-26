@@ -26,6 +26,9 @@
 module regex
 
 import "std/libc"
+extern fn Skink_mem_byte(ptr: string, idx: int64) -> int
+
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
 import "std/str"
 import "std/errors"
 
@@ -73,10 +76,10 @@ pub struct Regex {
             return false
         }
         // Reassemble 4-byte little-endian integers for start and end positions
-        start := int(startBuf[0]) | (int(startBuf[1]) << 8) |
-                 (int(startBuf[2]) << 16) | (int(startBuf[3]) << 24)
-        end := int(endBuf[0]) | (int(endBuf[1]) << 8) |
-               (int(endBuf[2]) << 16) | (int(endBuf[3]) << 24)
+        start := Skink_mem_byte(startBuf, int64(0)) | (Skink_mem_byte(startBuf, int64(1)) << 8) |
+                 (Skink_mem_byte(startBuf, int64(2)) << 16) | (Skink_mem_byte(startBuf, int64(3)) << 24)
+        end := Skink_mem_byte(endBuf, int64(0)) | (Skink_mem_byte(endBuf, int64(1)) << 8) |
+               (Skink_mem_byte(endBuf, int64(2)) << 16) | (Skink_mem_byte(endBuf, int64(3)) << 24)
         libc.free(startBuf)
         libc.free(endBuf)
         textLen := int(libc.strlen(text))
@@ -98,10 +101,10 @@ pub struct Regex {
             return Match{Start: -1, End: -1, Text: ""}
         }
         // Reassemble 4-byte little-endian integers for start and end positions
-        start := int(startBuf[0]) | (int(startBuf[1]) << 8) |
-                 (int(startBuf[2]) << 16) | (int(startBuf[3]) << 24)
-        end := int(endBuf[0]) | (int(endBuf[1]) << 8) |
-               (int(endBuf[2]) << 16) | (int(endBuf[3]) << 24)
+        start := Skink_mem_byte(startBuf, int64(0)) | (Skink_mem_byte(startBuf, int64(1)) << 8) |
+                 (Skink_mem_byte(startBuf, int64(2)) << 16) | (Skink_mem_byte(startBuf, int64(3)) << 24)
+        end := Skink_mem_byte(endBuf, int64(0)) | (Skink_mem_byte(endBuf, int64(1)) << 8) |
+               (Skink_mem_byte(endBuf, int64(2)) << 16) | (Skink_mem_byte(endBuf, int64(3)) << 24)
         libc.free(startBuf)
         libc.free(endBuf)
         // Extract matched substring as a managed string so it is released
@@ -127,10 +130,10 @@ pub struct Regex {
                 break
             }
             // Reassemble 4-byte little-endian integers for start and end positions
-            start := int(startBuf[0]) | (int(startBuf[1]) << 8) |
-                     (int(startBuf[2]) << 16) | (int(startBuf[3]) << 24)
-            end := int(endBuf[0]) | (int(endBuf[1]) << 8) |
-                   (int(endBuf[2]) << 16) | (int(endBuf[3]) << 24)
+            start := Skink_mem_byte(startBuf, int64(0)) | (Skink_mem_byte(startBuf, int64(1)) << 8) |
+                     (Skink_mem_byte(startBuf, int64(2)) << 16) | (Skink_mem_byte(startBuf, int64(3)) << 24)
+            end := Skink_mem_byte(endBuf, int64(0)) | (Skink_mem_byte(endBuf, int64(1)) << 8) |
+                   (Skink_mem_byte(endBuf, int64(2)) << 16) | (Skink_mem_byte(endBuf, int64(3)) << 24)
             matchLen := end - start
             matchText := str.Substr(text, start, matchLen)
             matches = append(matches, Match{Start: start, End: end, Text: matchText})
@@ -189,7 +192,7 @@ pub struct Regex {
                        string(int64(text) + int64(pos)), remaining)
             resultPos = resultPos + remaining
         }
-        result[resultPos] = 0 // Null-terminate the result string
+        Skink_mem_write_byte(result, int64(resultPos), 0) // Null-terminate the result string
         return result
     }
 

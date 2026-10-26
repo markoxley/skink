@@ -26,6 +26,8 @@ module fmt
 import "std/buf"
 import "std/libc"
 
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
+
 // Itoa converts an integer to its decimal string representation.
 // The caller owns the returned string and must free it when done.
 pub fn Itoa(n: int) -> string {
@@ -249,11 +251,16 @@ pub fn Sprintf(fmtStr: string, args: []Arg) -> string {
             i = i + 1
             continue
         }
-        // Parse width
+        // Parse width. A huge width (e.g. %99999999999999d) wraps int32 and
+        // would allocate a negative/undersized padding buffer — cap it
+        // (comp_error.md #157).
         width := 0
         hasWidth := false
         for i < n && fmtStr[i] >= 48 && fmtStr[i] <= 57 {
             width = width * 10 + (int(fmtStr[i]) - 48)
+            if width > 1048576 {
+                panic("fmt: width too large")
+            }
             hasWidth = true
             i = i + 1
         }
@@ -333,15 +340,18 @@ fn formatArg(verb: int, width: int, precision: int, arg: Arg) -> string {
     } else if verb == 99 { // 'c' - char from int
         // Build a single-character string from the int value.
         s := libc.malloc(2)
-        s[0] = arg.ival
-        s[1] = 0
+        if int64(s) == 0 {
+            panic("fmt: out of memory")
+        }
+        Skink_mem_write_byte(s, int64(0), arg.ival)
+        Skink_mem_write_byte(s, int64(1), 0)
         return s
     } else {
         // Unknown verb: output as-is with % prefix
         s := libc.malloc(3)
-        s[0] = 37
-        s[1] = verb
-        s[2] = 0
+        Skink_mem_write_byte(s, int64(0), 37)
+        Skink_mem_write_byte(s, int64(1), verb)
+        Skink_mem_write_byte(s, int64(2), 0)
         return s
     }
     // Apply width padding
@@ -350,11 +360,14 @@ fn formatArg(verb: int, width: int, precision: int, arg: Arg) -> string {
         if rawLen < width {
             // Left-pad with spaces to reach the desired width.
             padded := libc.malloc(width + 1)
+            if int64(padded) == 0 {
+                panic("fmt: out of memory")
+            }
             for j := 0; j < width - rawLen; j = j + 1 {
-                padded[j] = 32 // space
+                Skink_mem_write_byte(padded, int64(j), 32) // space
             }
             libc.memcpy(string(int64(padded) + int64(width - rawLen)), raw, rawLen)
-            padded[width] = 0
+            Skink_mem_write_byte(padded, int64(width), 0)
             return padded
         }
     }
@@ -384,8 +397,8 @@ fn formatFloatPrec(f: float, precision: int) -> string {
 fn formatHex(n: int) -> string {
     if n == 0 {
         s := libc.malloc(2)
-        s[0] = 48
-        s[1] = 0
+        Skink_mem_write_byte(s, int64(0), 48)
+        Skink_mem_write_byte(s, int64(1), 0)
         return s
     }
     val := n
@@ -402,15 +415,15 @@ fn formatHex(n: int) -> string {
     for val > 0 {
         digit := val % 16
         if digit < 10 {
-            s[pos] = 48 + digit
+            Skink_mem_write_byte(s, int64(pos), 48 + digit)
         } else {
             // Hex letters a-f for digits 10-15.
-            s[pos] = 97 + (digit - 10) // 'a' + digit - 10
+            Skink_mem_write_byte(s, int64(pos), 97 + (digit - 10)) // 'a' + digit - 10
         }
         val = val / 16
         pos = pos - 1
     }
-    s[len] = 0
+    Skink_mem_write_byte(s, int64(len), 0)
     return s
 }
 

@@ -1,0 +1,83 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/resolver_test.skink
+// Purpose: Unit tests for the module resolver's import confinement and
+//          version validation (comp_error.md #156): ".." segments,
+//          absolute paths, empty segments, and unsafe version strings
+//          must be rejected so the compiler never reads arbitrary files
+//          on behalf of a source file.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module resolver_test
+
+import "testing"
+import "std/fs"
+import "std/str"
+import "std/resolver"
+
+// rsCheckUnsafe asserts that Resolve of a source file importing imp fails
+// to resolve (reports an error) — the unsafe import must not read a file.
+fn rsCheckUnsafe(tag: string, imp: string) {
+    dir := "/tmp/skink_resolver_test"
+    fs.Remove(dir)
+    fs.Mkdir(dir)
+    fs.WriteAll(str.Concat(dir, "/main.skink"), str.Concat(str.Concat("module main\nimport \"", imp), "\"\nfn main() -> int {\n    return 0\n}\n"))
+    _, errs := resolver.Resolve(str.Concat(dir, "/main.skink"), "/home/mark/Projects/skink-lang/skink/std")
+    if len(errs) == 0 {
+        testing.Errorf(str.Concat(tag, ": unsafe import must not resolve"))
+    }
+    fs.Remove(str.Concat(dir, "/main.skink"))
+}
+
+// TestImportTraversalRejected guards #156: "..", absolute, and empty-
+// segment import paths must be rejected by the resolver.
+pub fn TestImportTraversalRejected() {
+    rsCheckUnsafe("parent-dotdot", "../secret")
+    rsCheckUnsafe("deep-dotdot", "a/../../secret")
+    rsCheckUnsafe("absolute", "/etc/passwd")
+    rsCheckUnsafe("empty-segment", "a//b")
+    rsCheckUnsafe("trailing-slash", "a/b/")
+    rsCheckUnsafe("dot-segment", "././x")
+    rsCheckUnsafe("backslash", "..\\..\\x")
+}
+
+// rsCheckValid asserts that a benign relative import resolves without
+// errors (a helper file sits next to the entry).
+fn rsCheckValid(tag: string, imp: string) {
+    dir := "/tmp/skink_resolver_test"
+    fs.Remove(dir)
+    fs.Mkdir(dir)
+    fs.WriteAll(str.Concat(dir, "/main.skink"), str.Concat(str.Concat("module main\nimport \"", imp), "\"\nfn main() -> int {\n    return 0\n}\n"))
+    fs.WriteAll(str.Concat(dir, "/helper.skink"), "module helper\npub fn Hi() -> int {\n    return 1\n}\n")
+    _, errs := resolver.Resolve(str.Concat(dir, "/main.skink"), "/home/mark/Projects/skink-lang/skink/std")
+    if len(errs) != 0 {
+        testing.Errorf(str.Concat(str.Concat(tag, ": valid import must resolve, got: "), errs[0]))
+    }
+    fs.Remove(str.Concat(dir, "/main.skink"))
+    fs.Remove(str.Concat(dir, "/helper.skink"))
+}
+
+// TestValidRelativeImport guards #156: ordinary relative imports keep
+// working after the confinement changes.
+pub fn TestValidRelativeImport() {
+    rsCheckValid("plain", "helper")
+    rsCheckValid("subdir", "helper")
+    rsCheckValid("leading-dot", "./helper")
+}

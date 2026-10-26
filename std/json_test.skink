@@ -323,3 +323,22 @@ pub fn TestStructRoundTrip() {
         Errorf("roundtrip should preserve all mapped fields")
     }
 }
+
+// TestValueKindAccessor covers the pub Kind() accessor + KIND_* consts
+// added so callers can switch on a Value's tag without reaching into
+// private fields (modules like skink-mongo map JSON→BSON by kind).
+pub fn TestValueKindAccessor() {
+    v, err := json.Unmarshal(`{"a":1,"b":"x","c":true,"d":[1],"e":{"f":null}}`)
+    if err.message != "" {
+        Errorf("unmarshal should succeed")
+        return
+    }
+    AssertEqualInt(json.KIND_OBJECT, json.Kind(v), "object kind")
+    AssertEqualInt(json.KIND_NUMBER, json.Kind(json.ObjectGet(v, "a")), "number kind")
+    AssertEqualInt(json.KIND_STRING, json.Kind(json.ObjectGet(v, "b")), "string kind")
+    AssertEqualInt(json.KIND_BOOL, json.Kind(json.ObjectGet(v, "c")), "bool kind")
+    AssertEqualInt(json.KIND_ARRAY, json.Kind(json.ObjectGet(v, "d")), "array kind")
+    e := json.ObjectGet(v, "e")
+    f := json.ObjectGet(e, "f")
+    AssertEqualInt(json.KIND_NULL, json.Kind(f), "null kind")
+}

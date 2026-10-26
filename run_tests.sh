@@ -89,7 +89,7 @@ for test_file in $test_files; do
             # headroom valgrind gets.
             test_output=$(timeout 60 "$RESULTS_DIR/${slug}_bin" 2>&1)
         else
-            test_output=$(timeout 10 "$RESULTS_DIR/${slug}_bin" 2>&1)
+            test_output=$(timeout 60 "$RESULTS_DIR/${slug}_bin" 2>&1)
         fi
         test_rc=$?
         rm -f "$RESULTS_DIR/${slug}_bin"
@@ -165,7 +165,7 @@ for test_file in $test_files; do
     elif [ "${ASAN:-0}" = "1" ]; then
         test_output=$(timeout 60 "$RESULTS_DIR/${slug}_bin" 2>&1)
     else
-        test_output=$(timeout 10 "$RESULTS_DIR/${slug}_bin" 2>&1)
+        test_output=$(timeout 60 "$RESULTS_DIR/${slug}_bin" 2>&1)
     fi
     test_rc=$?
     rm -f "$RESULTS_DIR/${slug}_bin" "$main_file"

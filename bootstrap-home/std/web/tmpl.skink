@@ -28,6 +28,8 @@ import "std/str"
 import "std/errors"
 import "std/libc"
 
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
+
 // Template holds a parsed template and its raw text.
 pub struct Template {
     text: string  // the text
@@ -55,8 +57,8 @@ fn escapeHTML(s: string) -> string {
         } else {
             // Build a single-character string for the current byte.
             var tmp string = libc.malloc(2)
-            tmp[0] = c
-            tmp[1] = 0
+            Skink_mem_write_byte(tmp, int64(0), c)
+            Skink_mem_write_byte(tmp, int64(1), 0)
             result = str.Concat(result, tmp)
             libc.free(tmp)
         }

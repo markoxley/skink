@@ -114,3 +114,24 @@ pub fn TestSprintfLargeFloatPrecision() {
         Errorf("Sprintf(%.120f) wrong digits")
     }
 }
+
+// fmtWidthTooLarge formats with a huge width — must panic
+// (comp_error.md #157: the width wraps int32 and would allocate a
+// negative/undersized padding buffer).
+fn fmtWidthTooLarge() {
+    args := []fmt.Arg{}
+    args = append(args, fmt.IArg(1))
+    _ = fmt.Sprintf("%99999999999999999d", args)
+}
+
+// TestWidthTooLargePanics guards #157.
+pub fn TestWidthTooLargePanics() {
+    msg := ""
+    defer fn() {
+        fmsg := recover()
+        if str.Len(fmsg) == 0 {
+            Errorf("huge fmt width must panic")
+        }
+    }()
+    fmtWidthTooLarge()
+}

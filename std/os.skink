@@ -27,6 +27,7 @@ module os
 
 import "std/buf"
 import "std/libc"
+extern fn Skink_mem_byte(ptr: string, idx: int64) -> int
 
 // C library and runtime wrappers.
 extern fn system(cmd: string) -> int
@@ -99,7 +100,10 @@ pub fn Unsetenv(name: string) -> bool {
 pub fn Getwd() -> string {
     buf := libc.malloc(4096)
     result := getcwd(buf, 4096)
-    if result == "" {
+    // getcwd returns NULL on failure (path longer than the buffer, or
+    // permissions) — a NULL "string" would crash any strlen-based caller
+    // (comp_error.md #153). Compare the raw pointer, not "".
+    if int64(result) == 0 {
         libc.free(buf)
         return "" // getcwd failed; return empty string
     }
@@ -156,11 +160,7 @@ pub fn Exec(args: []string) -> int {
     // NULL-terminate the array (write 8 zero bytes)
     nullAddr := string(int64(argvBuf) + int64(n * 8))
     zero := libc.malloc(8)
-    j := 0
-    for j < 8 {
-        zero[j] = 0
-        j = j + 1
-    }
+    libc.memset(zero, 0, 8)
     libc.memcpy(nullAddr, zero, 8)
     libc.free(zero)
     rc := Skink_os_exec(argvBuf, n)
@@ -185,17 +185,15 @@ pub fn ExecWithOutput(args: []string) -> (string, int) {
     }
     nullAddr := string(int64(argvBuf) + int64(n * 8))
     zero := libc.malloc(8)
-    j := 0
-    for j < 8 {
-        zero[j] = 0
-        j = j + 1
-    }
+    libc.memset(zero, 0, 8)
     libc.memcpy(nullAddr, zero, 8)
     libc.free(zero)
     statusBuf := libc.malloc(4)
     output := Skink_os_exec_with_output(argvBuf, n, statusBuf)
-    // Reassemble the 4-byte exit status from individual bytes (little-endian)
-    status := int(statusBuf[0]) | (int(statusBuf[1]) << 8) | (int(statusBuf[2]) << 16) | (int(statusBuf[3]) << 24)
+    // Reassemble the 4-byte exit status from individual bytes (little-endian).
+    // Raw reads: statusBuf is a raw malloc'd block, not a NUL-terminated
+    // string (comp_error.md #149).
+    status := Skink_mem_byte(statusBuf, int64(0)) | (Skink_mem_byte(statusBuf, int64(1)) << 8) | (Skink_mem_byte(statusBuf, int64(2)) << 16) | (Skink_mem_byte(statusBuf, int64(3)) << 24)
     libc.free(statusBuf)
     libc.free(argvBuf)
     if int64(output) == 0 {

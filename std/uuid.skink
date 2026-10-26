@@ -1,0 +1,931 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/uuid.skink
+// Purpose: Universally Unique Identifier (UUID) and Globally Unique
+//          Identifier (GUID) generation, parsing, formatting, and
+//          inspection per RFC 9562 (which obsoletes RFC 4122).
+//
+//          Supports all eight UUID versions:
+//            v1  - date-time + MAC/node based
+//            v2  - DCE Security (local domain + local identifier)
+//            v3  - name-based, MD5
+//            v4  - cryptographically random (OpenSSL RAND_bytes)
+//            v5  - name-based, SHA-1
+//            v6  - reordered Gregorian time (sortable v1)
+//            v7  - Unix epoch milliseconds + random (sortable)
+//            v8  - custom 122-bit payload
+//          plus the Nil and Max sentinel values.
+//
+//          A GUID is the same 128-bit value as a UUID; the textual
+//          representations are identical. The only difference is the
+//          binary layout used by the Windows GUID/CLSID/IID struct,
+//          which stores the first three fields little-endian — handled
+//          by Bytes (RFC byte order) vs GUIDBytes (Windows struct order).
+//
+//          Textual forms accepted by Parse:
+//            6ba7b810-9dad-11d1-80b4-00c04fd430c8   canonical
+//            6BA7B810-9DAD-11D1-80B4-00C04FD430C8   uppercase
+//            6ba7b8109dad11d180b400c04fd430c8       bare hex
+//            {6ba7b810-9dad-11d1-80b4-00c04fd430c8} Microsoft braces
+//            urn:uuid:6ba7b810-9dad-11d1-80b4-00c04fd430c8
+//
+// Example usage:
+//
+//   import "uuid"
+//
+//   id := uuid.New()                        // random v4
+//   println(id.String())
+//   k := uuid.NewV7()                       // time-sortable
+//   n := uuid.NewV5(uuid.NamespaceURL(), "https://example.com/x")
+//   u, err := uuid.Parse("{6ba7b810-9dad-11d1-80b4-00c04fd430c8}")
+//
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+module uuid
+
+import "std/errors"
+import "std/fs"
+import "std/libc"
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
+extern fn Skink_mem_byte(ptr: string, idx: int64) -> int
+import "std/str"
+import "std/sync"
+
+// RAND_bytes fills buf with num cryptographically secure random bytes
+// (OpenSSL, always linked by the Skink driver). Returns 1 on success.
+extern fn RAND_bytes(buf: string, num: int) -> int
+// MD5/SHA1 are the OpenSSL one-shot digest entry points. They take an
+// explicit input length, which is required here because the 16-byte
+// namespace prefix prepended to the name may contain NUL bytes.
+extern fn MD5(d: string, n: int64, md: string) -> string
+extern fn SHA1(d: string, n: int64, md: string) -> string
+// clock_gettime supplies both the Gregorian timestamps for v1/v6 and
+// the Unix epoch milliseconds for v7.
+extern fn clock_gettime(clk: int, ts: *uuidTimespec) -> int
+
+// uuidTimespec mirrors the C struct timespec layout (same as
+// std/time.TimeSpec, duplicated so this module does not depend on the
+// time module's internal struct).
+struct uuidTimespec {
+    tv_sec: int64   // seconds
+    tv_nsec: int64  // nanoseconds
+}
+
+// UUID variant constants — the value in the top bits of octet 8.
+// VariantNCS is reserved for backward compatibility with the Apollo
+// Network Computing System (obsolete UUIDs such as version-less NCS
+// identifiers).
+pub const VariantNCS = 0
+// VariantRFC4122 is the standard RFC 4122 / RFC 9562 variant used by
+// every UUID this module generates.
+pub const VariantRFC4122 = 1
+// VariantMicrosoft is reserved for Microsoft backward compatibility
+// (early Windows GUIDs).
+pub const VariantMicrosoft = 2
+// VariantFuture is reserved for future specification.
+pub const VariantFuture = 3
+
+// DCE Security (v2) local domain constants.
+// DomainPerson is the POSIX user-id domain (uid).
+pub const DomainPerson = 0
+// DomainGroup is the POSIX group-id domain (gid).
+pub const DomainGroup = 1
+// DomainOrg is the site-defined organization domain.
+pub const DomainOrg = 2
+
+// gregorianOffsetTicks is the number of 100-nanosecond intervals between
+// the Gregorian calendar epoch (1582-10-15) and the Unix epoch
+// (1970-01-01): 12219292800 seconds * 10^7.
+const gregorianOffsetTicks = int64(12219292800) * int64(10000000)
+
+// stateMu guards the generator state below (clock sequence, node id,
+// v7 monotonic counter) so concurrent NewV1/NewV6/NewV7 callers cannot
+// tear the shared counters.
+var stateMu = sync.NewMutex()
+
+// nodeBytes/nodeReady cache the 6-byte node identifier used by v1, v2
+// and v6. It is resolved once: a real interface MAC when the OS exposes
+// one (Linux sysfs), otherwise 48 random bits with the IEEE 802
+// multicast bit set, as RFC 9562 section 5.1 requires when no MAC is
+// available.
+var nodeBytes: string = ""
+var nodeReady = false
+
+// clockSeq is the 14-bit clock sequence for v1/v2/v6, seeded randomly on
+// first use and incremented whenever the clock fails to advance (or
+// moves backwards) so regenerated timestamps cannot collide.
+var clockSeq = -1
+var lastTick = int64(-1)
+
+// v7LastMs/v7Seq implement the RFC 9562 section 6.2 "monotonic random"
+// method for v7: while the millisecond does not advance, rand_a becomes
+// a counter so generated v7 UUIDs sort strictly in creation order.
+var v7LastMs = int64(-1)
+var v7Seq = 0
+
+// UUID is a 128-bit RFC 9562 universally unique identifier. The value is
+// stored as two 64-bit words in network (big-endian) byte order: hi
+// holds octets 0-7 (time_low, time_mid, time_hi_and_version) and lo
+// holds octets 8-15 (clock_seq, node / rand_b).
+pub struct UUID {
+    hi: int64  // most significant 64 bits (octets 0-7, big-endian)
+    lo: int64  // least significant 64 bits (octets 8-15, big-endian)
+
+    // String returns the canonical textual form:
+    // 8-4-4-4-12 lowercase hexadecimal with hyphens,
+    // e.g. "6ba7b810-9dad-11d1-80b4-00c04fd430c8".
+    pub fn String(self: UUID) -> string {
+        buf := libc.calloc(37, 1)
+        formatUUID(self, buf, true)
+        return buf
+    }
+
+    // Hex returns the 32 lowercase hexadecimal digits with no hyphens.
+    pub fn Hex(self: UUID) -> string {
+        buf := libc.calloc(33, 1)
+        formatUUID(self, buf, false)
+        return buf
+    }
+
+    // Urn returns the uniform resource name form:
+    // "urn:uuid:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx".
+    pub fn Urn(self: UUID) -> string {
+        return "urn:uuid:" + self.String()
+    }
+
+    // Braced returns the Microsoft-style braced form:
+    // "{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}".
+    pub fn Braced(self: UUID) -> string {
+        return "{" + self.String() + "}"
+    }
+
+    // Bytes returns the 16 octets of the UUID in RFC 9562 (big-endian)
+    // order. The returned buffer is NOT NUL-safe — it may contain zero
+    // bytes — so pass an explicit length of 16 to any consumer.
+    pub fn Bytes(self: UUID) -> string {
+        out := libc.malloc(16)
+        for i := 0; i < 8; i = i + 1 {
+            Skink_mem_write_byte(out, int64(i), int((self.hi >> ((7 - i) * 8)) & int64(0xFF)))
+            Skink_mem_write_byte(out, int64(8 + i), int((self.lo >> ((7 - i) * 8)) & int64(0xFF)))
+        }
+        return out
+    }
+
+    // GUIDBytes returns the 16 octets in Windows GUID memory-struct
+    // order: the first three fields (Data1 u32, Data2 u16, Data3 u16)
+    // are little-endian, the final 8 bytes are unchanged. This is the
+    // layout used by CLSID/IID binary interop, the {guid}(...) registry
+    // format's binary form, and COM. NOT NUL-safe — see Bytes.
+    pub fn GUIDBytes(self: UUID) -> string {
+        out := libc.malloc(16)
+        b := self.Bytes()
+        // Data1: 4-byte field byte-reversed.
+        Skink_mem_write_byte(out, int64(0), Skink_mem_byte(b, int64(3)))
+        Skink_mem_write_byte(out, int64(1), Skink_mem_byte(b, int64(2)))
+        Skink_mem_write_byte(out, int64(2), Skink_mem_byte(b, int64(1)))
+        Skink_mem_write_byte(out, int64(3), Skink_mem_byte(b, int64(0)))
+        // Data2: 2-byte field byte-reversed.
+        Skink_mem_write_byte(out, int64(4), Skink_mem_byte(b, int64(5)))
+        Skink_mem_write_byte(out, int64(5), Skink_mem_byte(b, int64(4)))
+        // Data3: 2-byte field byte-reversed.
+        Skink_mem_write_byte(out, int64(6), Skink_mem_byte(b, int64(7)))
+        Skink_mem_write_byte(out, int64(7), Skink_mem_byte(b, int64(6)))
+        // Data4: 8 bytes unchanged.
+        for i := 8; i < 16; i = i + 1 {
+            Skink_mem_write_byte(out, int64(i), Skink_mem_byte(b, int64(i)))
+        }
+        libc.free(b)
+        return out
+    }
+
+    // Version returns the UUID version number (1-8) encoded in the
+    // version field, or 0 for the Nil UUID / unrecognized layouts.
+    pub fn Version(self: UUID) -> int {
+        return int((self.hi >> 12) & int64(0xF))
+    }
+
+    // Variant returns the layout variant: VariantNCS, VariantRFC4122,
+    // VariantMicrosoft, or VariantFuture.
+    pub fn Variant(self: UUID) -> int {
+        b := int((self.lo >> 56) & int64(0xFF))
+        if (b & 0x80) == 0 {
+            return VariantNCS
+        }
+        if (b & 0xC0) == 0x80 {
+            return VariantRFC4122
+        }
+        if (b & 0xE0) == 0xC0 {
+            return VariantMicrosoft
+        }
+        return VariantFuture
+    }
+
+    // IsNil reports whether this is the Nil UUID (all 128 bits zero).
+    pub fn IsNil(self: UUID) -> bool {
+        return self.hi == int64(0) && self.lo == int64(0)
+    }
+
+    // IsMax reports whether this is the Max UUID (all 128 bits set),
+    // the RFC 9562 sentinel that sorts after every other UUID.
+    pub fn IsMax(self: UUID) -> bool {
+        return self.hi == int64(-1) && self.lo == int64(-1)
+    }
+
+    // Equal reports whether two UUIDs hold the same 128-bit value.
+    pub fn Equal(self: UUID, other: UUID) -> bool {
+        return self.hi == other.hi && self.lo == other.lo
+    }
+
+    // Compare orders two UUIDs as unsigned 128-bit integers
+    // (byte-wise lexicographic on the RFC octet order), returning -1,
+    // 0, or +1. v6/v7 UUIDs sort in creation order under this ordering.
+    pub fn Compare(self: UUID, other: UUID) -> int {
+        for i := 0; i < 16; i = i + 1 {
+            a := uuidByte(self, i)
+            b := uuidByte(other, i)
+            if a < b {
+                return -1
+            }
+            if a > b {
+                return 1
+            }
+        }
+        return 0
+    }
+
+    // UnixMilli returns the embedded timestamp as Unix epoch
+    // milliseconds for the time-based versions (v1, v6, v7), or -1 for
+    // all other versions and the Nil UUID. For v1/v6 the result is
+    // truncated to whole milliseconds (the 100ns ticks are divided).
+    pub fn UnixMilli(self: UUID) -> int64 {
+        v := self.Version()
+        if v == 7 {
+            // Top 48 bits of hi are unix_ts_ms.
+            return self.hi >> 16
+        }
+        if v == 1 || v == 6 {
+            return (self.gregTicks() - gregorianOffsetTicks) / int64(10000)
+        }
+        return int64(-1)
+    }
+
+    // gregTicks reconstructs the 60-bit Gregorian 100-nanosecond
+    // timestamp embedded in a v1 or v6 UUID.
+    fn gregTicks(self: UUID) -> int64 {
+        if self.Version() == 6 {
+            // v6 stores the timestamp contiguously in the top 60 bits'
+            // two halves: high 48 bits in octets 0-5, low 12 bits in
+            // octets 6-7 below the version nibble.
+            return ((self.hi >> 16) << 12) | (self.hi & int64(0xFFF))
+        }
+        // v1 layout: time_low | time_mid | time_hi.
+        return ((self.hi >> 32) & int64(0xFFFFFFFF)) |
+            (((self.hi >> 16) & int64(0xFFFF)) << 32) |
+            ((self.hi & int64(0xFFF)) << 48)
+    }
+
+    // Timestamp returns the embedded 100-nanosecond Gregorian tick
+    // count for v1/v6 UUIDs, or -1 for other versions.
+    pub fn Timestamp(self: UUID) -> int64 {
+        v := self.Version()
+        if v == 1 || v == 6 {
+            return self.gregTicks()
+        }
+        return int64(-1)
+    }
+
+    // ClockSequence returns the 14-bit clock sequence for v1, v2, and
+    // v6 UUIDs, or -1 for other versions.
+    pub fn ClockSequence(self: UUID) -> int {
+        v := self.Version()
+        if v != 1 && v != 2 && v != 6 {
+            return -1
+        }
+        hi6 := int((self.lo >> 56) & int64(0x3F))
+        lo8 := int((self.lo >> 48) & int64(0xFF))
+        return (hi6 << 8) | lo8
+    }
+
+    // Node returns the 6-byte node identifier (MAC or multicast-flagged
+    // random) embedded in v1/v6 UUIDs, or an empty string for other
+    // versions. The buffer is not NUL-terminated at 6 bytes — treat it
+    // as exactly 6 octets.
+    pub fn Node(self: UUID) -> string {
+        v := self.Version()
+        if v != 1 && v != 6 {
+            return ""
+        }
+        out := libc.malloc(6)
+        for i := 0; i < 6; i = i + 1 {
+            Skink_mem_write_byte(out, int64(i), int((self.lo >> ((5 - i) * 8)) & int64(0xFF)))
+        }
+        return out
+    }
+
+    // LocalDomain returns the DCE local-domain octet of a v2 UUID
+    // (DomainPerson, DomainGroup, or DomainOrg), or -1 for other
+    // versions.
+    pub fn LocalDomain(self: UUID) -> int {
+        if self.Version() != 2 {
+            return -1
+        }
+        return int((self.lo >> 48) & int64(0xFF))
+    }
+
+    // LocalIdentifier returns the 32-bit local identifier (uid, gid,
+    // or org id) embedded in the time_low field of a v2 UUID, or -1
+    // for other versions.
+    pub fn LocalIdentifier(self: UUID) -> int64 {
+        if self.Version() != 2 {
+            return int64(-1)
+        }
+        return (self.hi >> 32) & int64(0xFFFFFFFF)
+    }
+}
+
+// Nil returns the Nil UUID: 00000000-0000-0000-0000-000000000000.
+pub fn Nil() -> UUID {
+    return UUID{hi: int64(0), lo: int64(0)}
+}
+
+// Max returns the Max UUID: ffffffff-ffff-ffff-ffff-ffffffffffff,
+// the RFC 9562 sentinel that compares greater than every other UUID.
+pub fn Max() -> UUID {
+    return UUID{hi: int64(-1), lo: int64(-1)}
+}
+
+// --- Well-known namespace UUIDs (RFC 9562 Appendix C) ---
+
+// NamespaceDNS returns the name-space UUID for fully-qualified
+// domain names: 6ba7b810-9dad-11d1-80b4-00c04fd430c8.
+pub fn NamespaceDNS() -> UUID {
+    return MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+}
+
+// NamespaceURL returns the name-space UUID for URLs:
+// 6ba7b811-9dad-11d1-80b4-00c04fd430c8.
+pub fn NamespaceURL() -> UUID {
+    return MustParse("6ba7b811-9dad-11d1-80b4-00c04fd430c8")
+}
+
+// NamespaceOID returns the name-space UUID for ISO OIDs:
+// 6ba7b812-9dad-11d1-80b4-00c04fd430c8.
+pub fn NamespaceOID() -> UUID {
+    return MustParse("6ba7b812-9dad-11d1-80b4-00c04fd430c8")
+}
+
+// NamespaceX500 returns the name-space UUID for X.500 DNs:
+// 6ba7b814-9dad-11d1-80b4-00c04fd430c8.
+pub fn NamespaceX500() -> UUID {
+    return MustParse("6ba7b814-9dad-11d1-80b4-00c04fd430c8")
+}
+
+// --- Parsing ---
+
+// Parse reads a UUID or GUID from any of the accepted textual forms:
+// canonical hyphenated, uppercase, bare 32-digit hex, Microsoft braced,
+// and the "urn:uuid:" uniform resource name (case-insensitive prefix).
+// Returns (uuid, errors.None()) on success or (Nil(), error) when the
+// input is malformed.
+pub fn Parse(s: string) -> (UUID, errors.Error) {
+    n := str.Len(s)
+    if n == 0 {
+        return Nil(), errors.New("uuid: empty string")
+    }
+
+    // Strip a "urn:uuid:" prefix (any case per RFC 9562 section 4).
+    if n > 9 {
+        head := str.ToLower(str.Substr(s, 0, 9))
+        if head == "urn:uuid:" {
+            s = str.Substr(s, 9, n - 9)
+            n = str.Len(s)
+        }
+    }
+
+    // Strip Microsoft braces {xxxxxxxx-...-xxxxxxxxxxxx}.
+    if n > 1 && s[0] == 123 { // '{'
+        if s[n - 1] != 125 { // '}'
+            return Nil(), errors.New("uuid: unclosed '{' brace")
+        }
+        s = str.Substr(s, 1, n - 2)
+        n = str.Len(s)
+    }
+
+    var hi int64 = int64(0)
+    var lo int64 = int64(0)
+
+    if n == 36 {
+        // Canonical hyphenated form: dashes must sit at 8, 13, 18, 23.
+        if s[8] != 45 || s[13] != 45 || s[18] != 45 || s[23] != 45 {
+            return Nil(), errors.New("uuid: malformed — hyphens expected at positions 8, 13, 18, 23")
+        }
+        j := 0
+        for i := 0; i < 36; i = i + 1 {
+            if i == 8 || i == 13 || i == 18 || i == 23 {
+                continue
+            }
+            v := hexVal(s[i])
+            if v < 0 {
+                return Nil(), errors.New("uuid: malformed — invalid hex digit")
+            }
+            if j < 16 {
+                hi = (hi << 4) | int64(v)
+            } else {
+                lo = (lo << 4) | int64(v)
+            }
+            j = j + 1
+        }
+        return UUID{hi: hi, lo: lo}, errors.None()
+    }
+
+    if n == 32 {
+        // Bare 32-digit hex form.
+        for i := 0; i < 32; i = i + 1 {
+            v := hexVal(s[i])
+            if v < 0 {
+                return Nil(), errors.New("uuid: malformed — invalid hex digit")
+            }
+            if i < 16 {
+                hi = (hi << 4) | int64(v)
+            } else {
+                lo = (lo << 4) | int64(v)
+            }
+        }
+        return UUID{hi: hi, lo: lo}, errors.None()
+    }
+
+    return Nil(), errors.New("uuid: malformed — expected 36 or 32 hex digits")
+}
+
+// MustParse is Parse that panics on malformed input — intended for
+// compile-time-constant strings.
+pub fn MustParse(s: string) -> UUID {
+    u, err := Parse(s)
+    if err.message != "" {
+        panic(err.message)
+    }
+    return u
+}
+
+// IsValid reports whether s is a parseable UUID/GUID string in any of
+// the accepted textual forms.
+pub fn IsValid(s: string) -> bool {
+    _, err := Parse(s)
+    return err.message == ""
+}
+
+// FromBytes builds a UUID from its 16 RFC 9562 big-endian octets.
+// bLen must be at least 16; only the first 16 bytes are read (the
+// explicit length parameter exists because a valid UUID byte string
+// may contain NUL bytes that defeat str.Len).
+pub fn FromBytes(b: string, bLen: int) -> (UUID, errors.Error) {
+    if bLen < 16 {
+        return Nil(), errors.New("uuid: FromBytes requires at least 16 bytes")
+    }
+    return uuidFromBuf(b), errors.None()
+}
+
+// FromGUIDBytes builds a UUID from its 16 bytes in Windows GUID
+// memory-struct order (Data1/Data2/Data3 little-endian). Inverse of
+// UUID.GUIDBytes. bLen must be at least 16.
+pub fn FromGUIDBytes(b: string, bLen: int) -> (UUID, errors.Error) {
+    if bLen < 16 {
+        return Nil(), errors.New("uuid: FromGUIDBytes requires at least 16 bytes")
+    }
+    rfc := libc.malloc(16)
+    Skink_mem_write_byte(rfc, int64(0), Skink_mem_byte(b, int64(3)))
+    Skink_mem_write_byte(rfc, int64(1), Skink_mem_byte(b, int64(2)))
+    Skink_mem_write_byte(rfc, int64(2), Skink_mem_byte(b, int64(1)))
+    Skink_mem_write_byte(rfc, int64(3), Skink_mem_byte(b, int64(0)))
+    Skink_mem_write_byte(rfc, int64(4), Skink_mem_byte(b, int64(5)))
+    Skink_mem_write_byte(rfc, int64(5), Skink_mem_byte(b, int64(4)))
+    Skink_mem_write_byte(rfc, int64(6), Skink_mem_byte(b, int64(7)))
+    Skink_mem_write_byte(rfc, int64(7), Skink_mem_byte(b, int64(6)))
+    for i := 8; i < 16; i = i + 1 {
+        Skink_mem_write_byte(rfc, int64(i), Skink_mem_byte(b, int64(i)))
+    }
+    u := uuidFromBuf(rfc)
+    libc.free(rfc)
+    return u, errors.None()
+}
+
+// --- Generation ---
+
+// New returns a new random (version 4) UUID — the right choice for
+// general-purpose identifiers. Equivalent to NewV4.
+pub fn New() -> UUID {
+    return NewV4()
+}
+
+// NewV1 returns a version 1 (date-time + node) UUID. The node is the
+// host MAC address when discoverable, otherwise 48 random bits with
+// the multicast bit set (per RFC 9562 section 5.1). The 14-bit clock
+// sequence is randomly seeded and incremented whenever the clock does
+// not advance, preventing duplicates after clock regressions.
+pub fn NewV1() -> UUID {
+    return makeTimeUUID(1, 0, int64(0), false)
+}
+
+// NewV2 returns a version 2 (DCE Security) UUID embedding the given
+// local domain (DomainPerson, DomainGroup, or DomainOrg) and 32-bit
+// local identifier (e.g. a POSIX uid or gid). The identifier replaces
+// the time_low field and the domain replaces clock_seq_low.
+pub fn NewV2(domain: int, localID: int64) -> (UUID, errors.Error) {
+    if domain < 0 || domain > 255 {
+        return Nil(), errors.New("uuid: domain must be in [0, 255]")
+    }
+    if localID < int64(0) || localID > int64(0xFFFFFFFF) {
+        return Nil(), errors.New("uuid: local identifier must fit in 32 bits")
+    }
+    return makeTimeUUID(2, domain, localID, true), errors.None()
+}
+
+// NewV3 returns the version 3 name-based UUID of name in namespace ns,
+// per RFC 9562 section 6.5: MD5(ns_octets || name), version and variant
+// bits then applied. Deterministic — the same inputs always produce the
+// same UUID. name is hashed via strlen, so it must not contain NULs.
+pub fn NewV3(ns: UUID, name: string) -> UUID {
+    return nameHash(ns, name, 3)
+}
+
+// NewV4 returns a version 4 random UUID: 122 bits of OpenSSL
+// RAND_bytes output with version and variant bits applied. Suitable
+// for security-sensitive identifiers. Panics if the OS entropy source
+// fails.
+pub fn NewV4() -> UUID {
+    buf := libc.malloc(16)
+    randBytes(buf, 16)
+    u := uuidFromBuf(buf)
+    libc.free(buf)
+    u.hi = setVersion(u.hi, 4)
+    u.lo = setRFCVariant(u.lo)
+    return u
+}
+
+// NewV5 returns the version 5 name-based UUID of name in namespace ns,
+// per RFC 9562 section 6.6: SHA-1(ns_octets || name), first 16 octets,
+// version and variant bits then applied. Deterministic. name is hashed
+// via strlen, so it must not contain NULs.
+pub fn NewV5(ns: UUID, name: string) -> UUID {
+    return nameHash(ns, name, 5)
+}
+
+// NewV6 returns a version 6 reordered-Gregorian-time UUID. It carries
+// the same information as v1 but with the timestamp fields reversed so
+// that the RFC byte order sorts chronologically under Compare — a
+// drop-in v1 replacement for sortable database keys.
+pub fn NewV6() -> UUID {
+    return makeTimeUUID(6, 0, int64(0), false)
+}
+
+// NewV7 returns a version 7 Unix-epoch-time UUID: 48 bits of Unix
+// milliseconds followed by a monotonically increasing 12-bit rand_a
+// sequence and 62 random bits. Values generated in sequence compare
+// strictly increasing, making them ideal for database primary keys.
+pub fn NewV7() -> UUID {
+    ms := unixMilli()
+    stateMu.Lock()
+    if ms > v7LastMs {
+        v7LastMs = ms
+        v7Seq = randU16() & 0xFFF
+    } else {
+        // Same millisecond or a clock regression (real or caused by a
+        // previous counter-wrap bump): keep issuing the last timestamp
+        // and rely on the rand_a counter for ordering, per RFC 9562
+        // section 6.2 method 1.
+        v7Seq = (v7Seq + 1) & 0xFFF
+        if v7Seq == 0 {
+            // Counter wrapped — bump the timestamp artificially so the
+            // sequence stays strictly increasing.
+            v7LastMs = v7LastMs + 1
+        }
+        ms = v7LastMs
+    }
+    seq := v7Seq
+    stateMu.Unlock()
+
+    buf := libc.malloc(8)
+    randBytes(buf, 8)
+    var lo int64 = int64(0)
+    for i := 0; i < 8; i = i + 1 {
+        lo = (lo << 8) | (int64(Skink_mem_byte(buf, int64(i))) & int64(0xFF))
+    }
+    libc.free(buf)
+
+    ms48 := (int64(1) << 48) - int64(1)
+    hi := ((ms & ms48) << 16) | (int64(7) << 12) | int64(seq)
+    return UUID{hi: hi, lo: setRFCVariant(lo)}
+}
+
+// NewV8 returns a version 8 custom-content UUID. data must be exactly
+// 16 bytes; the version nibble (octet 6 high) and variant bits (octet 8
+// high two bits) are overwritten per RFC 9562, leaving 122 bits of
+// caller-defined payload. dataLen is explicit because data may contain
+// NUL bytes.
+pub fn NewV8(data: string, dataLen: int) -> (UUID, errors.Error) {
+    if dataLen != 16 {
+        return Nil(), errors.New("uuid: NewV8 requires exactly 16 bytes of custom data")
+    }
+    u := uuidFromBuf(data)
+    u.hi = setVersion(u.hi, 8)
+    u.lo = setRFCVariant(u.lo)
+    return u, errors.None()
+}
+
+// --- Generator configuration ---
+
+// SetNodeID overrides the 6-byte node identifier used by NewV1, NewV2
+// and NewV6 (e.g. to pin a node across processes). node must be at
+// least 6 bytes; the first 6 octets are copied.
+pub fn SetNodeID(node: string, nodeLen: int) -> errors.Error {
+    if nodeLen < 6 {
+        return errors.New("uuid: SetNodeID requires 6 bytes")
+    }
+    stateMu.Lock()
+    nb := libc.malloc(6)
+    libc.memcpy(nb, node, int64(6))
+    nodeBytes = nb
+    nodeReady = true
+    stateMu.Unlock()
+    return errors.None()
+}
+
+// SetClockSequence overrides the 14-bit clock sequence used by NewV1,
+// NewV2 and NewV6. seq is masked to 14 bits.
+pub fn SetClockSequence(seq: int) {
+    stateMu.Lock()
+    clockSeq = seq & 0x3FFF
+    stateMu.Unlock()
+}
+
+// --- internal helpers ---
+
+// uuidByte returns octet i (0-15) of u in RFC 9562 order.
+fn uuidByte(u: UUID, i: int) -> int {
+    if i < 8 {
+        return int((u.hi >> ((7 - i) * 8)) & int64(0xFF))
+    }
+    return int((u.lo >> ((15 - i) * 8)) & int64(0xFF))
+}
+
+// hexVal decodes one hexadecimal digit byte, or returns -1.
+fn hexVal(c: int8) -> int {
+    v := int(c)
+    if v >= 48 && v <= 57 { // '0'-'9'
+        return v - 48
+    }
+    if v >= 97 && v <= 102 { // 'a'-'f'
+        return v - 87
+    }
+    if v >= 65 && v <= 70 { // 'A'-'F'
+        return v - 55
+    }
+    return -1
+}
+
+// uuidFromBuf packs the first 16 bytes of buf into hi/lo, big-endian.
+fn uuidFromBuf(buf: string) -> UUID {
+    var hi int64 = int64(0)
+    var lo int64 = int64(0)
+    for i := 0; i < 8; i = i + 1 {
+        hi = (hi << 8) | (int64(Skink_mem_byte(buf, int64(i))) & int64(0xFF))
+        lo = (lo << 8) | (int64(Skink_mem_byte(buf, int64(8 + i))) & int64(0xFF))
+    }
+    return UUID{hi: hi, lo: lo}
+}
+
+// formatUUID writes the canonical 36-char (or bare 32-char when
+// hyphens is false) lowercase textual form into buf, which must be at
+// least 37 (or 33) bytes and is expected to be zero-filled so the
+// result is NUL-terminated.
+fn formatUUID(u: UUID, buf: string, hyphens: bool) {
+    digits := "0123456789abcdef"
+    j := 0
+    for i := 0; i < 16; i = i + 1 {
+        if hyphens && (i == 4 || i == 6 || i == 8 || i == 10) {
+            Skink_mem_write_byte(buf, int64(j), 45) // '-'
+            j = j + 1
+        }
+        b := uuidByte(u, i)
+        Skink_mem_write_byte(buf, int64(j), int(digits[(b >> 4) & 15]))
+        Skink_mem_write_byte(buf, int64(j + 1), int(digits[b & 15]))
+        j = j + 2
+    }
+}
+
+// setVersion stamps the version nibble into the top of octet 6.
+fn setVersion(hi: int64, v: int) -> int64 {
+    return (hi & ~(int64(0xF) << 12)) | (int64(v) << 12)
+}
+
+// setRFCVariant stamps the RFC 9562 variant bits (10b) into octet 8.
+fn setRFCVariant(lo: int64) -> int64 {
+    return (lo & ~(int64(0xC0) << 56)) | (int64(0x80) << 56)
+}
+
+// randBytes fills buf[0..n) with cryptographically secure randomness,
+// panicking if OpenSSL's entropy source fails (it cannot be recovered).
+fn randBytes(buf: string, n: int) {
+    if RAND_bytes(buf, n) != 1 {
+        panic("uuid: RAND_bytes failed")
+    }
+}
+
+// randU16 returns 16 random bits as an int.
+fn randU16() -> int {
+    b := libc.malloc(2)
+    randBytes(b, 2)
+    v := ((Skink_mem_byte(b, int64(0)) & 0xFF) << 8) | (Skink_mem_byte(b, int64(1)) & 0xFF)
+    libc.free(b)
+    return v
+}
+
+// unixNow returns the CLOCK_REALTIME seconds and nanoseconds.
+fn unixNow() -> (int64, int64) {
+    ts := uuidTimespec{tv_sec: int64(0), tv_nsec: int64(0)}
+    clock_gettime(0, &ts)
+    return ts.tv_sec, ts.tv_nsec
+}
+
+// gregorianTick returns the current time as 100-nanosecond intervals
+// since the Gregorian epoch (1582-10-15), as used by v1/v2/v6.
+fn gregorianTick() -> int64 {
+    sec, nsec := unixNow()
+    return (sec + gregorianOffsetTicks / int64(10000000)) * int64(10000000) + nsec / int64(100)
+}
+
+// unixMilli returns the current Unix epoch milliseconds, used by v7.
+fn unixMilli() -> int64 {
+    sec, nsec := unixNow()
+    return sec * int64(1000) + nsec / int64(1000000)
+}
+
+// makeTimeUUID builds a v1, v2, or v6 UUID. The clock sequence is
+// randomly seeded on first use and incremented when the timestamp does
+// not advance, so UUIDs cannot repeat after clock regressions.
+// isV2 selects the DCE layout: localID replaces time_low (octets 0-3)
+// and domain replaces clock_seq_low (octet 9).
+fn makeTimeUUID(version: int, domain: int, localID: int64, isV2: bool) -> UUID {
+    tick := gregorianTick()
+
+    stateMu.Lock()
+    if clockSeq < 0 {
+        clockSeq = randU16() & 0x3FFF
+    }
+    if tick <= lastTick {
+        clockSeq = (clockSeq + 1) & 0x3FFF
+    }
+    lastTick = tick
+    seq := clockSeq
+    stateMu.Unlock()
+
+    ensureNode()
+
+    var hi int64
+    if version == 6 {
+        // v6: the full 60-bit timestamp, most significant bits first.
+        hi = ((tick >> 12) << 16) | (int64(6) << 12) | (tick & int64(0xFFF))
+    } else {
+        // v1/v2: time_low | time_mid | time_hi_and_version.
+        hi = ((tick & int64(0xFFFFFFFF)) << 32) |
+            (((tick >> 32) & int64(0xFFFF)) << 16) |
+            (int64(version) << 12) |
+            ((tick >> 48) & int64(0xFFF))
+    }
+    if isV2 {
+        // The local identifier replaces the entire time_low field.
+        hi = ((localID & int64(0xFFFFFFFF)) << 32) | (hi & int64(0xFFFFFFFF))
+    }
+
+    b8 := 0x80 | ((seq >> 8) & 0x3F)
+    b9 := seq & 0xFF
+    if isV2 {
+        // The local domain replaces clock_seq_low.
+        b9 = domain & 0xFF
+    }
+    var lo int64 = (int64(b8) << 56) | (int64(b9) << 48)
+    for i := 0; i < 6; i = i + 1 {
+        lo = lo | ((int64(Skink_mem_byte(nodeBytes, int64(i))) & int64(0xFF)) << ((5 - i) * 8))
+    }
+    return UUID{hi: hi, lo: lo}
+}
+
+// ensureNode resolves and caches the 6-byte node identifier once.
+fn ensureNode() {
+    stateMu.Lock()
+    if !nodeReady {
+        nb := libc.malloc(6)
+        if !findNodeID(nb) {
+            // No usable MAC — per RFC 9562 a random node id must have
+            // the IEEE 802 multicast bit set so it cannot collide with
+            // a real burned-in address.
+            randBytes(nb, 6)
+            Skink_mem_write_byte(nb, int64(0), Skink_mem_byte(nb, int64(0)) | 1)
+        }
+        nodeBytes = nb
+        nodeReady = true
+    }
+    stateMu.Unlock()
+}
+
+// findNodeID fills out[0..6) with a real interface MAC address read
+// from Linux sysfs, returning false when none is available (non-Linux
+// systems, containers without sysfs, or only the loopback interface).
+fn findNodeID(out: string) -> bool {
+    entries, err := fs.ReadDir("/sys/class/net")
+    if err.message != "" {
+        return false
+    }
+    for i := 0; i < len(entries); i = i + 1 {
+        name := entries[i].Name
+        if name == "lo" {
+            continue
+        }
+        content, rerr := fs.ReadAll("/sys/class/net/" + name + "/address")
+        if rerr.message != "" {
+            continue
+        }
+        if !parseMAC(content, out) {
+            continue
+        }
+        allZero := true
+        for j := 0; j < 6; j = j + 1 {
+            if Skink_mem_byte(out, int64(j)) != 0 {
+                allZero = false
+            }
+        }
+        if !allZero {
+            return true
+        }
+    }
+    return false
+}
+
+// parseMAC parses "xx:xx:xx:xx:xx:xx" (with optional trailing newline)
+// into out[0..6).
+fn parseMAC(s: string, out: string) -> bool {
+    if str.Len(s) < 17 {
+        return false
+    }
+    i := 0
+    for bi := 0; bi < 6; bi = bi + 1 {
+        hi := hexVal(s[i])
+        lo := hexVal(s[i + 1])
+        if hi < 0 || lo < 0 {
+            return false
+        }
+        Skink_mem_write_byte(out, int64(bi), hi * 16 + lo)
+        i = i + 2
+        if bi < 5 {
+            if s[i] != 58 { // ':'
+                return false
+            }
+            i = i + 1
+        }
+    }
+    return true
+}
+
+// nameHash implements the RFC 9562 name-based generation shared by v3
+// (MD5) and v5 (SHA-1): digest = H(ns_octets || name), first 16 octets,
+// with version and variant bits applied. MD5 digests occupy the first
+// 16 bytes of the 20-byte scratch buffer either way.
+fn nameHash(ns: UUID, name: string, version: int) -> UUID {
+    nameLen := str.Len(name)
+    total := 16 + nameLen
+    buf := libc.malloc(total)
+    nb := ns.Bytes()
+    libc.memcpy(buf, nb, int64(16))
+    libc.free(nb)
+    if nameLen > 0 {
+        libc.memcpy(string(int64(buf) + int64(16)), name, int64(nameLen))
+    }
+    digest := libc.malloc(20)
+    if version == 3 {
+        MD5(buf, int64(total), digest)
+    } else {
+        SHA1(buf, int64(total), digest)
+    }
+    libc.free(buf)
+    u := uuidFromBuf(digest)
+    libc.free(digest)
+    u.hi = setVersion(u.hi, version)
+    u.lo = setRFCVariant(u.lo)
+    return u
+}

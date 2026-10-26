@@ -170,3 +170,36 @@ fn createUserHandler(req: types.Request, w: *types.ResponseWriter) {
     if req.Method() == "" {}
     w.Write("created")
 }
+
+// wbNegPanic writes a negative length into a ResponseWriter — must panic
+// (comp_error.md #153: a negative n defeats the growth check and makes
+// memcpy copy a huge size_t — heap overflow).
+fn wbNegPanic() {
+    w := types.NewResponseWriter()
+    w.WriteBytes("abc", -1)
+}
+
+// TestWriteBytesNegativePanics guards the negative-length guard.
+pub fn TestWriteBytesNegativePanics() {
+    msg := ""
+    defer fn() {
+        m := recover()
+        if str.Len(m) == 0 {
+            Errorf("WriteBytes(-1) must panic")
+        }
+    }()
+    wbNegPanic()
+}
+
+// TestURLDecodeNulRejected guards #153: %00 must not decode into a NUL
+// byte (the resulting string would be truncated by strlen everywhere,
+// turning /a%00b into /a — path confusion).
+pub fn TestURLDecodeNulRejected() {
+    d := types.URLDecode("/a%00b", false)
+    if str.Contains(d, "\x00") {
+        Errorf("URLDecode must not produce NUL bytes")
+    }
+    if str.Len(d) != 6 {
+        Errorf("URLDecode of /a%%00b should pass through unchanged")
+    }
+}

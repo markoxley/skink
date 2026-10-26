@@ -25,6 +25,8 @@
 module encrypt
 
 import "std/libc"
+
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
 import "std/errors"
 import "std/str"
 
@@ -279,7 +281,7 @@ pub struct AESCipher {
         libc.free(finalLen)
 
         // Null-terminate for safe string comparison
-        outBuf[ctDataLen] = 0
+        Skink_mem_write_byte(outBuf, int64(ctDataLen), 0)
 
         return CipherResult{data: outBuf, length: ctDataLen}, errors.New("")
     }
@@ -315,7 +317,7 @@ pub struct RSACipher {
             return CipherResult{}, errors.New("RSA encrypt failed")
         }
         // Null-terminate for safe string comparison
-        outBuf[n] = 0
+        Skink_mem_write_byte(outBuf, int64(n), 0)
         return CipherResult{data: outBuf, length: n}, errors.New("")
     }
 
@@ -344,7 +346,7 @@ pub struct RSACipher {
             return CipherResult{}, errors.New("RSA decrypt failed")
         }
         // Null-terminate for safe string comparison
-        outBuf[n] = 0
+        Skink_mem_write_byte(outBuf, int64(n), 0)
         return CipherResult{data: outBuf, length: n}, errors.New("")
     }
 }

@@ -25,6 +25,9 @@ module base64
 
 import "std/str"
 import "std/libc"
+
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
+extern fn Skink_mem_byte(ptr: string, idx: int64) -> int
 import "std/errors"
 
 // Encode encodes the first length bytes of data as a Base64 string.
@@ -39,14 +42,16 @@ pub fn Encode(data: string, length: int) -> string {
     i := 0
     // Process 3 bytes at a time, producing 4 Base64 characters
     for i < length {
-        b1 := int(data[i])
+        // Raw reads: data may be arbitrary binary (non-NUL-terminated),
+        // so a strlen-based bound is meaningless here.
+        b1 := Skink_mem_byte(data, int64(i))
         b2 := 0
         b3 := 0
         if i + 1 < length {
-            b2 = int(data[i + 1])
+            b2 = Skink_mem_byte(data, int64(i + 1))
         }
         if i + 2 < length {
-            b3 = int(data[i + 2])
+            b3 = Skink_mem_byte(data, int64(i + 2))
         }
 
         // Split 24 bits into four 6-bit indices
@@ -108,20 +113,20 @@ pub fn Decode(s: string) -> (string, errors.Error) {
         }
 
         // Reassemble 3 bytes from four 6-bit values
-        result[idx] = (b1 << 2) | (b2 >> 4)
+        Skink_mem_write_byte(result, int64(idx), (b1 << 2) | (b2 >> 4))
         idx = idx + 1
         // Skip padding bytes
         if s[i + 2] != 61 {
-            result[idx] = ((b2 & 15) << 4) | (b3 >> 2)
+            Skink_mem_write_byte(result, int64(idx), ((b2 & 15) << 4) | (b3 >> 2))
             idx = idx + 1
         }
         if s[i + 3] != 61 {
-            result[idx] = ((b3 & 3) << 6) | b4
+            Skink_mem_write_byte(result, int64(idx), ((b3 & 3) << 6) | b4)
             idx = idx + 1
         }
     }
     // Null-terminate the output buffer
-    result[idx] = 0
+    Skink_mem_write_byte(result, int64(idx), 0)
     return result, errors.New("")
 }
 

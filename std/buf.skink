@@ -25,6 +25,8 @@ module buf
 
 import "std/libc"
 
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
+
 // Buffer is a dynamically-growable byte buffer backed by a C heap allocation.
 // Use NewBuffer to create one, WriteString / WriteByte / WriteInt to append
 // data, String to extract the result, and Free to release memory.
@@ -47,7 +49,10 @@ pub struct Buffer {
     pub fn WriteByte(self: *Buffer, c: int) {
         self.ensureCap(1)
         dest := string(int64(self.data) + int64(self.len))
-        dest[0] = c
+        // Raw write: dest is an interior pointer whose strlen is 0 here
+        // (the buffer is NUL-terminated at self.len) — a bounds check
+        // would reject the first data byte.
+        Skink_mem_write_byte(dest, int64(0), c)
         self.len = self.len + 1
     }
 
@@ -88,7 +93,7 @@ pub struct Buffer {
     pub fn String(self: Buffer) -> string {
         result := libc.malloc(self.len + 1)
         libc.memcpy(result, self.data, self.len)
-        result[self.len] = 0
+        Skink_mem_write_byte(result, int64(self.len), 0)
         return result
     }
 

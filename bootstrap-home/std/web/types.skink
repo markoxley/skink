@@ -27,6 +27,9 @@ module types
 import "std/errors"
 import "std/json"
 import "std/libc"
+
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
+import "std/net"
 import "std/str"
 
 extern fn Skink_mem_alloc(size: int64) -> string
@@ -47,6 +50,10 @@ pub struct Request {
     body:    string  // the body
     bodyBuf: string  // the body buffer
     bodyLen: int  // the body length
+    peer:    string  // the real socket peer "ip:port" (server-populated,
+                      // never from request headers — comp_error.md #146)
+    dupCL:   bool  // two Content-Length headers with differing values were
+                    // seen (request-smuggling guard — comp_error.md #155)
 
     // Method returns the HTTP method (GET, POST, etc.) of the request.
     pub fn Method(self: Request) -> string {
@@ -80,6 +87,28 @@ pub struct Request {
             v = self.headers[str.ToLower(key)]
         }
         return v
+    }
+
+    // PeerAddr returns the socket peer "ip:port" populated by the
+    // server, or "" for fabricated requests. This is the only
+    // client-address value an application can trust — headers like
+    // X-Forwarded-For are client-controllable (comp_error.md #146).
+    pub fn PeerAddr(self: Request) -> string {
+        return self.peer
+    }
+
+    // SetPeer records the socket peer on the request — called by the
+    // HTTP server (and by tests) after reading the peer from the
+    // connection, never from request data.
+    pub fn SetPeer(self: *Request, peer: string) {
+        self.peer = peer
+    }
+
+    // DupCL reports whether the request carried more than one
+    // Content-Length header (rejected by the server as ambiguous —
+    // comp_error.md #155).
+    pub fn DupCL(self: Request) -> bool {
+        return self.dupCL
     }
 
     // Body returns the request body as a NUL-terminated string. For
@@ -161,7 +190,10 @@ pub fn URLDecode(s: string, plusAsSpace: bool) -> string {
         return s
     }
     n := str.Len(s)
-    out := libc.malloc(n + 1)
+    // RC-managed so the decoded string is reclaimed when the request
+    // goes out of scope — a raw malloc leaked once per decoded path/
+    // query value per request (comp_error.md #153).
+    out := Skink_mem_alloc(int64(n + 1))
     j := 0
     i := 0
     for i < n {
@@ -170,23 +202,41 @@ pub fn URLDecode(s: string, plusAsSpace: bool) -> string {
             hi := hexDigit(s[i + 1])
             lo := hexDigit(s[i + 2])
             if hi >= 0 && lo >= 0 {
-                out[j] = hi * 16 + lo
+                // %00 decodes to a NUL byte — the resulting string would
+                // be truncated by strlen everywhere, turning
+                // /a%00b into /a (path confusion). Reject it.
+                if hi == 0 && lo == 0 {
+                    return s
+                }
+                Skink_mem_write_byte(out, int64(j), hi * 16 + lo)
                 j = j + 1
                 i = i + 3
                 continue
             }
         }
         if plusAsSpace && c == 43 { // '+'
-            out[j] = 32
+            Skink_mem_write_byte(out, int64(j), 32)
         } else {
-            out[j] = c
+            Skink_mem_write_byte(out, int64(j), c)
         }
         j = j + 1
         i = i + 1
     }
-    out[j] = 0
+    // Terminator byte (raw write — index == allocation size - 1).
+    Skink_mem_write_byte(out, int64(j), 0)
     return out
 }
+
+// HijackFunc is invoked when a handler hijacks the connection via
+// ResponseWriter.Hijack. It receives the raw client connection, the TLS
+// handle (0 for plain HTTP — used with Skink_tls_read/write), and any
+// already-buffered bytes the server read past the end of the request
+// (e.g. the first bytes of a WebSocket frame stream that arrived in the
+// same TCP segment). buffered holds exactly bufferedLen bytes and may
+// contain NULs. The callback owns conn (and ssl) from this point and
+// must eventually close them; the server writes no response and does
+// not continue the keep-alive loop.
+pub type HijackFunc = fn(net.Connection, int64, string, int)
 
 // ResponseWriter is used by handlers to build the HTTP response,
 // including status code, headers, and body. The body has two channels:
@@ -200,6 +250,8 @@ pub struct ResponseWriter {
     bodyBuf: string  // the body buffer
     bodyLen: int  // the body length
     bodyCap: int  // the body capacity
+    hijacked: bool  // whether the connection was hijacked
+    hijackFn: HijackFunc  // the hijack callback
 
     // WriteHeader sets the HTTP status code for the response.
     pub fn WriteHeader(self: *ResponseWriter, status: int) {
@@ -216,10 +268,16 @@ pub struct ResponseWriter {
     // buffer doubles as needed instead of re-copying the whole body on
     // every write (comp_error.md #52, #66).
     pub fn WriteBytes(self: *ResponseWriter, data: string, n: int) {
+        // A negative n would defeat the growth check and make memcpy
+        // copy a huge size_t — heap overflow (comp_error.md #153).
+        if n < 0 {
+            panic("ResponseWriter.WriteBytes: negative length")
+        }
         if self.bodyLen + n > self.bodyCap {
             newCap := self.bodyCap
             if newCap < 4096 { newCap = 4096 }
-            for self.bodyLen + n > newCap {
+            // 64-bit math: bodyLen + n can wrap int32 near 2 GiB.
+            for int64(self.bodyLen) + int64(n) > int64(newCap) {
                 newCap = newCap * 2
             }
             if self.bodyCap == 0 {
@@ -290,7 +348,7 @@ pub struct ResponseWriter {
         }
         tmp := libc.malloc(self.bodyLen + 1)
         libc.memcpy(tmp, self.bodyBuf, self.bodyLen)
-        tmp[self.bodyLen] = 0
+        Skink_mem_write_byte(tmp, int64(self.bodyLen), 0)
         out := str.Concat(self.body, tmp)
         libc.free(tmp)
         return out
@@ -306,6 +364,23 @@ pub struct ResponseWriter {
     // the text body).
     pub fn BodyLen(self: ResponseWriter) -> int {
         return self.bodyLen
+    }
+
+    // Hijack takes over the client connection instead of writing a
+    // response. After the handler returns, the server invokes fn with
+    // the connection, the TLS handle (0 for plain HTTP), and any
+    // already-buffered bytes, then stops serving this connection. Used
+    // for WebSocket upgrades and other protocol switches. fn must close
+    // the connection (and the TLS handle) when done.
+    pub fn Hijack(self: *ResponseWriter, callback: HijackFunc) {
+        self.hijacked = true
+        self.hijackFn = callback
+    }
+
+    // Hijacked reports whether Hijack was called on this writer —
+    // used by the server's request loop.
+    pub fn Hijacked(self: ResponseWriter) -> bool {
+        return self.hijacked
     }
 }
 

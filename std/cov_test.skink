@@ -1,0 +1,128 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/cov_test.skink
+// Purpose: Regression tests for `-cov` coverage instrumentation.
+//          Compiles a fixture program with -cov, runs it, and verifies
+//          the emitted .skinkcov file records per-statement hits:
+//          executed lines carry count > 0, untaken-branch lines carry
+//          count 0, and the covmap maps probes to file:line:col.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module cov_test
+
+import "testing"
+import "os"
+import "fs"
+import "str"
+import "strconv"
+import "errors"
+
+// covSkinkBin returns the compiler binary to invoke, honouring SKINK_BIN
+// (exported by run_tests.sh) and falling back to ./skink.
+fn covSkinkBin() -> string {
+    b := os.Getenv("SKINK_BIN")
+    if str.Len(b) > 0 {
+        return b
+    }
+    return "./skink"
+}
+
+// covFixture is a tiny program with one taken and one untaken branch.
+// 1-based lines: 4 is `x := 5`, 6 is `x = x + 1` (taken),
+// 8 is `x = x - 100` (untaken) — asserted below.
+const covFixture = "module main\n\nfn main() -> int {\n    x := 5\n    if x > 3 {\n        x = x + 1\n    } else {\n        x = x - 100\n    }\n    return x\n}\n"
+
+// covLineCount returns the hit count recorded for (fixture file, line)
+// in the parsed .skinkcov data, or -1 when the line has no probe.
+fn covLineCount(covData: string, wantLine: int) -> int {
+    lines := str.Split(covData, "\n")
+    // Map entries run from index 1 until "COUNTS"; count i pairs with
+    // entry i. Collect (line, index) then read counts.
+    var mapLines []int
+    i := 1
+    for i < len(lines) && !str.Equal(lines[i], "COUNTS") {
+        l := lines[i]
+        i = i + 1
+        if str.Len(l) == 0 {
+            continue
+        }
+        parts := str.Split(l, "\t")
+        if len(parts) < 4 {
+            continue
+        }
+        v, _ := strconv.ParseInt(parts[1])
+        mapLines = append(mapLines, v)
+    }
+    i = i + 1  // skip COUNTS
+    result := -1
+    e := 0
+    for e < len(mapLines) && i + e < len(lines) {
+        cv, ok := strconv.ParseInt(lines[i + e])
+        if ok && mapLines[e] == wantLine {
+            if cv > result {
+                result = cv
+            }
+        }
+        e = e + 1
+    }
+    return result
+}
+
+// TestCoverageHitsAndMisses compiles and runs a fixture with -cov and
+// verifies taken statements are counted and untaken ones are not.
+pub fn TestCoverageHitsAndMisses() {
+    src := "/tmp/skink_cov_fixture.skink"
+    bin := "/tmp/skink_cov_fixture"
+    cov := "/tmp/skink_cov_fixture.skinkcov"
+    fs.WriteAll(src, covFixture)
+    fs.Remove(cov)
+
+    out, rc := os.ExecWithOutput([]string{covSkinkBin(), "-cov", "-o", bin, src})
+    testing.AssertEqualInt(0, rc, str.Concat("fixture compiles with -cov: ", out))
+
+    os.Setenv("SKINK_COV_OUT", cov)
+    _, rrc := os.ExecWithOutput([]string{bin})
+    testing.AssertEqualInt(6, rrc, "fixture exits 6 (x=5 then +1)")
+
+    data, rerr := fs.ReadAll(cov)
+    testing.AssertTrue(str.Len(rerr.message) == 0, "skinkcov file exists")
+    testing.AssertTrue(str.StartsWith(data, "SKINKCOV1"), "skinkcov header")
+
+    // Line 6 (x = x + 1) executes; line 8 (x = x - 100) does not.
+    // (1-based lines per the covFixture constant above.)
+    hit := covLineCount(data, 6)
+    testing.AssertTrue(hit > 0, "taken-branch line has hits")
+    miss := covLineCount(data, 8)
+    testing.AssertTrue(miss == 0, "untaken-branch line has zero hits")
+    decl := covLineCount(data, 4)
+    testing.AssertTrue(decl > 0, "x := 5 statement counted")
+}
+
+// TestCoverageNoInstrumentWithoutFlag verifies a normal build contains
+// no coverage probes (the -cov flag is strictly opt-in).
+pub fn TestCoverageNoInstrumentWithoutFlag() {
+    src := "/tmp/skink_cov_noflag.skink"
+    fs.WriteAll(src, covFixture)
+    // -emit-ll prints IR to stdout; assert no probe symbols.
+    out, rc := os.ExecWithOutput([]string{covSkinkBin(), "-emit-ll", src})
+    testing.AssertEqualInt(0, rc, "emit-ll succeeds without -cov")
+    testing.AssertFalse(str.Contains(out, "Skink_cov_hit"), "no probes without -cov")
+    fs.Remove(src)
+}

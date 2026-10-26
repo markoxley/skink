@@ -155,13 +155,17 @@ void Skink_chan_send(void *ch_ptr, void *val) {
   }
   ChanNode *node = malloc(sizeof(ChanNode));
   if (!node) {
+    // A send must never silently vanish under memory pressure — panic
+    // loudly instead of dropping the value (comp_error.md #153).
     pthread_mutex_unlock(&ch->mu);
+    Skink_panic((char *)"out of memory");
     return;
   }
   node->data = malloc(ch->elem_size);
   if (!node->data) {
     free(node);
     pthread_mutex_unlock(&ch->mu);
+    Skink_panic((char *)"out of memory");
     return;
   }
   memcpy(node->data, val, ch->elem_size);
@@ -331,8 +335,10 @@ int Skink_chan_select(int n, void **chs, int *is_send, void **vals,
     // Non-blocking mode: return immediately if nothing ready
     if (timeout_ms == 0)
       break;
-    // Timed mode: check if timeout has elapsed
-    if (timeout_ms > 0 && elapsed >= timeout_ms * 10)
+    // Timed mode: check if timeout has elapsed. Compare in 64-bit —
+    // timeout_ms * 10 overflows int32 for timeouts above ~2.1 days,
+    // after which the loop would poll forever (comp_error.md #153).
+    if (timeout_ms > 0 && (int64_t)elapsed >= (int64_t)timeout_ms * 10)
       break;
     // Sleep briefly before retrying (100 microseconds)
     SKINK_USLEEP(100);

@@ -851,6 +851,22 @@ int Skink_rc_is_registered(const void *ptr) {
   return e != NULL ? 1 : 0;
 }
 
+// Skink_rc_registered_size returns the tracked allocation size in bytes
+// for a registered kind-0/kind-1 block, or -1 for untracked pointers.
+// reflect_rt.c bounds its erased-value string scan to this size so a
+// registered non-string (a struct or other composite boxed into a
+// generic container) can never be scanned past its own allocation into
+// unmapped memory (comp_error.md #153).
+int64_t Skink_rc_registered_size(const void *ptr) {
+  if (!ptr)
+    return -1;
+  pthread_rwlock_rdlock(&rc_lock);
+  RCEntry *e = rc_table_find((void *)ptr);
+  int64_t sz = (e != NULL && (e->kind == 0 || e->kind == 1)) ? e->size : -1;
+  pthread_rwlock_unlock(&rc_lock);
+  return sz;
+}
+
 // Skink_mem_realloc resizes a block, copying existing data and releasing the old block.
 void *Skink_mem_realloc(void *ptr, int64_t size) {
   if (size < 0 || (uint64_t)size > (uint64_t)SIZE_MAX)
@@ -870,7 +886,17 @@ void *Skink_mem_realloc(void *ptr, int64_t size) {
     return NULL;
 
   if (kind == 0) {
-    void *replacement = Skink_rc_alloc(size);
+    // Preserve the destructor on the replacement: Skink_rc_alloc alone
+    // would drop it, leaking the new block's elements (comp_error.md
+    // #153). The old block's destructor runs via the release below.
+    SkinkDtor dtor = NULL;
+    pthread_rwlock_rdlock(&rc_lock);
+    RCEntry *src = rc_table_find(ptr);
+    if (src != NULL)
+      dtor = src->dtor;
+    pthread_rwlock_unlock(&rc_lock);
+    void *replacement =
+        dtor ? Skink_rc_alloc_typed(size, dtor) : Skink_rc_alloc(size);
     if (!replacement)
       return NULL;
     int64_t copySize = oldSize < size ? oldSize : size;
@@ -1101,17 +1127,26 @@ static int rc_is_slice_hdr(void *p) {
 int64_t Skink_slice_len(void *ptr) {
   if (!ptr)
     return 0;
+  int kind = -1;
+  int64_t n = -1;
   pthread_rwlock_rdlock(&rc_lock);
   RCEntry *e = rc_table_find(ptr);
-  int64_t n = -1;
-  if (e != NULL && e->kind == 3)
-    n = e->size;                       // legacy view: registry carries len
-  else if (e != NULL && e->kind == 0 && e->dtor == Skink_slicehdr_dtor)
-    n = ((SkinkSliceHdr *)ptr)->len;   // fat-slice header
+  if (e != NULL) {
+    kind = e->kind;
+    if (kind == 3)
+      n = e->size;                       // legacy view: registry carries len
+    else if (kind == 0 && e->dtor == Skink_slicehdr_dtor)
+      n = ((SkinkSliceHdr *)ptr)->len;   // fat-slice header
+  }
   pthread_rwlock_unlock(&rc_lock);
   if (n >= 0)
     return n;
-  // Legacy raw backing array: count lives at payload-8.
+  // Legacy raw backing array: count lives at payload-8. Only reachable
+  // for registered kind-0 blocks — reading payload-8 of an untracked or
+  // kind-1 pointer would under-read 8 bytes before an allocation the
+  // caller may not own (comp_error.md #153). Untracked pointers yield 0.
+  if (kind != 0)
+    return 0;
   return *((int64_t *)((char *)ptr - 8));
 }
 
@@ -1161,6 +1196,61 @@ void *Skink_slice_base(void *h) {
 // are plain allocations without a slice header.
 int64_t Skink_arr_count(void *p) {
   return p ? *((int64_t *)((char *)p - 8)) : 0;
+}
+
+// Skink_str_len returns the byte length of a NUL-terminated string.
+//
+// Registered RC kind-0 blocks carry their allocation size at payload-8
+// (the RCHeader size field), and strings are always allocated as exactly
+// len+1 bytes (Concat/Substr/Repeat/Builder.String/snprintf-probe), so
+// the length is O(1) — this keeps per-character string indexing in hot
+// loops (lexer, parser) linear instead of re-running strlen per access.
+// Untracked pointers (string literals, C strings, raw malloc'd text)
+// fall back to strlen; NULL yields 0.
+//
+// Used by the emitter's string index bounds checks (comp_error.md #149):
+// a Skink string index that previously skipped the bounds check (reads
+// past the allocation — info leak; writes — heap corruption) now checks
+// against this length. Slice values never reach this function: they are
+// headers and use Skink_slice_len instead.
+int64_t Skink_str_len(void *p) {
+  if (!p)
+    return 0;
+  pthread_rwlock_rdlock(&rc_lock);
+  RCEntry *e = rc_table_find(p);
+  int64_t size = (e != NULL && e->kind == 0) ? e->size : -1;
+  pthread_rwlock_unlock(&rc_lock);
+  if (size >= 0) {
+    if (size > 0)
+      return size - 1;
+    return 0;
+  }
+  return (int64_t)strlen((const char *)p);
+}
+
+// Skink_mem_write_byte stores one byte at ptr+idx WITHOUT the string
+// bounds check. Internal stdlib API for building byte buffers that are
+// not yet NUL-terminated: the caller guarantees ptr has at least idx+1
+// allocated bytes (e.g. a freshly Skink_mem_alloc'd buffer whose
+// terminator byte is written at index size-1, which the semantic string
+// length — size-1 — would reject; comp_error.md #149). Never use on
+// untrusted/arbitrary pointers.
+void Skink_mem_write_byte(void *ptr, int64_t idx, int val) {
+  if (!ptr || idx < 0)
+    return;
+  ((char *)ptr)[idx] = (char)val;
+}
+
+// Skink_mem_byte reads one byte at ptr+idx WITHOUT the string bounds
+// check — counterpart of Skink_mem_write_byte for buffers that are not
+// yet NUL-terminated (a strlen-based length on an uninitialized raw
+// buffer is garbage, so indexed reads on them cannot be bounds-checked
+// meaningfully; comp_error.md #149). Caller guarantees idx < allocated
+// size.
+int Skink_mem_byte(void *ptr, int64_t idx) {
+  if (!ptr || idx < 0)
+    return 0;
+  return (int)((unsigned char *)ptr)[idx];
 }
 
 // Skink_rc_capacity returns the byte capacity recorded in the RC table for

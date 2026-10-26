@@ -1,0 +1,3058 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/parser.skink
+// Purpose: Pratt-parser-based parser that converts tokens into AST nodes
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module parser
+
+import "std/str"
+import "std/buf"
+import "std/lexer"
+import "std/ast"
+
+// === Precedence Levels ===
+
+// Precedence constants used by the Pratt parser for expression parsing.
+// Higher values bind tighter; PREC_LOWEST is the starting point for
+// left-to-right precedence climbing.
+const {
+    PREC_LOWEST = 0
+    PREC_ASSIGN = 1
+    PREC_RANGE = 2
+    PREC_OR = 3
+    PREC_AND = 4
+    PREC_BITOR = 5
+    PREC_BITXOR = 6
+    PREC_BITAND = 7
+    PREC_EQUALS = 8
+    PREC_LESSGREATER = 9
+    PREC_SHIFT = 10
+    PREC_SUM = 11
+    PREC_PRODUCT = 12
+    PREC_POWER = 13
+    PREC_PREFIX = 14
+    PREC_POSTFIX = 15
+    PREC_CALL = 16
+    PREC_INDEX = 17
+}
+
+// === Parser ===
+
+// Parser holds the token stream, current position, and accumulated errors
+// for a single parse session. noStructInit is a flag that suppresses struct
+// literal parsing in contexts where '{' should start a block (if/for/while
+// conditions, rule conditions, match subjects).
+pub struct Parser {
+    tokens:       []lexer.Token // the tokens
+    pos:          int           // the position
+    curTok:       lexer.Token   // the current token
+    peekTok:      lexer.Token   // the peek token
+    errors:       []string      // the errors
+    noStructInit: bool          // the no struct initial
+    exprDepth:    int           // the expression depth
+    stmtDepth:    int           // the statement depth
+}
+
+// New creates a parser from a slice of tokens.
+pub fn New(tokens: []lexer.Token) -> Parser {
+    p := Parser{tokens: tokens, pos: 0}
+    if len(tokens) > 0 {
+        p.curTok = tokens[0]
+    }
+    if len(tokens) > 1 {
+        p.peekTok = tokens[1]
+    }
+    // Skip leading trivia
+    for isTrivia(p.curTok.kind) {
+        if len(p.tokens) > p.pos + 1 {
+            advance(&p)
+        } else {
+            break
+        }
+    }
+    return p
+}
+
+// isTrivia reports whether a token kind is trivia (newline, comment, or doc)
+// that should be skipped by the parser during advancement.
+fn isTrivia(kind: int) -> bool {
+    return kind == lexer.T_NEWLINE || kind == lexer.T_COMMENT || kind == lexer.T_DOC
+}
+
+// ParserState holds the mutable state of a parser for save/restore.
+pub struct ParserState {
+    pos:      int         // the position
+    curTok:   lexer.Token // the current token
+    peekTok:  lexer.Token // the peek token
+    errCount: int         // the error count
+}
+
+// saveState captures the current parser state for backtracking.
+fn saveState(p: *Parser) -> ParserState {
+    s := ParserState{}
+    s.pos = p.pos
+    s.curTok = p.curTok
+    s.peekTok = p.peekTok
+    s.errCount = len(p.errors)
+    return s
+}
+
+// restoreState restores a previously saved parser state.
+fn restoreState(p: *Parser, s: ParserState) {
+    p.pos = s.pos
+    p.curTok = s.curTok
+    p.peekTok = s.peekTok
+    // Truncate errors to saved count by rebuilding the slice
+    if len(p.errors) > s.errCount {
+        var trimmed []string
+        for i := 0; i < s.errCount; i = i + 1 {
+            trimmed = append(trimmed, p.errors[i])
+        }
+        p.errors = trimmed
+    }
+}
+
+// peek2 returns the token after peekTok, skipping trivia.
+fn peek2(p: *Parser) -> lexer.Token {
+    idx := p.pos + 2
+    for idx < len(p.tokens) {
+        k := p.tokens[idx].kind
+        if !isTrivia(k) {
+            return p.tokens[idx]
+        }
+        idx = idx + 1
+    }
+    return lexer.Token{kind: lexer.T_EOF}
+}
+
+// === Token Helpers ===
+
+// cur returns the current token without consuming it.
+fn cur(p: *Parser) -> lexer.Token {
+    return p.curTok
+}
+
+// peek returns the lookahead (peek) token without consuming it.
+fn peek(p: *Parser) -> lexer.Token {
+    return p.peekTok
+}
+
+// curIs reports whether the current token matches the given kind.
+fn curIs(p: *Parser, kind: int) -> bool {
+    return p.curTok.kind == kind
+}
+
+// peekIs reports whether the peek token matches the given kind.
+fn peekIs(p: *Parser, kind: int) -> bool {
+    return p.peekTok.kind == kind
+}
+
+// advance moves to the next token, skipping NEWLINE/COMMENT/DOC trivia.
+fn advance(p: *Parser) {
+    for {
+        p.curTok = p.peekTok
+        p.pos = p.pos + 1
+        if p.pos + 1 < len(p.tokens) {
+            p.peekTok = p.tokens[p.pos+1]
+        } else {
+            p.peekTok = lexer.Token{kind: lexer.T_EOF, literal: "", line: 0, col: 0}
+        }
+        if !isTrivia(p.curTok.kind) {
+            return
+        }
+    }
+}
+
+// expect advances if the current token matches, otherwise records an error.
+fn expect(p: *Parser, kind: int, what: string) {
+    if p.curTok.kind == kind {
+        advance(p)
+        return
+    }
+    errorAt(p, p.curTok, str.Concat("expected ", what))
+}
+
+// maxParseErrors bounds the diagnostic flood on pathological input —
+// beyond it, extra errors are dropped since the file is rejected anyway.
+const maxParseErrors = 40
+
+// errorAt records an error at a token's position.
+fn errorAt(p: *Parser, tok: lexer.Token, msg: string) {
+    if len(p.errors) >= maxParseErrors {
+        return
+    }
+    b := buf.NewBuffer()
+    b.WriteInt(tok.line)
+    b.WriteString(":")
+    b.WriteInt(tok.col)
+    b.WriteString(": ")
+    b.WriteString(msg)
+    b.WriteString(" (got '")
+    b.WriteString(lexer.KindName(tok.kind))
+    b.WriteString("'")
+    if str.Len(tok.literal) > 0 {
+        b.WriteString(" \"")
+        b.WriteString(tok.literal)
+        b.WriteString("\"")
+    }
+    b.WriteString(")")
+    p.errors = append(p.errors, b.String())
+    b.Free()
+}
+
+// synchronize skips tokens until a known boundary is reached, to
+// prevent cascading parse errors. Boundaries: ';', '}', top-level
+// keywords (fn, struct, enum, var, const, import, module, etc.).
+fn synchronize(p: *Parser) {
+    for {
+        if p.curTok.kind == lexer.T_SEMICOLON || p.curTok.kind == lexer.T_RBRACE {
+            advance(p)
+            return
+        }
+        if p.curTok.kind == lexer.T_FN || p.curTok.kind == lexer.T_STRUCT ||
+        p.curTok.kind == lexer.T_ENUM || p.curTok.kind == lexer.T_VAR ||
+        p.curTok.kind == lexer.T_CONST || p.curTok.kind == lexer.T_IMPORT ||
+        p.curTok.kind == lexer.T_MODULE || p.curTok.kind == lexer.T_PUB ||
+        p.curTok.kind == lexer.T_TEMPLATE || p.curTok.kind == lexer.T_EOF {
+            return
+        }
+        advance(p)
+    }
+}
+
+// hasErrors returns true if the parser accumulated any errors.
+pub fn hasErrors(p: *Parser) -> bool {
+    return len(p.errors) > 0
+}
+
+// Errors returns the accumulated error messages.
+pub fn Errors(p: *Parser) -> []string {
+    return p.errors
+}
+
+// === Precedence Helpers ===
+
+// isUpperIdent reports whether the identifier starts with an uppercase letter.
+fn isUpperIdent(s: string) -> bool {
+    if str.Len(s) == 0 { return false }
+    // Check first character: A-Z (ASCII 65-90)
+    first := str.Substr(s, 0, 1)
+    upper := str.ToUpper(first)
+    return str.Equal(first, upper) && !str.Equal(first, str.ToLower(first))
+}
+
+// isTypeKeyword reports whether a token kind is a type keyword that can
+// appear as a type conversion call (e.g. int64(x), bool(x), string(x)).
+// These are treated as identifiers in expression context.
+fn isTypeKeyword(kind: int) -> bool {
+    return kind == lexer.T_INT8 || kind == lexer.T_INT16 ||
+    kind == lexer.T_INT32 || kind == lexer.T_INT64 ||
+    kind == lexer.T_UINT || kind == lexer.T_UINT8 ||
+    kind == lexer.T_UINT16 || kind == lexer.T_UINT32 ||
+    kind == lexer.T_UINT64 || kind == lexer.T_FLOAT ||
+    kind == lexer.T_BOOL || kind == lexer.T_STRING_TYPE ||
+    kind == lexer.T_BYTES_TYPE || kind == lexer.T_TENSOR ||
+    kind == lexer.T_CHAN || kind == lexer.T_VOID ||
+    kind == lexer.T_ERROR
+}
+
+// tokenPrecedence returns the precedence for an infix token.
+fn tokenPrecedence(tok: lexer.Token) -> int {
+    if tok.kind == lexer.T_DOTDOT { return PREC_RANGE }
+    if tok.kind == lexer.T_OR { return PREC_OR }
+    if tok.kind == lexer.T_AND { return PREC_AND }
+    if tok.kind == lexer.T_PIPE { return PREC_BITOR }
+    if tok.kind == lexer.T_CARET { return PREC_BITXOR }
+    if tok.kind == lexer.T_AMPERSAND { return PREC_BITAND }
+    if tok.kind == lexer.T_EQ { return PREC_EQUALS }
+    if tok.kind == lexer.T_NE { return PREC_EQUALS }
+    if tok.kind == lexer.T_LT { return PREC_LESSGREATER }
+    if tok.kind == lexer.T_GT { return PREC_LESSGREATER }
+    if tok.kind == lexer.T_LE { return PREC_LESSGREATER }
+    if tok.kind == lexer.T_GE { return PREC_LESSGREATER }
+    if tok.kind == lexer.T_SEND { return PREC_LESSGREATER }
+    if tok.kind == lexer.T_IN { return PREC_LESSGREATER }
+    if tok.kind == lexer.T_LSHIFT { return PREC_SHIFT }
+    if tok.kind == lexer.T_RSHIFT { return PREC_SHIFT }
+    if tok.kind == lexer.T_PLUS { return PREC_SUM }
+    if tok.kind == lexer.T_MINUS { return PREC_SUM }
+    if tok.kind == lexer.T_SLASH { return PREC_PRODUCT }
+    if tok.kind == lexer.T_STAR { return PREC_PRODUCT }
+    if tok.kind == lexer.T_PERCENT { return PREC_PRODUCT }
+    if tok.kind == lexer.T_AT { return PREC_PRODUCT }
+    if tok.kind == lexer.T_DBLSTAR { return PREC_POWER }
+    if tok.kind == lexer.T_LPAREN { return PREC_CALL }
+    if tok.kind == lexer.T_LBRACKET { return PREC_INDEX }
+    if tok.kind == lexer.T_DOT { return PREC_INDEX }
+    if tok.kind == lexer.T_QUESTION { return PREC_POSTFIX }
+    if tok.kind == lexer.T_BANG { return PREC_POSTFIX }
+    return PREC_LOWEST
+}
+
+// === Top-Level Parse ===
+
+// ParseFile parses all declarations in a file and returns them.
+pub fn ParseFile(p: *Parser) -> []ast.Stmt {
+    var decls []ast.Stmt
+    for !curIs(p, lexer.T_EOF) {
+        stmt := parseDeclaration(p)
+        if stmt.kind != 0 {
+            decls = append(decls, stmt)
+        }
+    }
+    return decls
+}
+
+// === Declaration Parsing ===
+
+// parseDeclaration dispatches to the appropriate declaration parser based
+// on the current token. Handles pub visibility, attributes, and all
+// top-level constructs (module, import, fn, struct, enum, const, var, etc.).
+fn parseDeclaration(p: *Parser) -> ast.Stmt {
+    attrs := parseAttributes(p)
+    isPub := false
+    if curIs(p, lexer.T_PUB) {
+        isPub = true
+        advance(p)
+    }
+
+    if curIs(p, lexer.T_MODULE) {
+        return parseModuleDecl(p)
+    }
+    if curIs(p, lexer.T_IMPORT) {
+        return parseImportDecl(p)
+    }
+    if curIs(p, lexer.T_FN) {
+        return parseFnDecl(p, isPub, attrs)
+    }
+    if curIs(p, lexer.T_EXTERN) {
+        return parseExternFnDecl(p, isPub, attrs)
+    }
+    if curIs(p, lexer.T_STRUCT) {
+        return parseStructDecl(p, isPub, attrs)
+    }
+    if curIs(p, lexer.T_ENUM) {
+        return parseEnumDecl(p, isPub, attrs)
+    }
+    if curIs(p, lexer.T_CONST) {
+        return parseConstDecl(p, isPub)
+    }
+    if curIs(p, lexer.T_VAR) {
+        return parseTopLevelVarDecl(p, isPub)
+    }
+    if curIs(p, lexer.T_TYPE) {
+        return parseTypeAliasDecl(p, isPub)
+    }
+    if curIs(p, lexer.T_TEMPLATE) {
+        return parseTemplateDecl(p, isPub)
+    }
+    if curIs(p, lexer.T_RULESET) {
+        return parseRulesetDecl(p, isPub)
+    }
+    if curIs(p, lexer.T_SERVICE) {
+        return parseServiceDecl(p, isPub)
+    }
+    // `embed` is a contextual keyword, not a lexer token — existing code
+    // that uses `embed` as an ordinary identifier stays valid.
+    if curIs(p, lexer.T_IDENT) && str.Equal(p.curTok.literal, "embed") {
+        return parseEmbedDecl(p)
+    }
+
+    errorAt(p, p.curTok, "unexpected token in declaration")
+    synchronize(p)
+    return ast.Stmt{}
+}
+
+// parseEmbedDecl parses `embed "dir"` — an embed declaration naming a
+// directory whose contents are baked into the compiled binary and served
+// through the "int:" virtual filesystem at runtime.
+fn parseEmbedDecl(p: *Parser) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p) // consume `embed`
+    path := ""
+    if curIs(p, lexer.T_STRING) {
+        path = p.curTok.literal
+        advance(p)
+    } else {
+        errorAt(p, p.curTok, "expected string path after embed")
+    }
+    d := ast.newDecl(ast.ST_EMBED)
+    d.embedPath = path
+    return ast.Stmt{kind: ast.ST_EMBED, line: line, col: col, decl: d}
+}
+
+// parseAttributes parses [name] or [name(args)] and returns attribute names.
+fn parseAttributes(p: *Parser) -> []string {
+    var attrs []string
+    for curIs(p, lexer.T_LBRACKET) {
+        advance(p)
+        if curIs(p, lexer.T_IDENT) {
+            attrs = append(attrs, p.curTok.literal)
+            advance(p)
+            if curIs(p, lexer.T_LPAREN) {
+                skipParens(p)
+            }
+        }
+        for !curIs(p, lexer.T_RBRACKET) && !curIs(p, lexer.T_EOF) {
+            advance(p)
+        }
+        if curIs(p, lexer.T_RBRACKET) {
+            advance(p)
+        }
+    }
+    return attrs
+}
+
+// parseFieldTag consumes a [name] or [name(args)] field annotation and
+// returns its inner text (e.g. "json(name=first_name)"). Unlike
+// parseAttributes, the argument text is preserved — field tags are
+// runtime metadata consumed via reflect, not compiler directives.
+// String arguments are re-quoted so "x" stays visibly a string.
+fn parseFieldTag(p: *Parser) -> string {
+    advance(p) // consume [
+    builder := str.NewBuilder(32)
+    parenDepth := 0
+    for !curIs(p, lexer.T_EOF) {
+        if curIs(p, lexer.T_RBRACKET) && parenDepth == 0 {
+            break
+        }
+        if curIs(p, lexer.T_LPAREN) {
+            parenDepth = parenDepth + 1
+        } else if curIs(p, lexer.T_RPAREN) {
+            parenDepth = parenDepth - 1
+        }
+        lit := p.curTok.literal
+        if curIs(p, lexer.T_STRING) {
+            lit = str.Concat("\"", str.Concat(lit, "\""))
+        }
+        str.Write(&builder, lit)
+        advance(p)
+    }
+    if curIs(p, lexer.T_RBRACKET) {
+        advance(p)
+    }
+    return str.String(builder)
+}
+
+// skipParens consumes tokens until a matching ) .
+fn skipParens(p: *Parser) {
+    depth := 0
+    for !curIs(p, lexer.T_EOF) {
+        if curIs(p, lexer.T_LPAREN) {
+            depth = depth + 1
+        }
+        if curIs(p, lexer.T_RPAREN) {
+            depth = depth - 1
+            if depth == 0 {
+                advance(p)
+                return
+            }
+        }
+        advance(p)
+    }
+}
+
+// parseModuleDecl parses a module declaration and returns an AST node.
+fn parseModuleDecl(p: *Parser) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p)
+    name := ""
+    if curIs(p, lexer.T_IDENT) || isTypeKeyword(p.curTok.kind) {
+        name = p.curTok.literal
+        advance(p)
+    }
+    d := ast.newDecl(ast.ST_MODULE)
+    d.moduleName = name
+    return ast.Stmt{kind: ast.ST_MODULE, line: line, col: col, decl: d}
+}
+
+// parseImportDecl parses an import declaration with optional alias.
+fn parseImportDecl(p: *Parser) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p)
+    path := ""
+    alias := ""
+    if curIs(p, lexer.T_STRING) {
+        path = p.curTok.literal
+        advance(p)
+    }
+    if curIs(p, lexer.T_AS) {
+        advance(p)
+        if curIs(p, lexer.T_IDENT) {
+            alias = p.curTok.literal
+            advance(p)
+        }
+    }
+    d := ast.newDecl(ast.ST_IMPORT)
+    d.importPath = path
+    d.importAlias = alias
+    return ast.Stmt{kind: ast.ST_IMPORT, line: line, col: col, decl: d}
+}
+
+// parseFnDecl parses a function declaration with params, returns, and body.
+fn parseFnDecl(p: *Parser, isPub: bool, attrs: []string) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p)
+
+    name := parseDottedName(p)
+    generics := parseOptionalTypeParams(p)
+    params := parseParamList(p)
+
+    var retTypes []ast.Type
+    var retNames []string
+    if curIs(p, lexer.T_ARROW) {
+        advance(p)
+        retTypes, retNames = parseReturnTypeListNamed(p)
+    }
+
+    var body []ast.Stmt
+    if curIs(p, lexer.T_LBRACE) {
+        body = parseBlock(p)
+    }
+
+    d := ast.newDecl(ast.ST_FN)
+    d.fnName = name
+    d.fnParams = params
+    d.fnRetTypes = retTypes
+    d.fnRetNames = retNames
+    d.fnBody = body
+    d.fnGenerics = generics
+    d.fnIsPub = isPub
+    d.fnAttrs = attrs
+    return ast.Stmt{kind: ast.ST_FN, line: line, col: col, decl: d}
+}
+
+// parseExternFnDecl parses an extern function declaration (no body).
+fn parseExternFnDecl(p: *Parser, isPub: bool, attrs: []string) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p)
+    expect(p, lexer.T_FN, "fn")
+    name := parseDottedName(p)
+    params := parseParamList(p)
+    var retTypes []ast.Type
+    if curIs(p, lexer.T_ARROW) {
+        advance(p)
+        retTypes = parseReturnTypeList(p)
+    }
+    d := ast.newDecl(ast.ST_EXTERN)
+    d.fnName = name
+    d.fnParams = params
+    d.fnRetTypes = retTypes
+    d.fnIsPub = isPub
+    d.fnIsExtern = true
+    d.fnAttrs = attrs
+    return ast.Stmt{kind: ast.ST_EXTERN, line: line, col: col, decl: d}
+}
+
+// parseDottedName parses a possibly-dotted identifier (pkg.fn).
+fn parseDottedName(p: *Parser) -> string {
+    name := ""
+    if curIs(p, lexer.T_IDENT) {
+        name = p.curTok.literal
+        advance(p)
+    }
+    for curIs(p, lexer.T_DOT) {
+        advance(p)
+        if curIs(p, lexer.T_IDENT) {
+            name = str.Concat(str.Concat(name, "."), p.curTok.literal)
+            advance(p)
+        }
+    }
+    return name
+}
+
+// parseOptionalTypeParams parses <T, U: Bound> if present.
+fn parseOptionalTypeParams(p: *Parser) -> []ast.TypeParam {
+    var generics []ast.TypeParam
+    if curIs(p, lexer.T_LT) {
+        advance(p)
+        for {
+            tp := ast.TypeParam{}
+            if curIs(p, lexer.T_IDENT) {
+                tp.name = p.curTok.literal
+                advance(p)
+            }
+            if curIs(p, lexer.T_COLON) {
+                advance(p)
+                bt := parseType(p)
+                tp.bound = ast.singleType(bt)
+            }
+            generics = append(generics, tp)
+            if curIs(p, lexer.T_COMMA) {
+                advance(p)
+                continue
+            }
+            break
+        }
+        if curIs(p, lexer.T_GT) {
+            advance(p)
+        }
+    }
+    return generics
+}
+
+// parseParamList parses (name: Type, name: Type, ...).
+fn parseParamList(p: *Parser) -> []ast.Param {
+    var params []ast.Param
+    expect(p, lexer.T_LPAREN, "(")
+    for !curIs(p, lexer.T_RPAREN) && !curIs(p, lexer.T_EOF) {
+        param := ast.Param{}
+        if curIs(p, lexer.T_IDENT) {
+            param.name = p.curTok.literal
+            advance(p)
+        }
+        if curIs(p, lexer.T_COLON) {
+            advance(p)
+            pt := parseType(p)
+            param.typ = ast.singleType(pt)
+        }
+        params = append(params, param)
+        if curIs(p, lexer.T_COMMA) {
+            advance(p)
+            continue
+        }
+        break
+    }
+    expect(p, lexer.T_RPAREN, ")")
+    return params
+}
+
+// parseReturnTypeList parses one or more return types after ->.
+fn parseReturnTypeList(p: *Parser) -> []ast.Type {
+    types, _ := parseReturnTypeListNamed(p)
+    return types
+}
+
+// parseReturnTypeListNamed parses return types and optional names.
+// For named returns: (name: type, name: type) -> types + names.
+// For unnamed returns: (type, type) or type -> types + empty names.
+fn parseReturnTypeListNamed(p: *Parser) -> ([]ast.Type, []string) {
+    var types []ast.Type
+    var names []string
+    if curIs(p, lexer.T_LPAREN) {
+        advance(p)
+        for !curIs(p, lexer.T_RPAREN) && !curIs(p, lexer.T_EOF) {
+            // Check for named return: name: type
+            if curIs(p, lexer.T_IDENT) && peekIs(p, lexer.T_COLON) {
+                name := p.curTok.literal
+                advance(p) // consume name
+                advance(p) // consume ':'
+                t := parseType(p)
+                types = append(types, t)
+                names = append(names, name)
+            } else {
+                t := parseType(p)
+                types = append(types, t)
+            }
+            if curIs(p, lexer.T_COMMA) {
+                advance(p)
+                continue
+            }
+            break
+        }
+        expect(p, lexer.T_RPAREN, ")")
+        return types, names
+    }
+    t := parseType(p)
+    types = append(types, t)
+    for curIs(p, lexer.T_COMMA) {
+        advance(p)
+        nt := parseType(p)
+        types = append(types, nt)
+    }
+    return types, names
+}
+
+// parseStructDecl parses a struct declaration with fields and methods.
+fn parseStructDecl(p: *Parser, isPub: bool, attrs: []string) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p)
+    name := ""
+    if curIs(p, lexer.T_IDENT) {
+        name = p.curTok.literal
+        advance(p)
+    }
+    generics := parseOptionalTypeParams(p)
+    expect(p, lexer.T_LBRACE, "{")
+    var fields []ast.Field
+    var methods []ast.Decl
+    for !curIs(p, lexer.T_RBRACE) && !curIs(p, lexer.T_EOF) {
+        fieldPub := false
+        var fieldTags []string
+        // [attr] / [attr(args)] annotations before the field (C#-style
+        // struct tags); any number may be stacked.
+        for curIs(p, lexer.T_LBRACKET) {
+            fieldTags = append(fieldTags, parseFieldTag(p))
+        }
+        if curIs(p, lexer.T_PUB) {
+            fieldPub = true
+            advance(p)
+        }
+        if curIs(p, lexer.T_FN) {
+            // [attr] annotations were collected as field tags but the
+            // member is a method — tags are field-only for now, so
+            // report instead of silently discarding them.
+            if len(fieldTags) > 0 {
+                errorAt(p, p.curTok, "field attributes are not supported on methods")
+            }
+            m := parseFnDecl(p, fieldPub, []string{})
+            methods = append(methods, m.decl)
+            continue
+        }
+        fname := ""
+        if curIs(p, lexer.T_IDENT) {
+            fname = p.curTok.literal
+            advance(p)
+        }
+        var ftype []ast.Type
+        if curIs(p, lexer.T_COLON) {
+            advance(p)
+            ft := parseType(p)
+            ftype = ast.singleType(ft)
+        }
+        // Guard against infinite loops: if no progress was made (no name
+        // consumed and no colon to follow), skip the unrecognized token.
+        if str.Len(fname) == 0 && !curIs(p, lexer.T_COLON) {
+            advance(p)
+            continue
+        }
+        f := ast.Field{name: fname, typ: ftype, isPub: fieldPub, tags: fieldTags}
+        fields = append(fields, f)
+    }
+    expect(p, lexer.T_RBRACE, "}")
+    d := ast.newDecl(ast.ST_STRUCT)
+    d.structName = name
+    d.structFields = fields
+    d.structMethods = methods
+    d.structGenerics = generics
+    d.structIsPub = isPub
+    d.fnAttrs = attrs
+    return ast.Stmt{kind: ast.ST_STRUCT, line: line, col: col, decl: d}
+}
+
+// parseEnumDecl parses an enum declaration with variants and payloads.
+fn parseEnumDecl(p: *Parser, isPub: bool, attrs: []string) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p)
+    name := ""
+    if curIs(p, lexer.T_IDENT) {
+        name = p.curTok.literal
+        advance(p)
+    }
+    generics := parseOptionalTypeParams(p)
+    expect(p, lexer.T_LBRACE, "{")
+    var variants []ast.Variant
+    for !curIs(p, lexer.T_RBRACE) && !curIs(p, lexer.T_EOF) {
+        v := ast.Variant{}
+        if curIs(p, lexer.T_IDENT) {
+            v.name = p.curTok.literal
+            advance(p)
+        }
+        if curIs(p, lexer.T_LPAREN) {
+            advance(p)
+            for !curIs(p, lexer.T_RPAREN) && !curIs(p, lexer.T_EOF) {
+                pt := parseType(p)
+                v.payloads = append(v.payloads, pt)
+                if curIs(p, lexer.T_COMMA) {
+                    advance(p)
+                    continue
+                }
+                break
+            }
+            expect(p, lexer.T_RPAREN, ")")
+        }
+        variants = append(variants, v)
+        if curIs(p, lexer.T_COMMA) {
+            advance(p)
+        } else if !curIs(p, lexer.T_RBRACE) && !curIs(p, lexer.T_EOF) && !curIs(p, lexer.T_IDENT) {
+            // Unexpected token (e.g. `fn` after a deleted `}`) — report
+            // and bail out of the variant loop; otherwise the loop makes
+            // no progress and hangs the parser (comp_error.md #98). A
+            // bare IDENT continues: variants are newline-separated.
+            errorAt(p, p.curTok, str.Concat("unexpected token in enum body: ", p.curTok.literal))
+            break
+        }
+    }
+    expect(p, lexer.T_RBRACE, "}")
+    d := ast.newDecl(ast.ST_ENUM)
+    d.enumName = name
+    d.enumVariants = variants
+    d.enumGenerics = generics
+    d.enumIsPub = isPub
+    d.fnAttrs = attrs
+    return ast.Stmt{kind: ast.ST_ENUM, line: line, col: col, decl: d}
+}
+
+// parseConstDecl parses a const declaration (single or block form).
+fn parseConstDecl(p: *Parser, isPub: bool) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p)
+    // Support both const { ... } and const ( ... ) for const blocks.
+    if curIs(p, lexer.T_LBRACE) || curIs(p, lexer.T_LPAREN) {
+        closeTok := lexer.T_RBRACE
+        closeStr := "}"
+        if curIs(p, lexer.T_LPAREN) {
+            closeTok = lexer.T_RPAREN
+            closeStr = ")"
+        }
+        advance(p)
+        var items []ast.ConstItem
+        for !curIs(p, closeTok) && !curIs(p, lexer.T_EOF) {
+            name := ""
+            if curIs(p, lexer.T_IDENT) {
+                name = p.curTok.literal
+                advance(p)
+            }
+            expect(p, lexer.T_ASSIGN, "=")
+            val := parseExpression(p, PREC_LOWEST)
+            items = append(items, ast.ConstItem{name: name, value: ast.singleExpr(val)})
+            if curIs(p, lexer.T_COMMA) {
+                advance(p)
+            }
+        }
+        expect(p, closeTok, closeStr)
+        d := ast.newDecl(ast.ST_CONST)
+        d.constBlock = items
+        d.constIsPub = isPub
+        return ast.Stmt{kind: ast.ST_CONST, line: line, col: col, decl: d}
+    }
+    name := ""
+    if curIs(p, lexer.T_IDENT) {
+        name = p.curTok.literal
+        advance(p)
+    }
+    expect(p, lexer.T_ASSIGN, "=")
+    val := parseExpression(p, PREC_LOWEST)
+    d := ast.newDecl(ast.ST_CONST)
+    d.constName = name
+    d.constValue = ast.singleExpr(val)
+    d.constIsPub = isPub
+    return ast.Stmt{kind: ast.ST_CONST, line: line, col: col, decl: d}
+}
+
+// parseTopLevelVarDecl parses a top-level var declaration.
+fn parseTopLevelVarDecl(p: *Parser, isPub: bool) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p)
+    name := ""
+    if curIs(p, lexer.T_IDENT) {
+        name = p.curTok.literal
+        advance(p)
+    }
+    var varType []ast.Type
+    if curIs(p, lexer.T_COLON) {
+        advance(p)
+        vt := parseType(p)
+        varType = ast.singleType(vt)
+    } else if curIsTypeStart(p) {
+        vt := parseType(p)
+        varType = ast.singleType(vt)
+    }
+    var varValue []ast.Expr
+    if curIs(p, lexer.T_ASSIGN) {
+        advance(p)
+        vv := parseExpression(p, PREC_LOWEST)
+        varValue = ast.singleExpr(vv)
+    }
+    return ast.Stmt{kind: ast.ST_VARDECL, line: line, col: col, varName: name, varType: varType, varValue: varValue}
+}
+
+// parseTypeAliasDecl parses a type alias declaration (type Name = T).
+fn parseTypeAliasDecl(p: *Parser, isPub: bool) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p)
+    name := ""
+    if curIs(p, lexer.T_IDENT) {
+        name = p.curTok.literal
+        advance(p)
+    }
+    expect(p, lexer.T_ASSIGN, "=")
+    t := parseType(p)
+    d := ast.newDecl(ast.ST_TYPEALIAS)
+    d.aliasName = name
+    d.aliasType = ast.singleType(t)
+    return ast.Stmt{kind: ast.ST_TYPEALIAS, line: line, col: col, decl: d}
+}
+
+// parseTemplateDecl parses a template (duck-typed trait) declaration:
+// template Name { fn method(self: Name) -> T }
+fn parseTemplateDecl(p: *Parser, isPub: bool) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p) // consume 'template'
+    name := ""
+    if curIs(p, lexer.T_IDENT) || isTypeKeyword(p.curTok.kind) {
+        name = p.curTok.literal
+        advance(p)
+    }
+    // Optional type parameters: template Name<T, U> { ... }
+    var generics []ast.TypeParam
+    if curIs(p, lexer.T_LT) {
+        generics = parseOptionalTypeParams(p)
+    }
+    expect(p, lexer.T_LBRACE, "{")
+    var methods []ast.Decl
+    for !curIs(p, lexer.T_RBRACE) && !curIs(p, lexer.T_EOF) {
+        if curIs(p, lexer.T_FN) {
+            fnStmt := parseFnDecl(p, false, []string{})
+            if fnStmt.kind == ast.ST_FN {
+                methods = append(methods, fnStmt.decl)
+            }
+        } else {
+            // Skip non-fn tokens inside template body
+            advance(p)
+        }
+    }
+    expect(p, lexer.T_RBRACE, "}")
+    d := ast.newDecl(ast.ST_TEMPLATE)
+    d.templateName = name
+    d.templateMethods = methods
+    d.templateIsPub = isPub
+    d.templateGenerics = generics
+    return ast.Stmt{kind: ast.ST_TEMPLATE, line: line, col: col, decl: d}
+}
+
+// parseRulesetDecl parses a ruleset declaration:
+// ruleset Name { rule name when cond { action: { ... } priority: N } }
+fn parseRulesetDecl(p: *Parser, isPub: bool) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p) // consume 'ruleset'
+    name := ""
+    if curIs(p, lexer.T_IDENT) {
+        name = p.curTok.literal
+        advance(p)
+    }
+    expect(p, lexer.T_LBRACE, "{")
+    var rules []ast.RuleDecl
+    for !curIs(p, lexer.T_RBRACE) && !curIs(p, lexer.T_EOF) {
+        if curIs(p, lexer.T_RULE) {
+            rules = append(rules, parseRuleDecl(p))
+        } else {
+            advance(p) // skip non-rule tokens
+        }
+    }
+    expect(p, lexer.T_RBRACE, "}")
+    d := ast.newDecl(ast.ST_RULESET)
+    d.rulesetName = name
+    d.rulesetRules = rules
+    d.rulesetIsPub = isPub
+    return ast.Stmt{kind: ast.ST_RULESET, line: line, col: col, decl: d}
+}
+
+// parseRuleDecl parses a single rule: rule name when condition { action: ... priority: N }
+fn parseRuleDecl(p: *Parser) -> ast.RuleDecl {
+    advance(p) // consume 'rule'
+    name := ""
+    if curIs(p, lexer.T_IDENT) {
+        name = p.curTok.literal
+        advance(p)
+    }
+    // Expect 'when'
+    if curIs(p, lexer.T_WHEN) {
+        advance(p)
+    }
+    p.noStructInit = true
+    cond := parseExpression(p, PREC_LOWEST)
+    p.noStructInit = false
+    expect(p, lexer.T_LBRACE, "{")
+    rd := ast.RuleDecl{name: name, condition: ast.singleExpr(cond)}
+    for !curIs(p, lexer.T_RBRACE) && !curIs(p, lexer.T_EOF) {
+        // Handle priority: N
+        if (curIs(p, lexer.T_PRIORITY) || (curIs(p, lexer.T_IDENT) && str.Equal(p.curTok.literal, "priority"))) && peekIs(p, lexer.T_COLON) {
+            advance(p) // consume 'priority'
+            advance(p) // consume ':'
+            if curIs(p, lexer.T_INT) {
+                rd.rulePriority = parseIntLiteralValue(p)
+                advance(p)
+            }
+            continue
+        }
+        // Handle action: { ... } or action: fn() { ... }
+        if (curIs(p, lexer.T_ACTION) || (curIs(p, lexer.T_IDENT) && str.Equal(p.curTok.literal, "action"))) && peekIs(p, lexer.T_COLON) {
+            advance(p) // consume 'action'
+            advance(p) // consume ':'
+            if curIs(p, lexer.T_LBRACE) {
+                rd.ruleAction = parseBlock(p)
+            } else if curIs(p, lexer.T_FN) {
+                expr := parseExpression(p, PREC_LOWEST)
+                rd.ruleAction = append(rd.ruleAction, ast.Stmt{kind: ast.ST_EXPR, expr: ast.singleExpr(expr)})
+            }
+            continue
+        }
+        advance(p) // skip unknown tokens
+    }
+    expect(p, lexer.T_RBRACE, "}")
+    return rd
+}
+
+// parseServiceDecl parses a service interface or implementation:
+// service Name { fn ... }  or  service Name for Type { fn ... }
+fn parseServiceDecl(p: *Parser, isPub: bool) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p) // consume 'service'
+    name := ""
+    if curIs(p, lexer.T_IDENT) {
+        name = p.curTok.literal
+        advance(p)
+    }
+    forType := ""
+    if curIs(p, lexer.T_FOR) {
+        advance(p) // consume 'for'
+        if curIs(p, lexer.T_IDENT) {
+            forType = p.curTok.literal
+            advance(p)
+        }
+    }
+    expect(p, lexer.T_LBRACE, "{")
+    var methods []ast.Decl
+    for !curIs(p, lexer.T_RBRACE) && !curIs(p, lexer.T_EOF) {
+        if curIs(p, lexer.T_PUB) {
+            advance(p) // consume 'pub'
+        }
+        if curIs(p, lexer.T_FN) {
+            fnStmt := parseFnDecl(p, false, []string{})
+            if fnStmt.kind == ast.ST_FN {
+                methods = append(methods, fnStmt.decl)
+            }
+        } else {
+            advance(p) // skip non-fn tokens
+        }
+    }
+    expect(p, lexer.T_RBRACE, "}")
+    d := ast.newDecl(ast.ST_SERVICE)
+    d.serviceName = name
+    d.serviceForType = forType
+    d.serviceMethods = methods
+    d.serviceIsPub = isPub
+    return ast.Stmt{kind: ast.ST_SERVICE, line: line, col: col, decl: d}
+}
+
+// === Statement Parsing ===
+
+// maxStmtDepth bounds block-nesting recursion. Nested blocks (if/for/while/
+// match bodies) recurse through parseBlock→parseStatement→parseBlock, so a
+// single counter here prevents the C-stack overflow on ~400-deep nesting
+// that expression nesting already guards via maxExprDepth (comp_error.md
+// #91; statement-level variant reported by compiler_fuzz_test).
+const maxStmtDepth = 256
+
+// parseBlock parses a brace-delimited block of statements.
+fn parseBlock(p: *Parser) -> []ast.Stmt {
+    var stmts []ast.Stmt
+    expect(p, lexer.T_LBRACE, "{")
+    if p.stmtDepth >= maxStmtDepth {
+        if p.stmtDepth == maxStmtDepth {
+            errorAt(p, p.curTok, "block nesting too deep (max 256)")
+        }
+        // Skip to this block's matching } so the caller's expect() succeeds
+        // instead of cascading one error per remaining token.
+        depth := 1
+        for !curIs(p, lexer.T_EOF) && depth > 0 {
+            if curIs(p, lexer.T_LBRACE) {
+                depth = depth + 1
+            }
+            if curIs(p, lexer.T_RBRACE) {
+                depth = depth - 1
+                if depth == 0 {
+                    // Consume the matching } so the caller resumes after
+                    // this block, matching the normal path's expect().
+                    advance(p)
+                    break
+                }
+            }
+            advance(p)
+        }
+        return stmts
+    }
+    p.stmtDepth = p.stmtDepth + 1
+    for !curIs(p, lexer.T_RBRACE) && !curIs(p, lexer.T_EOF) {
+        s := parseStatement(p)
+        if s.kind != 0 {
+            stmts = append(stmts, s)
+        }
+    }
+    p.stmtDepth = p.stmtDepth - 1
+    expect(p, lexer.T_RBRACE, "}")
+    return stmts
+}
+
+// parseStatement dispatches to the appropriate statement parser.
+fn parseStatement(p: *Parser) -> ast.Stmt {
+    if curIs(p, lexer.T_VAR) {
+        return parseVarStmt(p)
+    }
+    if curIs(p, lexer.T_RETURN) {
+        return parseReturnStmt(p)
+    }
+    if curIs(p, lexer.T_BREAK) {
+        line := p.curTok.line
+        col := p.curTok.col
+        advance(p)
+        return ast.Stmt{kind: ast.ST_BREAK, line: line, col: col}
+    }
+    if curIs(p, lexer.T_CONTINUE) {
+        line := p.curTok.line
+        col := p.curTok.col
+        advance(p)
+        return ast.Stmt{kind: ast.ST_CONTINUE, line: line, col: col}
+    }
+    if curIs(p, lexer.T_IF) {
+        return parseIfStmt(p)
+    }
+    if curIs(p, lexer.T_FOR) {
+        return parseForStmt(p)
+    }
+    if curIs(p, lexer.T_WHILE) {
+        return parseWhileStmt(p)
+    }
+    if curIs(p, lexer.T_UNTIL) {
+        return parseUntilStmt(p)
+    }
+    if curIs(p, lexer.T_DEFER) {
+        return parseDeferStmt(p)
+    }
+    if curIs(p, lexer.T_MATCH) {
+        // `match` followed by an operator that cannot begin a match
+        // subject means the user picked the keyword as an identifier —
+        // say so plainly instead of cascading through arm parsing.
+        pk := peek(p).kind
+        if pk == lexer.T_COLONASS || pk == lexer.T_ASSIGN ||
+            pk == lexer.T_COMMA || pk == lexer.T_SEMICOLON ||
+            pk == lexer.T_DOT || pk == lexer.T_LBRACKET {
+            errorAt(p, p.curTok, "cannot use 'match' as an identifier")
+            // Drop the keyword so the next statement parses fresh;
+            // the operator left behind errors normally, not as a
+            // match-arm cascade.
+            advance(p)
+            return ast.Stmt{kind: 0, line: p.curTok.line, col: p.curTok.col}
+        }
+        return parseMatchStmt(p)
+    }
+    if curIs(p, lexer.T_SPAWN) {
+        return parseSpawnStmt(p)
+    }
+    if curIs(p, lexer.T_SELECT) || curIs(p, lexer.T_SWITCH) {
+        return parseSelectStmt(p)
+    }
+    if curIs(p, lexer.T_LBRACE) {
+        line := p.curTok.line
+        col := p.curTok.col
+        body := parseBlock(p)
+        return ast.Stmt{kind: ast.ST_BLOCK, line: line, col: col, thenBody: body}
+    }
+    return parseExprOrAssignStmt(p)
+}
+
+// parseVarStmt parses a var declaration statement.
+fn parseVarStmt(p: *Parser) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p)
+
+    if curIs(p, lexer.T_LBRACE) {
+        advance(p)
+        var stmts []ast.Stmt
+        for !curIs(p, lexer.T_RBRACE) && !curIs(p, lexer.T_EOF) {
+            s := parseVarStmt(p)
+            if s.kind != 0 {
+                stmts = append(stmts, s)
+            }
+            if curIs(p, lexer.T_COMMA) {
+                advance(p)
+            }
+        }
+        expect(p, lexer.T_RBRACE, "}")
+        return ast.Stmt{kind: ast.ST_BLOCK, line: line, col: col, thenBody: stmts}
+    }
+
+    name := ""
+    if curIs(p, lexer.T_IDENT) {
+        name = p.curTok.literal
+        advance(p)
+    }
+    var varType []ast.Type
+    if curIs(p, lexer.T_COLON) {
+        advance(p)
+        vt := parseType(p)
+        varType = ast.singleType(vt)
+    } else if curIsTypeStart(p) {
+        vt := parseType(p)
+        varType = ast.singleType(vt)
+    }
+    var varValue []ast.Expr
+    if curIs(p, lexer.T_ASSIGN) {
+        advance(p)
+        vv := parseExpression(p, PREC_LOWEST)
+        varValue = ast.singleExpr(vv)
+    } else if curIs(p, lexer.T_COLONASS) {
+        advance(p)
+        vv := parseExpression(p, PREC_LOWEST)
+        varValue = ast.singleExpr(vv)
+    }
+    return ast.Stmt{kind: ast.ST_VAR, line: line, col: col, varName: name, varType: varType, varValue: varValue}
+}
+
+// parseReturnStmt parses a return statement with optional values.
+fn parseReturnStmt(p: *Parser) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p)
+    var values []ast.Expr
+    // Return with no value: return is followed by }, EOF, case, default, or a newline.
+    if curIs(p, lexer.T_RBRACE) || curIs(p, lexer.T_EOF) ||
+    curIs(p, lexer.T_CASE) || curIs(p, lexer.T_DEFAULT) {
+        return ast.Stmt{kind: ast.ST_RETURN, line: line, col: col}
+    }
+    v0 := parseExpression(p, PREC_LOWEST)
+    values = append(values, v0)
+    for curIs(p, lexer.T_COMMA) {
+        advance(p)
+        vi := parseExpression(p, PREC_LOWEST)
+        values = append(values, vi)
+    }
+    return ast.Stmt{kind: ast.ST_RETURN, line: line, col: col, returnValues: values}
+}
+
+// parseIfStmt parses an if statement with optional init and else.
+fn parseIfStmt(p: *Parser) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p)
+    p.noStructInit = true
+
+    // Check for if-initializer: if x := expr; cond { }
+    // Parse the first part as a statement, then check for semicolon.
+    initStmt := parseExprOrAssignStmt(p)
+    if curIs(p, lexer.T_SEMICOLON) {
+        // This is an if-initializer.
+        advance(p)
+        cond := parseExpression(p, PREC_LOWEST)
+        p.noStructInit = false
+        thenBody := parseBlock(p)
+        var elseBody []ast.Stmt
+        if curIs(p, lexer.T_ELSE) {
+            advance(p)
+            if curIs(p, lexer.T_IF) {
+                elseStmt := parseIfStmt(p)
+                elseBody = append(elseBody, elseStmt)
+            } else {
+                elseBody = parseBlock(p)
+            }
+        }
+        return ast.Stmt{kind: ast.ST_IF, line: line, col: col, ifInit: ast.singleStmt(initStmt), cond: ast.singleExpr(cond), thenBody: thenBody, elseBody: elseBody}
+    }
+
+    // No semicolon: initStmt is the condition expression.
+    // We need to convert it back to an expression.
+    var cond ast.Expr
+    if initStmt.kind == ast.ST_EXPR && ast.hasExpr(initStmt.expr) {
+        cond = initStmt.expr[0]
+    } else if initStmt.kind == ast.ST_VAR && ast.hasExpr(initStmt.varValue) {
+        // if x := expr { } — no condition, just a var declaration.
+        // Treat the var value as the condition.
+        cond = initStmt.varValue[0]
+    }
+    p.noStructInit = false
+    thenBody := parseBlock(p)
+    var elseBody []ast.Stmt
+    if curIs(p, lexer.T_ELSE) {
+        advance(p)
+        if curIs(p, lexer.T_IF) {
+            elseStmt := parseIfStmt(p)
+            elseBody = append(elseBody, elseStmt)
+        } else {
+            elseBody = parseBlock(p)
+        }
+    }
+    return ast.Stmt{kind: ast.ST_IF, line: line, col: col, cond: ast.singleExpr(cond), thenBody: thenBody, elseBody: elseBody}
+}
+
+// parseForStmt parses for, for-in, for-range, and C-style for loops.
+fn parseForStmt(p: *Parser) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p)
+
+    if curIs(p, lexer.T_LBRACE) {
+        body := parseBlock(p)
+        return ast.Stmt{kind: ast.ST_FOR, line: line, col: col, thenBody: body}
+    }
+
+    // Disable struct init parsing for the condition/init/post parts
+    // so that '{' starts the loop body, not a struct literal.
+    p.noStructInit = true
+
+    // Check for 'for ident := range expr' pattern early,
+    // before parseExprOrAssignStmt tries to parse 'range' as an expression.
+    if curIs(p, lexer.T_IDENT) && peekIs(p, lexer.T_COLONASS) {
+        iterVar := p.curTok.literal
+        advance(p) // consume ident
+        advance(p) // consume ':='
+        if curIs(p, lexer.T_RANGE) {
+            advance(p) // consume 'range'
+            iterExpr := parseExpression(p, PREC_LOWEST)
+            p.noStructInit = false
+            body := parseBlock(p)
+            return ast.Stmt{kind: ast.ST_FOR, line: line, col: col, forIterVar: iterVar, forIterExpr: ast.singleExpr(iterExpr), thenBody: body}
+        }
+        // Not a range loop — restore parser position for C-style for parsing.
+        // We've consumed ident and ':=', so we need to reconstruct.
+        // Parse the value expression and build a var stmt manually.
+        valExpr := parseExpression(p, PREC_LOWEST)
+        varStmt := ast.Stmt{kind: ast.ST_VAR, line: line, col: col, varName: iterVar, varValue: ast.singleExpr(valExpr)}
+        // Continue with C-style for parsing using varStmt as init.
+        if curIs(p, lexer.T_SEMICOLON) {
+            advance(p)
+            var cond ast.Expr
+            if !curIs(p, lexer.T_SEMICOLON) {
+                cond = parseExpression(p, PREC_LOWEST)
+            }
+            expect(p, lexer.T_SEMICOLON, ";")
+            var post ast.Stmt
+            if !curIs(p, lexer.T_LBRACE) {
+                post = parseExprOrAssignStmt(p)
+            }
+            p.noStructInit = false
+            body := parseBlock(p)
+            return ast.Stmt{kind: ast.ST_FOR, line: line, col: col, forInit: ast.singleStmt(varStmt), cond: ast.singleExpr(cond), forPost: ast.singleStmt(post), thenBody: body}
+        }
+        // Condition-only for: var := expr { body }
+        p.noStructInit = false
+        body := parseBlock(p)
+        return ast.Stmt{kind: ast.ST_FOR, line: line, col: col, forInit: ast.singleStmt(varStmt), thenBody: body}
+    }
+
+    if curIs(p, lexer.T_IDENT) && peekIs(p, lexer.T_IN) {
+        iterVar := p.curTok.literal
+        advance(p)
+        advance(p)
+        iterExpr := parseExpression(p, PREC_LOWEST)
+        p.noStructInit = false
+        body := parseBlock(p)
+        return ast.Stmt{kind: ast.ST_FOR, line: line, col: col, forIterVar: iterVar, forIterExpr: ast.singleExpr(iterExpr), thenBody: body}
+    }
+
+    // Check for 'for i, v in expr' pattern (two-variable for-in).
+    if curIs(p, lexer.T_IDENT) && peekIs(p, lexer.T_COMMA) {
+        iterVar := p.curTok.literal
+        advance(p) // consume ident
+        advance(p) // consume ','
+        if curIs(p, lexer.T_IDENT) && peekIs(p, lexer.T_IN) {
+            iterVar2 := p.curTok.literal
+            advance(p) // consume ident
+            advance(p) // consume 'in'
+            iterExpr := parseExpression(p, PREC_LOWEST)
+            p.noStructInit = false
+            body := parseBlock(p)
+            return ast.Stmt{kind: ast.ST_FOR, line: line, col: col, forIterVar: iterVar, forIterVar2: iterVar2, forIterExpr: ast.singleExpr(iterExpr), thenBody: body}
+        }
+        // Not a two-variable for-in; restore position.
+        // This is tricky since we've consumed tokens. Fall through
+        // to the C-style for parsing (which will likely error).
+        // For now, just treat it as a parse error by continuing.
+    }
+
+    // Parse the init/cond part as a simple statement so that C-style
+    // for loops (for i := 0; i < n; i = i + 1 { ... }) and for-in loops
+    // (for x in items { ... }) are both handled. parseExprOrAssignStmt
+    // recognizes ':=' and '=' which parseExpression alone would reject.
+    initStmt := parseExprOrAssignStmt(p)
+
+    // for-in: initStmt is an identifier expression followed by 'in'.
+    if curIs(p, lexer.T_IN) {
+        advance(p)
+        iterExpr := parseExpression(p, PREC_LOWEST)
+        p.noStructInit = false
+        body := parseBlock(p)
+        iterVar := ""
+        if initStmt.kind == ast.ST_VAR {
+            iterVar = initStmt.varName
+        } else if initStmt.kind == ast.ST_EXPR {
+            if ast.hasExpr(initStmt.expr) {
+                e := initStmt.expr[0]
+                if e.kind == ast.EX_IDENT {
+                    iterVar = e.ident
+                }
+            }
+        }
+        return ast.Stmt{kind: ast.ST_FOR, line: line, col: col, forIterVar: iterVar, forIterExpr: ast.singleExpr(iterExpr), thenBody: body}
+    }
+
+    // for-range: initStmt is 'v :=' followed by 'range expr'.
+    if curIs(p, lexer.T_RANGE) {
+        advance(p)
+        iterExpr := parseExpression(p, PREC_LOWEST)
+        p.noStructInit = false
+        body := parseBlock(p)
+        iterVar := ""
+        if initStmt.kind == ast.ST_VAR {
+            iterVar = initStmt.varName
+        } else if initStmt.kind == ast.ST_EXPR {
+            if ast.hasExpr(initStmt.expr) {
+                e := initStmt.expr[0]
+                if e.kind == ast.EX_IDENT {
+                    iterVar = e.ident
+                }
+            }
+        }
+        return ast.Stmt{kind: ast.ST_FOR, line: line, col: col, forIterVar: iterVar, forIterExpr: ast.singleExpr(iterExpr), thenBody: body}
+    }
+
+    // C-style for: init ; cond ; post { body }
+    if curIs(p, lexer.T_SEMICOLON) {
+        advance(p)
+        var cond ast.Expr
+        if !curIs(p, lexer.T_SEMICOLON) {
+            cond = parseExpression(p, PREC_LOWEST)
+        }
+        expect(p, lexer.T_SEMICOLON, ";")
+        var post ast.Stmt
+        if !curIs(p, lexer.T_LBRACE) {
+            post = parseExprOrAssignStmt(p)
+        }
+        p.noStructInit = false
+        body := parseBlock(p)
+        return ast.Stmt{kind: ast.ST_FOR, line: line, col: col, forInit: ast.singleStmt(initStmt), cond: ast.singleExpr(cond), forPost: ast.singleStmt(post), thenBody: body}
+    }
+
+    // Condition-only for: cond { body }
+    // initStmt is actually the condition expression.
+    p.noStructInit = false
+    var cond ast.Expr
+    if initStmt.kind == ast.ST_EXPR {
+        if ast.hasExpr(initStmt.expr) {
+            cond = initStmt.expr[0]
+        }
+    }
+    body := parseBlock(p)
+    return ast.Stmt{kind: ast.ST_FOR, line: line, col: col, cond: ast.singleExpr(cond), thenBody: body}
+}
+
+// parseWhileStmt parses a while loop statement.
+fn parseWhileStmt(p: *Parser) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p)
+    p.noStructInit = true
+    cond := parseExpression(p, PREC_LOWEST)
+    p.noStructInit = false
+    body := parseBlock(p)
+    return ast.Stmt{kind: ast.ST_WHILE, line: line, col: col, cond: ast.singleExpr(cond), thenBody: body}
+}
+
+// parseUntilStmt parses an until loop statement.
+fn parseUntilStmt(p: *Parser) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p)
+    p.noStructInit = true
+    cond := parseExpression(p, PREC_LOWEST)
+    p.noStructInit = false
+    body := parseBlock(p)
+    return ast.Stmt{kind: ast.ST_UNTIL, line: line, col: col, cond: ast.singleExpr(cond), thenBody: body}
+}
+
+// parseDeferStmt parses a defer statement wrapping an inner statement.
+fn parseDeferStmt(p: *Parser) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p)
+    s := parseStatement(p)
+    return ast.Stmt{kind: ast.ST_DEFER, line: line, col: col, deferStmt: ast.singleStmt(s)}
+}
+
+// parseSpawnStmt parses a spawn statement: spawn expr
+fn parseSpawnStmt(p: *Parser) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p) // consume 'spawn'
+    call := parseExpression(p, PREC_LOWEST)
+    return ast.Stmt{kind: ast.ST_SPAWN, line: line, col: col, spawnCall: ast.singleExpr(call)}
+}
+
+// parseSelectStmt parses a select or switch statement:
+// select { case cond: ... default: ... }
+fn parseSelectStmt(p: *Parser) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    isSwitch := curIs(p, lexer.T_SWITCH)
+    advance(p) // consume 'select' or 'switch'
+    // Switch has a subject expression before '{'; select does not.
+    var switchCond []ast.Expr
+    if isSwitch {
+        p.noStructInit = true
+        subj := parseExpression(p, PREC_LOWEST)
+        p.noStructInit = false
+        switchCond = ast.singleExpr(subj)
+    }
+    expect(p, lexer.T_LBRACE, "{")
+    var cases []ast.SelectCase
+    for !curIs(p, lexer.T_RBRACE) && !curIs(p, lexer.T_EOF) {
+        if curIs(p, lexer.T_DEFAULT) {
+            advance(p) // consume 'default'
+            if curIs(p, lexer.T_COLON) {
+                advance(p) // consume ':'
+            }
+            var body []ast.Stmt
+            for !curIs(p, lexer.T_RBRACE) && !curIs(p, lexer.T_EOF) &&
+            !curIs(p, lexer.T_CASE) && !curIs(p, lexer.T_DEFAULT) {
+                s := parseStatement(p)
+                if s.kind != 0 {
+                    body = append(body, s)
+                }
+            }
+            cases = append(cases, ast.SelectCase{isDefault: true, body: body})
+        } else if curIs(p, lexer.T_CASE) {
+            advance(p) // consume 'case'
+            // Check for receive-binding: case val := <-ch
+            recvVar := ""
+            if curIs(p, lexer.T_IDENT) && peekIs(p, lexer.T_COLONASS) {
+                recvVar = p.curTok.literal
+                advance(p) // consume var name
+                advance(p) // consume ':='
+            }
+            cond := parseExpression(p, PREC_LOWEST)
+            if curIs(p, lexer.T_COLON) {
+                advance(p) // consume ':'
+            }
+            var body []ast.Stmt
+            for !curIs(p, lexer.T_RBRACE) && !curIs(p, lexer.T_EOF) &&
+            !curIs(p, lexer.T_CASE) && !curIs(p, lexer.T_DEFAULT) {
+                s := parseStatement(p)
+                if s.kind != 0 {
+                    body = append(body, s)
+                }
+            }
+            cases = append(cases, ast.SelectCase{cond: ast.singleExpr(cond), body: body, recvVar: recvVar})
+        } else {
+            advance(p) // skip unknown token
+        }
+    }
+    expect(p, lexer.T_RBRACE, "}")
+    stmtKind := ast.ST_SELECT
+    if isSwitch {
+        stmtKind = ast.ST_SWITCH
+    }
+    return ast.Stmt{kind: stmtKind, line: line, col: col, cond: switchCond, selectCases: cases}
+}
+
+// parseMatchStmt parses a match statement with subject and arms.
+fn parseMatchStmt(p: *Parser) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    advance(p)
+    p.noStructInit = true
+    subject := parseExpression(p, PREC_LOWEST)
+    p.noStructInit = false
+    arms := parseMatchArms(p)
+    return ast.Stmt{kind: ast.ST_MATCH, line: line, col: col, matchSubject: ast.singleExpr(subject), matchArms: arms}
+}
+
+// parseMatchArms parses the arms of a match statement or expression.
+fn parseMatchArms(p: *Parser) -> []ast.MatchArm {
+    var arms []ast.MatchArm
+    expect(p, lexer.T_LBRACE, "{")
+    for !curIs(p, lexer.T_RBRACE) && !curIs(p, lexer.T_EOF) {
+        arm := ast.MatchArm{}
+        if curIs(p, lexer.T_IDENT) && str.Equal(p.curTok.literal, "_") {
+            arm.isWildcard = true
+            advance(p)
+        } else {
+            arm.pattern = parsePattern(p)
+        }
+        if curIs(p, lexer.T_IF) {
+            advance(p)
+            g := parseExpression(p, PREC_LOWEST)
+            arm.guard = ast.singleExpr(g)
+        }
+        expect(p, lexer.T_FATARROW, "=>")
+        // Arm body can be a block { ... } or an expression.
+        if curIs(p, lexer.T_LBRACE) {
+            arm.body = parseBlock(p)
+        } else {
+            expr := parseExpression(p, PREC_LOWEST)
+            if expr.kind != 0 {
+                arm.body = append(arm.body, ast.Stmt{kind: ast.ST_EXPR, line: expr.line, col: expr.col, expr: ast.singleExpr(expr)})
+            }
+        }
+        if curIs(p, lexer.T_COMMA) {
+            advance(p)
+        }
+        arms = append(arms, arm)
+    }
+    expect(p, lexer.T_RBRACE, "}")
+    return arms
+}
+
+// isNilLit reports whether the literal string is "nil".
+fn isNilLit(lit: string) -> bool {
+    return str.Len(lit) == 3 && lit[0] == 110 && lit[1] == 105 && lit[2] == 108
+}
+
+// parsePattern parses a match arm pattern (literal, ident, or variant).
+fn parsePattern(p: *Parser) -> ast.Pattern {
+    pat := ast.Pattern{}
+    if curIs(p, lexer.T_IDENT) && isNilLit(p.curTok.literal) {
+        pat.kind = ast.PK_NIL
+        advance(p)
+        return pat
+    }
+    if curIs(p, lexer.T_INT) {
+        low := parseIntLiteralValue(p)
+        advance(p)
+        if curIs(p, lexer.T_DOTDOT) && peekIs(p, lexer.T_INT) {
+            advance(p)
+            high := parseIntLiteralValue(p)
+            advance(p)
+            pat.kind = ast.PK_RANGE
+            pat.rangeLow = low
+            pat.rangeHigh = high
+            return pat
+        }
+        pat.kind = ast.PK_INT
+        pat.intVal = low
+        return pat
+    }
+    if curIs(p, lexer.T_STRING) {
+        pat.kind = ast.PK_STRING
+        pat.strVal = p.curTok.literal
+        advance(p)
+        return pat
+    }
+    if curIs(p, lexer.T_TRUE) {
+        pat.kind = ast.PK_BOOL
+        pat.boolVal = true
+        advance(p)
+        return pat
+    }
+    if curIs(p, lexer.T_FALSE) {
+        pat.kind = ast.PK_BOOL
+        pat.boolVal = false
+        advance(p)
+        return pat
+    }
+    if curIs(p, lexer.T_NIL) {
+        pat.kind = ast.PK_NIL
+        advance(p)
+        return pat
+    }
+    if curIs(p, lexer.T_IDENT) {
+        name := p.curTok.literal
+        advance(p)
+        // Handle dotted/qualified names: module.Constant => ...
+        for curIs(p, lexer.T_DOT) {
+            advance(p)
+            if curIs(p, lexer.T_IDENT) {
+                name = str.Concat(str.Concat(name, "."), p.curTok.literal)
+                advance(p)
+            } else {
+                break
+            }
+        }
+        if curIs(p, lexer.T_LPAREN) {
+            advance(p)
+            pat.kind = ast.PK_VARIANT
+            pat.variantName = name
+            for !curIs(p, lexer.T_RPAREN) && !curIs(p, lexer.T_EOF) {
+                if curIs(p, lexer.T_IDENT) {
+                    pat.bindings = append(pat.bindings, p.curTok.literal)
+                    advance(p)
+                }
+                if curIs(p, lexer.T_COMMA) {
+                    advance(p)
+                    continue
+                }
+                break
+            }
+            expect(p, lexer.T_RPAREN, ")")
+            return pat
+        }
+        pat.kind = ast.PK_IDENT
+        pat.identName = name
+        return pat
+    }
+    errorAt(p, p.curTok, "expected pattern")
+    advance(p)
+    return pat
+}
+
+// parseIntLiteralValue converts the current token's literal to an int.
+// Supports decimal, hex (0x), binary (0b), and octal (0o) literals.
+fn parseIntLiteralValue(p: *Parser) -> int {
+    s := p.curTok.literal
+    n := str.Len(s)
+    if n == 0 {
+        return 0
+    }
+    result := 0
+    i := 0
+    neg := false
+    if s[0] == 45 { // '-'
+        neg = true
+        i = 1
+    }
+    // Check for hex (0x), binary (0b), octal (0o) prefixes
+    if i + 1 < n && s[i] == 48 { // '0'
+        prefix := s[i+1]
+        if prefix == 120 || prefix == 88 { // 'x' or 'X' — hex
+            i = i + 2
+            for i < n {
+                c := s[i]
+                if c >= 48 && c <= 57 {
+                    result = result * 16 + (c - 48)
+                } else if c >= 97 && c <= 102 { // a-f
+                    result = result * 16 + (c - 87)
+                } else if c >= 65 && c <= 70 { // A-F
+                    result = result * 16 + (c - 55)
+                } else if c == 95 { // '_' separator
+                } else {
+                    errorAt(p, p.curTok, "invalid digit in hex literal")
+                }
+                i = i + 1
+            }
+            if neg {
+                result = -result
+            }
+            return result
+        }
+        if prefix == 98 || prefix == 66 { // 'b' or 'B' — binary
+            i = i + 2
+            for i < n {
+                c := s[i]
+                if c == 48 || c == 49 {
+                    result = result * 2 + (c - 48)
+                } else if c == 95 {
+                } else {
+                    errorAt(p, p.curTok, "invalid digit in binary literal")
+                }
+                i = i + 1
+            }
+            if neg {
+                result = -result
+            }
+            return result
+        }
+        if prefix == 111 || prefix == 79 { // 'o' or 'O' — octal
+            i = i + 2
+            for i < n {
+                c := s[i]
+                if c >= 48 && c <= 55 {
+                    result = result * 8 + (c - 48)
+                } else if c == 95 {
+                } else {
+                    errorAt(p, p.curTok, "invalid digit in octal literal")
+                }
+                i = i + 1
+            }
+            if neg {
+                result = -result
+            }
+            return result
+        }
+    }
+    // Decimal
+    for i < n {
+        c := s[i]
+        if c >= 48 && c <= 57 {
+            result = result * 10 + (c - 48)
+        } else if c == 95 { // '_' separator
+        } else {
+            errorAt(p, p.curTok, "invalid digit in integer literal")
+        }
+        i = i + 1
+    }
+    if neg {
+        result = -result
+    }
+    return result
+}
+
+// parseExprOrAssignStmt parses an expression, assignment, or short var decl.
+fn parseExprOrAssignStmt(p: *Parser) -> ast.Stmt {
+    line := p.curTok.line
+    col := p.curTok.col
+    expr := parseExpression(p, PREC_LOWEST)
+
+    // Multi-value short variable declaration: a, b := expr
+    // Collect additional names if we see commas before :=
+    if curIs(p, lexer.T_COMMA) {
+        var names []string
+        if expr.kind == ast.EX_IDENT {
+            names = append(names, expr.ident)
+        }
+        for curIs(p, lexer.T_COMMA) {
+            advance(p)
+            if curIs(p, lexer.T_IDENT) {
+                names = append(names, p.curTok.literal)
+                advance(p)
+            }
+        }
+        if curIs(p, lexer.T_COLONASS) {
+            advance(p)
+            var vals []ast.Expr
+            v0 := parseExpression(p, PREC_LOWEST)
+            vals = append(vals, v0)
+            for curIs(p, lexer.T_COMMA) {
+                advance(p)
+                vi := parseExpression(p, PREC_LOWEST)
+                vals = append(vals, vi)
+            }
+            return ast.Stmt{kind: ast.ST_VAR, line: line, col: col, varNames: names, varValue: vals}
+        }
+        // Multi-value assignment: a, b = expr
+        if curIs(p, lexer.T_ASSIGN) {
+            advance(p)
+            var vals []ast.Expr
+            v0 := parseExpression(p, PREC_LOWEST)
+            vals = append(vals, v0)
+            for curIs(p, lexer.T_COMMA) {
+                advance(p)
+                vi := parseExpression(p, PREC_LOWEST)
+                vals = append(vals, vi)
+            }
+            // Build targets from names
+            var targets []ast.Expr
+            n := len(names)
+            for i := 0; i < n; i = i + 1 {
+                t := ast.newExpr(ast.EX_IDENT, line, col)
+                t.ident = names[i]
+                targets = append(targets, t)
+            }
+            return ast.Stmt{kind: ast.ST_TUPLEASSIGN, line: line, col: col, tupleTargets: targets, assignOp: "=", assignValue: vals}
+        }
+        // If neither := nor = followed the comma list, it's a parse error.
+        // Return what we have as an expression statement.
+        return ast.Stmt{kind: ast.ST_EXPR, line: line, col: col, expr: ast.singleExpr(expr)}
+    }
+
+    // Short variable declaration: x := expr
+    if curIs(p, lexer.T_COLONASS) {
+        advance(p)
+        val := parseExpression(p, PREC_LOWEST)
+        name := ""
+        if expr.kind == ast.EX_IDENT {
+            name = expr.ident
+        }
+        return ast.Stmt{kind: ast.ST_VAR, line: line, col: col, varName: name, varValue: ast.singleExpr(val)}
+    }
+
+    if curIs(p, lexer.T_ASSIGN) || curIs(p, lexer.T_PLUSEQ) || curIs(p, lexer.T_MINUSEQ) ||
+    curIs(p, lexer.T_STAREQ) || curIs(p, lexer.T_SLASHEQ) || curIs(p, lexer.T_PERCEQ) ||
+    curIs(p, lexer.T_AMPEQ) || curIs(p, lexer.T_PIPEEQ) || curIs(p, lexer.T_CARETEQ) ||
+    curIs(p, lexer.T_LSHIFTEQ) || curIs(p, lexer.T_RSHIFTEQ) {
+        op := p.curTok.literal
+        advance(p)
+        val := parseExpression(p, PREC_LOWEST)
+        return ast.Stmt{kind: ast.ST_ASSIGN, line: line, col: col, assignTarget: ast.singleExpr(expr), assignOp: op, assignValue: ast.singleExpr(val)}
+    }
+
+    return ast.Stmt{kind: ast.ST_EXPR, line: line, col: col, expr: ast.singleExpr(expr)}
+}
+
+// === Expression Parsing (Pratt parser) ===
+
+// parseExpression parses an expression using Pratt precedence climbing.
+// maxExprDepth bounds expression-parser recursion. Every nested
+// construct — parens, call args, index, unary — funnels through
+// parseExpression, so a single counter here prevents the C-stack
+// overflow that killed the compiler on ~350-deep nesting
+// (comp_error.md #91).
+const maxExprDepth = 256
+
+fn parseExpression(p: *Parser, prec: int) -> ast.Expr {
+    if p.exprDepth >= maxExprDepth {
+        if p.exprDepth == maxExprDepth {
+            errorAt(p, p.curTok, "expression nesting too deep (max 256)")
+        }
+        p.exprDepth = p.exprDepth + 1
+        // Skip to the innermost closing delimiter so the outer frames'
+        // expect() calls succeed instead of cascading one error per
+        // remaining token.
+        for p.curTok.kind != lexer.T_RPAREN && p.curTok.kind != lexer.T_RBRACKET && p.curTok.kind != lexer.T_EOF {
+            advance(p)
+        }
+        e := ast.newExpr(ast.EX_INT, p.curTok.line, p.curTok.col)
+        e.intVal = 0
+        return e
+    }
+    p.exprDepth = p.exprDepth + 1
+    left := parsePrefix(p)
+    for {
+        // Channel send (<-) is infix, but if it appears on a different line
+        // than the left expression, it's actually a channel receive (<-ch)
+        // starting a new statement. Stop parsing here.
+        if p.curTok.kind == lexer.T_SEND && p.curTok.line != left.line {
+            break
+        }
+        // A `*x`/`*(expr)`/`**x` at the start of a new line begins a
+        // deref statement (`*p = v`, `*(*pp) = v`), never a
+        // multiplication or power continuation — binary `*`/`**` cannot
+        // start an expression, and `prev \n *x` otherwise parses as
+        // `prev * x`, leaving `= v` orphaned (comp_error.md #33).
+        // Trade-off: a genuine `x *` / `x **` split across lines with a
+        // `*x`, `(x)`, or `**x` operand on the next line now breaks —
+        // rare enough to accept for correct deref statements.
+        if p.curTok.kind == lexer.T_STAR && p.curTok.line != left.line &&
+        (p.peekTok.kind == lexer.T_IDENT || p.peekTok.kind == lexer.T_LPAREN) {
+            break
+        }
+        if p.curTok.kind == lexer.T_DBLSTAR && p.curTok.line != left.line {
+            break
+        }
+        // A `(` at the start of a new line begins a new parenthesized
+        // statement (e.g. `(*p) = v` or `(x) = 5`), never a call of the
+        // previous line's expression — `prev \n (x)` otherwise parses as
+        // `prev(x)`, leaving `= v` orphaned (comp_error.md #38, same
+        // class as the #33 `*`-statement disambiguation). Multi-line
+        // call args like `f(\n a,\n b)` keep `(` on the callee's line
+        // and are unaffected. The exception is a `(` following a
+        // function literal: `defer fn() {\n...\n}()` invokes the
+        // literal and must keep gluing.
+        if p.curTok.kind == lexer.T_LPAREN && p.curTok.line != left.line &&
+        left.kind != ast.EX_FN_LIT {
+            break
+        }
+        opPrec := tokenPrecedence(p.curTok)
+        if opPrec <= prec {
+            break
+        }
+        left = parseInfix(p, left)
+    }
+    p.exprDepth = p.exprDepth - 1
+    return left
+}
+
+// parsePrefix parses a prefix expression (literals, identifiers, unary ops).
+fn parsePrefix(p: *Parser) -> ast.Expr {
+    tok := p.curTok
+    if (tok.kind == lexer.T_NIL || tok.kind == lexer.T_IDENT) && isNilLit(tok.literal) {
+        e := ast.newExpr(ast.EX_NIL, tok.line, tok.col)
+        advance(p)
+        return e
+    }
+    if tok.kind == lexer.T_IDENT {
+        // Special handling for make(Type, size?) — first arg is a type.
+        if str.Equal(tok.literal, "make") && peekIs(p, lexer.T_LPAREN) {
+            advance(p) // consume 'make'
+            expect(p, lexer.T_LPAREN, "(")
+            t := parseType(p)
+            var sizeExpr []ast.Expr
+            if curIs(p, lexer.T_COMMA) {
+                advance(p)
+                se := parseExpression(p, PREC_LOWEST)
+                sizeExpr = ast.singleExpr(se)
+            }
+            expect(p, lexer.T_RPAREN, ")")
+            e := ast.newExpr(ast.EX_MAKE, tok.line, tok.col)
+            e.makeType = ast.singleType(t)
+            e.makeSize = sizeExpr
+            return e
+        }
+        e := ast.newExpr(ast.EX_IDENT, tok.line, tok.col)
+        e.ident = tok.literal
+        advance(p)
+        // Generic-vs-comparison disambiguation for ident<T
+        // Only uppercase identifiers are treated as generic types.
+        // Lowercase identifiers with '<' are always treated as comparison
+        // (e.g. `i < n`). This means lowercase generic function calls
+        // (e.g. `foo<int>(x)`) are not supported in expression context,
+        // but this is rare and the stdlib doesn't use this pattern.
+        if curIs(p, lexer.T_LT) && peekIsTypeStart(p) {
+            isUpper := isUpperIdent(tok.literal)
+            if isUpper {
+                // Uppercase identifiers are always treated as generic types
+                // (e.g. List<int>, Map<string, int>, HashMap<K, V>{...}).
+                e.genericArgs = parseGenericArgs(p)
+            } else {
+                // Lowercase identifiers use backtracking: try parsing generic
+                // args, but if not followed by '(' (a call) or '{' (struct lit),
+                // restore and treat '<' as a comparison operator.
+                saved := saveState(p)
+                if !genericCallFollows(p) {
+                    restoreState(p, saved)
+                } else {
+                    args := parseGenericArgs(p)
+                    if curIs(p, lexer.T_LPAREN) {
+                        // Confirmed: generic function call
+                        e.genericArgs = args
+                    } else if curIs(p, lexer.T_LBRACE) && !p.noStructInit {
+                        // Confirmed: generic struct literal (e.g. foo<T>{...})
+                        e.genericArgs = args
+                    } else {
+                        // Not a generic call — restore and treat '<' as comparison
+                        restoreState(p, saved)
+                    }
+                }
+            }
+        }
+        // Struct literal: Ident{field: value, ...}
+        // Check here (not in parseInfix) because '{' has PREC_LOWEST
+        // and wouldn't be reached by the infix loop when called with
+        // PREC_LOWEST (e.g. in return/if/for conditions).
+        // Skip when noStructInit is set (if/for/while conditions).
+        if !p.noStructInit && curIs(p, lexer.T_LBRACE) && looksLikeStructInit(p) {
+            return parseStructLit(p, e)
+        }
+        return e
+    }
+    // Set literal: set{elem, elem, ...}
+    if tok.kind == lexer.T_SET && peekIs(p, lexer.T_LBRACE) {
+        advance(p) // consume 'set'
+        expect(p, lexer.T_LBRACE, "{")
+        var elems []ast.Expr
+        for !curIs(p, lexer.T_RBRACE) && !curIs(p, lexer.T_EOF) {
+            el := parseExpression(p, PREC_LOWEST)
+            elems = append(elems, el)
+            if curIs(p, lexer.T_COMMA) {
+                advance(p)
+                continue
+            }
+            break
+        }
+        expect(p, lexer.T_RBRACE, "}")
+        e := ast.newExpr(ast.EX_SET_LIT, tok.line, tok.col)
+        e.setElems = elems
+        return e
+    }
+    // Numeric literals (T_INT, T_FLOAT) must be checked before isTypeKeyword
+    // because T_FLOAT is shared between the "float" keyword and float literals
+    // like 3.14, and T_INT is shared between integer literals and type names.
+    if tok.kind == lexer.T_INT {
+        if tok.literal != "" && lexer.isDigit(int(tok.literal[0])) {
+            e := ast.newExpr(ast.EX_INT, tok.line, tok.col)
+            e.intVal = parseIntLiteralValue(p)
+            e.strVal = tok.literal
+            advance(p)
+            return e
+        }
+    }
+    if tok.kind == lexer.T_FLOAT {
+        if tok.literal != "" && lexer.isDigit(int(tok.literal[0])) {
+            e := ast.newExpr(ast.EX_FLOAT, tok.line, tok.col)
+            e.strVal = tok.literal
+            advance(p)
+            return e
+        }
+    }
+    // Type keyword tokens (int, int64, uint, float, bool, string, etc.)
+    // are used as type conversion functions: int64(x), string(x), etc.
+    // Treat them as identifiers so the call parser picks them up.
+    if isTypeKeyword(tok.kind) {
+        e := ast.newExpr(ast.EX_IDENT, tok.line, tok.col)
+        e.ident = tok.literal
+        advance(p)
+        return e
+    }
+    if tok.kind == lexer.T_INT {
+        e := ast.newExpr(ast.EX_INT, tok.line, tok.col)
+        e.intVal = parseIntLiteralValue(p)
+        e.strVal = tok.literal
+        advance(p)
+        return e
+    }
+    if tok.kind == lexer.T_FLOAT {
+        e := ast.newExpr(ast.EX_FLOAT, tok.line, tok.col)
+        e.strVal = tok.literal
+        advance(p)
+        return e
+    }
+    if tok.kind == lexer.T_STRING {
+        advance(p)
+        // Check for string interpolation: unescaped { in the literal
+        if hasInterpolation(tok.literal) {
+            return parseInterpolatedString(p, tok)
+        }
+        e := ast.newExpr(ast.EX_STRING, tok.line, tok.col)
+        e.strVal = tok.literal
+        return e
+    }
+    if tok.kind == lexer.T_TRUE {
+        e := ast.newExpr(ast.EX_BOOL, tok.line, tok.col)
+        e.boolVal = true
+        advance(p)
+        return e
+    }
+    if tok.kind == lexer.T_FALSE {
+        e := ast.newExpr(ast.EX_BOOL, tok.line, tok.col)
+        e.boolVal = false
+        advance(p)
+        return e
+    }
+    if (tok.kind == lexer.T_NIL || tok.kind == lexer.T_IDENT) && isNilLit(tok.literal) {
+        e := ast.newExpr(ast.EX_NIL, tok.line, tok.col)
+        advance(p)
+        return e
+    }
+    if tok.kind == lexer.T_DBLSTAR {
+        // `**` in prefix position is a double dereference: the lexer
+        // emits `**` as the power operator token, but power is strictly
+        // infix, so a leading `**` can only mean `*(*x)`.
+        e := ast.newExpr(ast.EX_PREFIX, tok.line, tok.col)
+        e.prefixOp = "*"
+        inner := ast.newExpr(ast.EX_PREFIX, tok.line, tok.col)
+        inner.prefixOp = "*"
+        advance(p)
+        right := parseExpression(p, PREC_PREFIX)
+        inner.prefixRight = ast.singleExpr(right)
+        e.prefixRight = ast.singleExpr(inner)
+        return e
+    }
+    if tok.kind == lexer.T_MINUS || tok.kind == lexer.T_BANG ||
+    tok.kind == lexer.T_TILDE || tok.kind == lexer.T_STAR ||
+    tok.kind == lexer.T_AMPERSAND || tok.kind == lexer.T_SEND {
+        e := ast.newExpr(ast.EX_PREFIX, tok.line, tok.col)
+        e.prefixOp = tok.literal
+        advance(p)
+        right := parseExpression(p, PREC_PREFIX)
+        e.prefixRight = ast.singleExpr(right)
+        return e
+    }
+    if tok.kind == lexer.T_LPAREN {
+        advance(p)
+        inner := parseExpression(p, PREC_LOWEST)
+        if curIs(p, lexer.T_COMMA) {
+            var elems []ast.Expr
+            elems = append(elems, inner)
+            for curIs(p, lexer.T_COMMA) {
+                advance(p)
+                el := parseExpression(p, PREC_LOWEST)
+                elems = append(elems, el)
+            }
+            expect(p, lexer.T_RPAREN, ")")
+            e := ast.newExpr(ast.EX_TUPLE, tok.line, tok.col)
+            e.tupleElems = elems
+            return e
+        }
+        expect(p, lexer.T_RPAREN, ")")
+        e := ast.newExpr(ast.EX_PAREN, tok.line, tok.col)
+        e.inner = ast.singleExpr(inner)
+        return e
+    }
+    if tok.kind == lexer.T_LBRACKET {
+        advance(p)
+        // Empty bracket: [] — could be []Type{...} composite literal
+        // or just an empty array literal [].
+        if curIs(p, lexer.T_RBRACKET) {
+            // Check if this is []Type{...} by looking ahead past ']'
+            // to see if a type starts there.
+            if peekPastTriviaIsTypeStart(p) {
+                advance(p) // consume ']'
+                // Parse the element type.
+                elemType := parseType(p)
+                if curIs(p, lexer.T_LBRACE) {
+                    // []Type{elem1, elem2, ...}
+                    advance(p) // consume '{'
+                    var elems []ast.Expr
+                    for !curIs(p, lexer.T_RBRACE) && !curIs(p, lexer.T_EOF) {
+                        // Support nested composite literals: when the element
+                        // type is itself a slice/array type and we encounter
+                        // '{', parse it as a nested literal with the element
+                        // type inferred from the outer type.
+                        if curIs(p, lexer.T_LBRACE) {
+                            nestedE := parseNestedCompositeLit(p, elemType, tok.line, tok.col)
+                            elems = append(elems, nestedE)
+                        } else {
+                            el := parseExpression(p, PREC_LOWEST)
+                            elems = append(elems, el)
+                        }
+                        if curIs(p, lexer.T_COMMA) {
+                            advance(p)
+                            continue
+                        }
+                        break
+                    }
+                    expect(p, lexer.T_RBRACE, "}")
+                    e := ast.newExpr(ast.EX_ARRAY_LIT, tok.line, tok.col)
+                    e.arrayElems = elems
+                    e.arrayType = ast.singleType(elemType)
+                    return e
+                }
+                // []Type without { — treat as empty typed array.
+                e := ast.newExpr(ast.EX_ARRAY_LIT, tok.line, tok.col)
+                e.arrayType = ast.singleType(elemType)
+                return e
+            }
+            // Just an empty array literal []
+            advance(p) // consume ']'
+            e := ast.newExpr(ast.EX_ARRAY_LIT, tok.line, tok.col)
+            return e
+        }
+        var elems []ast.Expr
+        for !curIs(p, lexer.T_RBRACKET) && !curIs(p, lexer.T_EOF) {
+            if curIs(p, lexer.T_DOTDOT) {
+                advance(p)
+                sp := ast.newExpr(ast.EX_SPREAD, p.curTok.line, p.curTok.col)
+                spreadVal := parseExpression(p, PREC_LOWEST)
+                sp.spreadExpr = ast.singleExpr(spreadVal)
+                elems = append(elems, sp)
+            } else {
+                el := parseExpression(p, PREC_LOWEST)
+                elems = append(elems, el)
+            }
+            if curIs(p, lexer.T_COMMA) {
+                advance(p)
+                continue
+            }
+            break
+        }
+        expect(p, lexer.T_RBRACKET, "]")
+        e := ast.newExpr(ast.EX_ARRAY_LIT, tok.line, tok.col)
+        e.arrayElems = elems
+        return e
+    }
+    if tok.kind == lexer.T_FN {
+        return parseFnLiteral(p)
+    }
+    if tok.kind == lexer.T_IF {
+        return parseIfExpr(p)
+    }
+    if tok.kind == lexer.T_MATCH {
+        return parseMatchExpr(p)
+    }
+    if tok.kind == lexer.T_IDENT && str.Equal(tok.literal, "make") {
+        if peekIs(p, lexer.T_LPAREN) {
+            advance(p)
+            expect(p, lexer.T_LPAREN, "(")
+            t := parseType(p)
+            var sizeExpr []ast.Expr
+            if curIs(p, lexer.T_COMMA) {
+                advance(p)
+                se := parseExpression(p, PREC_LOWEST)
+                sizeExpr = ast.singleExpr(se)
+            }
+            expect(p, lexer.T_RPAREN, ")")
+            e := ast.newExpr(ast.EX_MAKE, tok.line, tok.col)
+            e.makeType = ast.singleType(t)
+            e.makeSize = sizeExpr
+            return e
+        }
+    }
+    if tok.kind == lexer.T_SIZEOF {
+        advance(p)
+        expect(p, lexer.T_LPAREN, "(")
+        t := parseType(p)
+        expect(p, lexer.T_RPAREN, ")")
+        e := ast.newExpr(ast.EX_SIZEOF, tok.line, tok.col)
+        e.sizeofType = ast.singleType(t)
+        return e
+    }
+    if tok.kind == lexer.T_ALIGNOF {
+        advance(p)
+        expect(p, lexer.T_LPAREN, "(")
+        t := parseType(p)
+        expect(p, lexer.T_RPAREN, ")")
+        e := ast.newExpr(ast.EX_ALIGNOF, tok.line, tok.col)
+        e.sizeofType = ast.singleType(t)
+        return e
+    }
+    if tok.kind == lexer.T_ASYNC {
+        advance(p)
+        inner := parseExpression(p, PREC_PREFIX)
+        e := ast.newExpr(ast.EX_ASYNC, tok.line, tok.col)
+        e.inner = ast.singleExpr(inner)
+        return e
+    }
+    if tok.kind == lexer.T_AWAIT {
+        advance(p)
+        inner := parseExpression(p, PREC_PREFIX)
+        e := ast.newExpr(ast.EX_AWAIT, tok.line, tok.col)
+        e.awaitExpr = ast.singleExpr(inner)
+        return e
+    }
+    if tok.kind == lexer.T_DOTDOT {
+        advance(p)
+        inner := parseExpression(p, PREC_PREFIX)
+        e := ast.newExpr(ast.EX_SPREAD, tok.line, tok.col)
+        e.spreadExpr = ast.singleExpr(inner)
+        return e
+    }
+
+    errorAt(p, tok, "unexpected token in expression")
+    advance(p)
+    return ast.Expr{}
+}
+
+// hasInterpolation returns true if the string literal contains a
+// potential interpolation "{expr}" where expr is non-empty and does
+// not start with characters that indicate non-expression content
+// (quotes, colons for JSON, or another brace for template syntax).
+fn hasInterpolation(literal: string) -> bool {
+    n := str.Len(literal)
+    i := 0
+    for i < n {
+        if literal[i] == 123 { // '{'
+            // Skip "{{" (template syntax or escaped brace)
+            if i + 1 < n && literal[i+1] == 123 {
+                i = i + 2
+                continue
+            }
+            // Skip "{}" (format placeholder)
+            if i + 1 < n && literal[i+1] == 125 {
+                i = i + 2
+                continue
+            }
+            if i + 1 < n {
+                nextCh := literal[i+1]
+                // Skip if starts with quote, colon, or whitespace
+                // (likely JSON or other non-expression content)
+                if nextCh == 34 || nextCh == 39 || nextCh == 58 ||
+                nextCh == 32 || nextCh == 9 || nextCh == 10 {
+                    i = i + 1
+                    continue
+                }
+                return true
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// parseInterpolatedString splits a string literal containing {expr}
+// segments into an EX_INTERP node. Each {expr} is sub-lexed and
+// sub-parsed into an AST expression. If an expression fails to parse,
+// the braces and content are treated as a literal string segment.
+fn parseInterpolatedString(p: *Parser, tok: lexer.Token) -> ast.Expr {
+    e := ast.newExpr(ast.EX_INTERP, tok.line, tok.col)
+    literal := tok.literal
+    n := str.Len(literal)
+    var parts []ast.InterpPart
+
+    strSeg := ""
+    i := 0
+    for i < n {
+        if literal[i] == 123 {
+            // Skip "{{" — literal braces, not interpolation
+            if i + 1 < n && literal[i+1] == 123 {
+                strSeg = str.Concat(strSeg, "{{")
+                i = i + 2
+                continue
+            }
+            // Skip "{}" — format placeholder
+            if i + 1 < n && literal[i+1] == 125 {
+                strSeg = str.Concat(strSeg, "{}")
+                i = i + 2
+                continue
+            }
+            // Check if this looks like interpolation
+            if i + 1 < n {
+                nextCh := literal[i+1]
+                // Skip if starts with quote, colon, or whitespace
+                if nextCh == 34 || nextCh == 39 || nextCh == 58 ||
+                nextCh == 32 || nextCh == 9 || nextCh == 10 {
+                    strSeg = str.Concat(strSeg, str.Substr(literal, i, 1))
+                    i = i + 1
+                    continue
+                }
+            }
+
+            // Find matching '}'
+            j := i + 1
+            depth := 1
+            for j < n && depth > 0 {
+                if literal[j] == 123 {
+                    depth = depth + 1
+                } else if literal[j] == 125 {
+                    depth = depth - 1
+                    if depth == 0 {
+                        break
+                    }
+                }
+                j = j + 1
+            }
+            if depth != 0 {
+                // No matching '}' — treat as literal
+                strSeg = str.Concat(strSeg, str.Substr(literal, i, 1))
+                i = i + 1
+                continue
+            }
+            exprSource := str.Substr(literal, i + 1, j - i - 1)
+
+            // Compute the source line and column of exprSource[0] (offset
+            // i + 1 inside literal, whose opening quote is at tok.line,
+            // tok.col) so sub-lexed tokens carry true file positions for
+            // diagnostics (comp_error.md #136).
+            baseLine := tok.line
+            baseCol := tok.col + 1
+            for k := 0; k <= i; k = k + 1 {
+                if literal[k] == 10 {
+                    baseLine = baseLine + 1
+                    baseCol = 1
+                } else {
+                    baseCol = baseCol + 1
+                }
+            }
+
+            // Sub-lex and sub-parse the expression
+            exprTokens := lexer.Tokenize(exprSource)
+            for ti := 0; ti < len(exprTokens); ti = ti + 1 {
+                et := exprTokens[ti]
+                if et.line <= 1 {
+                    et.line = baseLine
+                    et.col = baseCol + et.col - 1
+                } else {
+                    et.line = baseLine + et.line - 1
+                }
+                exprTokens[ti] = et
+            }
+            subParser := New(exprTokens)
+            exprAST := parseExpression(&subParser, PREC_LOWEST)
+
+            // Check if parsing succeeded (no errors and consumed all tokens)
+            if len(subParser.errors) > 0 || !curIs(&subParser, lexer.T_EOF) {
+                // Parsing failed — treat braces and content as literal
+                strSeg = str.Concat(strSeg, str.Substr(literal, i, j - i + 1))
+                i = j + 1
+                continue
+            }
+
+            // Flush any accumulated string segment
+            if str.Len(strSeg) > 0 {
+                part := ast.InterpPart{isExpr: false, strVal: strSeg}
+                parts = append(parts, part)
+                strSeg = ""
+            }
+
+            part := ast.InterpPart{isExpr: true}
+            part.expr = ast.singleExpr(exprAST)
+            parts = append(parts, part)
+            i = j + 1
+            continue
+        }
+        // Regular character — append as single-char substring
+        strSeg = str.Concat(strSeg, str.Substr(literal, i, 1))
+        i = i + 1
+    }
+    // Flush trailing string segment
+    if str.Len(strSeg) > 0 {
+        part := ast.InterpPart{isExpr: false, strVal: strSeg}
+        parts = append(parts, part)
+    }
+    e.interpParts = parts
+    return e
+}
+
+// parseInfix parses an infix expression (binary ops, calls, index, field).
+fn parseInfix(p: *Parser, left: ast.Expr) -> ast.Expr {
+    tok := p.curTok
+
+    if tok.kind == lexer.T_DOTDOT {
+        e := ast.newExpr(ast.EX_RANGE, tok.line, tok.col)
+        advance(p)
+        e.rangeLow = ast.singleExpr(left)
+        high := parseExpression(p, PREC_RANGE)
+        e.rangeHigh = ast.singleExpr(high)
+        return e
+    }
+
+    if tok.kind == lexer.T_LPAREN {
+        advance(p)
+        var args []ast.Expr
+        for !curIs(p, lexer.T_RPAREN) && !curIs(p, lexer.T_EOF) {
+            arg := parseExpression(p, PREC_LOWEST)
+            // Check for spread: arg...
+            if curIs(p, lexer.T_ELLIPSIS) {
+                advance(p)
+                sp := ast.newExpr(ast.EX_SPREAD, tok.line, tok.col)
+                sp.spreadExpr = ast.singleExpr(arg)
+                args = append(args, sp)
+            } else {
+                args = append(args, arg)
+            }
+            if curIs(p, lexer.T_COMMA) {
+                advance(p)
+                continue
+            }
+            break
+        }
+        expect(p, lexer.T_RPAREN, ")")
+        e := ast.newExpr(ast.EX_CALL, tok.line, tok.col)
+        e.callFunc = ast.singleExpr(left)
+        e.callArgs = args
+        // Copy generic args from the callee expression (e.g. hashmap.New<int,int>)
+        if len(left.genericArgs) > 0 {
+            e.genericArgs = left.genericArgs
+        }
+        return e
+    }
+
+    if tok.kind == lexer.T_LBRACKET {
+        advance(p)
+        if curIs(p, lexer.T_CARET) {
+            advance(p)
+            idx := parseExpression(p, PREC_LOWEST)
+            expect(p, lexer.T_RBRACKET, "]")
+            e := ast.newExpr(ast.EX_FROM_END, tok.line, tok.col)
+            e.indexTarget = ast.singleExpr(left)
+            e.indexExpr = ast.singleExpr(idx)
+            e.indexFromEnd = true
+            return e
+        }
+        if curIs(p, lexer.T_COLON) {
+            advance(p)
+            var high []ast.Expr
+            if !curIs(p, lexer.T_RBRACKET) {
+                h := parseExpression(p, PREC_LOWEST)
+                high = ast.singleExpr(h)
+            }
+            expect(p, lexer.T_RBRACKET, "]")
+            e := ast.newExpr(ast.EX_SLICE, tok.line, tok.col)
+            e.sliceTarget = ast.singleExpr(left)
+            e.sliceHigh = high
+            return e
+        }
+        low := parseExpression(p, PREC_LOWEST)
+        if curIs(p, lexer.T_COLON) {
+            advance(p)
+            var high []ast.Expr
+            if !curIs(p, lexer.T_RBRACKET) {
+                h := parseExpression(p, PREC_LOWEST)
+                high = ast.singleExpr(h)
+            }
+            expect(p, lexer.T_RBRACKET, "]")
+            e := ast.newExpr(ast.EX_SLICE, tok.line, tok.col)
+            e.sliceTarget = ast.singleExpr(left)
+            e.sliceLow = ast.singleExpr(low)
+            e.sliceHigh = high
+            return e
+        }
+        expect(p, lexer.T_RBRACKET, "]")
+        e := ast.newExpr(ast.EX_INDEX, tok.line, tok.col)
+        e.indexTarget = ast.singleExpr(left)
+        e.indexExpr = ast.singleExpr(low)
+        return e
+    }
+
+    if tok.kind == lexer.T_DOT {
+        advance(p)
+        fieldName := ""
+        if curIs(p, lexer.T_IDENT) {
+            fieldName = p.curTok.literal
+            advance(p)
+        }
+        e := ast.newExpr(ast.EX_FIELD, tok.line, tok.col)
+        e.fieldTarget = ast.singleExpr(left)
+        e.fieldName = fieldName
+        // Generic args on a selector are only meaningful when the closing
+        // '>' is immediately followed by '(' (generic method call, e.g.
+        // pkg.New<T>()) or '{' (generic struct literal, pkg.Type<T>{...}).
+        // Otherwise the '<' is a comparison (e.g. `out.Wellbeing < 0.0`),
+        // so backtrack and let the infix parser handle it.
+        if curIs(p, lexer.T_LT) && peekIsTypeStart(p) && isUpperIdent(fieldName) {
+            saved := saveState(p)
+            if genericCallFollows(p) {
+                args := parseGenericArgs(p)
+                if curIs(p, lexer.T_LPAREN) || curIs(p, lexer.T_LBRACE) {
+                    e.genericArgs = args
+                } else {
+                    restoreState(p, saved)
+                }
+            }
+        }
+        // Qualified struct literal: pkg.Name{field: value, ...}
+        if !p.noStructInit && curIs(p, lexer.T_LBRACE) && looksLikeStructInit(p) {
+            return parseStructLit(p, e)
+        }
+        return e
+    }
+
+    if tok.kind == lexer.T_QUESTION {
+        e := ast.newExpr(ast.EX_ERROR_PROP, tok.line, tok.col)
+        e.postfixTarget = ast.singleExpr(left)
+        advance(p)
+        return e
+    }
+
+    if tok.kind == lexer.T_BANG {
+        e := ast.newExpr(ast.EX_NONNULL, tok.line, tok.col)
+        e.postfixTarget = ast.singleExpr(left)
+        advance(p)
+        return e
+    }
+
+    op := tok.literal
+    if tok.kind == lexer.T_SEND {
+        op = "<-"
+    }
+    e := ast.newExpr(ast.EX_INFIX, tok.line, tok.col)
+    e.infixOp = op
+    e.infixLeft = ast.singleExpr(left)
+    prec := tokenPrecedence(tok)
+    advance(p)
+    // ** is right-associative: parse the right operand at prec-1 so that
+    // 2**3**2 groups as 2**(3**2), not (2**3)**2.
+    rightPrec := prec
+    if tok.kind == lexer.T_DBLSTAR {
+        rightPrec = prec - 1
+    }
+    right := parseExpression(p, rightPrec)
+    e.infixRight = ast.singleExpr(right)
+    return e
+}
+
+// looksLikeGenericArgs checks if < is the start of generic args.
+fn looksLikeGenericArgs(p: *Parser) -> bool {
+    if !curIs(p, lexer.T_LT) {
+        return false
+    }
+    // The next token could be a type. This is only called from parseType,
+    // which runs in type positions where '<' cannot be a comparison, so
+    // any type start — including lowercase/qualified type names such as
+    // `ast.Decl` and the bare `int` keyword — is accepted as the first
+    // generic argument (comp_error.md #22 needed StrMap<ast.Decl>).
+    pk := p.peekTok.kind
+    return pk == lexer.T_IDENT || pk == lexer.T_STAR || pk == lexer.T_LBRACKET ||
+    pk == lexer.T_MAP || pk == lexer.T_SET || pk == lexer.T_CHAN ||
+    pk == lexer.T_TENSOR || pk == lexer.T_FN || pk == lexer.T_LPAREN ||
+    pk == lexer.T_INT || pk == lexer.T_INT8 || pk == lexer.T_INT16 ||
+    pk == lexer.T_INT32 || pk == lexer.T_INT64 || pk == lexer.T_UINT ||
+    pk == lexer.T_UINT8 || pk == lexer.T_UINT16 || pk == lexer.T_UINT32 ||
+    pk == lexer.T_UINT64 || pk == lexer.T_BOOL || pk == lexer.T_STRING_TYPE ||
+    pk == lexer.T_BYTES_TYPE || pk == lexer.T_FLOAT || pk == lexer.T_VOID ||
+    pk == lexer.T_ERROR
+}
+
+// peekIsTypeStart checks if the peek token could start a type.
+fn peekIsTypeStart(p: *Parser) -> bool {
+    pk := p.peekTok.kind
+    return pk == lexer.T_IDENT || pk == lexer.T_STAR || pk == lexer.T_LBRACKET ||
+    pk == lexer.T_MAP || pk == lexer.T_SET || pk == lexer.T_CHAN ||
+    pk == lexer.T_TENSOR || pk == lexer.T_FN || pk == lexer.T_LPAREN ||
+    pk == lexer.T_INT8 || pk == lexer.T_INT16 || pk == lexer.T_INT32 ||
+    pk == lexer.T_INT64 || pk == lexer.T_UINT || pk == lexer.T_UINT8 ||
+    pk == lexer.T_UINT16 || pk == lexer.T_UINT32 || pk == lexer.T_UINT64 ||
+    pk == lexer.T_BOOL || pk == lexer.T_STRING_TYPE || pk == lexer.T_BYTES_TYPE ||
+    pk == lexer.T_FLOAT || pk == lexer.T_VOID || pk == lexer.T_ERROR
+}
+
+// curIsTypeStart reports whether the current token could start a type.
+fn curIsTypeStart(p: *Parser) -> bool {
+    k := p.curTok.kind
+    return k == lexer.T_IDENT || k == lexer.T_STAR || k == lexer.T_LBRACKET ||
+    k == lexer.T_MAP || k == lexer.T_SET || k == lexer.T_CHAN ||
+    k == lexer.T_TENSOR || k == lexer.T_FN || k == lexer.T_LPAREN ||
+    k == lexer.T_INT8 || k == lexer.T_INT16 || k == lexer.T_INT32 ||
+    k == lexer.T_INT64 || k == lexer.T_UINT || k == lexer.T_UINT8 ||
+    k == lexer.T_UINT16 || k == lexer.T_UINT32 || k == lexer.T_UINT64 ||
+    k == lexer.T_BOOL || k == lexer.T_STRING_TYPE || k == lexer.T_BYTES_TYPE ||
+    k == lexer.T_FLOAT || k == lexer.T_VOID || k == lexer.T_ERROR
+}
+
+// genericCallFollows checks if a '<' starts generic args followed by a call.
+fn genericCallFollows(p: *Parser) -> bool {
+    idx := p.pos
+    depth := 0
+    for idx < len(p.tokens) {
+        kind := p.tokens[idx].kind
+        if kind == lexer.T_LT {
+            depth = depth + 1
+        } else if kind == lexer.T_GT {
+            depth = depth - 1
+            if depth == 0 {
+                idx = idx + 1
+                for idx < len(p.tokens) && isTrivia(p.tokens[idx].kind) {
+                    idx = idx + 1
+                }
+                if idx >= len(p.tokens) {
+                    return false
+                }
+                return p.tokens[idx].kind == lexer.T_LPAREN || p.tokens[idx].kind == lexer.T_LBRACE
+            }
+        }
+        idx = idx + 1
+    }
+    return false
+}
+
+// parseGenericArgs parses <Type, Type, ...>.
+fn parseGenericArgs(p: *Parser) -> []ast.Type {
+    var args []ast.Type
+    advance(p)
+    for {
+        t := parseType(p)
+        args = append(args, t)
+        if curIs(p, lexer.T_COMMA) {
+            advance(p)
+            continue
+        }
+        break
+    }
+    if curIs(p, lexer.T_GT) {
+        advance(p)
+    }
+    return args
+}
+
+// looksLikeStructInit checks if the current { starts a struct literal.
+// A struct literal is followed by '}' (empty) or 'ident:' (field assignment).
+// A block statement is followed by a statement keyword or expression.
+fn looksLikeStructInit(p: *Parser) -> bool {
+    if !curIs(p, lexer.T_LBRACE) {
+        return false
+    }
+    // Peek past trivia tokens to find the real next token.
+    // peekTok may be a NEWLINE/COMMENT which advance() would skip.
+    pk := peekPastTrivia(p)
+    // Empty struct literal: Foo{}
+    if pk == lexer.T_RBRACE {
+        return true
+    }
+    // Field assignment: Foo{name: value, ...}
+    if pk == lexer.T_IDENT {
+        return true
+    }
+    return false
+}
+
+// peekPastTrivia returns the kind of the first non-trivia token after curTok.
+fn peekPastTrivia(p: *Parser) -> int {
+    idx := p.pos + 1
+    for idx < len(p.tokens) {
+        k := p.tokens[idx].kind
+        if !isTrivia(k) {
+            return k
+        }
+        idx = idx + 1
+    }
+    return lexer.T_EOF
+}
+
+// peekPastTriviaIsTypeStart checks if the first non-trivia token after
+// curTok could start a type. Used to detect []Type{...} composite literals.
+fn peekPastTriviaIsTypeStart(p: *Parser) -> bool {
+    pk := peekPastTrivia(p)
+    return pk == lexer.T_IDENT || pk == lexer.T_STAR || pk == lexer.T_LBRACKET ||
+    pk == lexer.T_MAP || pk == lexer.T_SET || pk == lexer.T_CHAN ||
+    pk == lexer.T_TENSOR || pk == lexer.T_FN || pk == lexer.T_LPAREN ||
+    pk == lexer.T_INT8 || pk == lexer.T_INT16 || pk == lexer.T_INT32 ||
+    pk == lexer.T_INT64 || pk == lexer.T_UINT || pk == lexer.T_UINT8 ||
+    pk == lexer.T_UINT16 || pk == lexer.T_UINT32 || pk == lexer.T_UINT64 ||
+    pk == lexer.T_BOOL || pk == lexer.T_STRING_TYPE || pk == lexer.T_BYTES_TYPE ||
+    pk == lexer.T_FLOAT || pk == lexer.T_VOID || pk == lexer.T_ERROR
+}
+
+// parseStructLit parses a struct literal expression (Name{field: value, ...}).
+fn parseStructLit(p: *Parser, target: ast.Expr) -> ast.Expr {
+    line := target.line
+    col := target.col
+    advance(p)
+    var fields []ast.StructLitField
+    for !curIs(p, lexer.T_RBRACE) && !curIs(p, lexer.T_EOF) {
+        fname := ""
+        if curIs(p, lexer.T_IDENT) {
+            fname = p.curTok.literal
+            advance(p)
+        }
+        expect(p, lexer.T_COLON, ":")
+        val := parseExpression(p, PREC_LOWEST)
+        fields = append(fields, ast.StructLitField{name: fname, value: ast.singleExpr(val)})
+        if curIs(p, lexer.T_COMMA) {
+            advance(p)
+            continue
+        }
+        break
+    }
+    expect(p, lexer.T_RBRACE, "}")
+    e := ast.newExpr(ast.EX_STRUCT_LIT, line, col)
+    // Build the struct name: for EX_IDENT it's just the ident;
+    // for EX_FIELD (pkg.Name) it's "pkg.Name".
+    if target.kind == ast.EX_FIELD {
+        prefix := ""
+        if ast.hasExpr(target.fieldTarget) {
+            prefix = target.fieldTarget[0].ident
+        }
+        e.structLitName = str.Concat(str.Concat(prefix, "."), target.fieldName)
+    } else {
+        e.structLitName = target.ident
+    }
+    e.genericArgs = target.genericArgs
+    e.structLitFields = fields
+    return e
+}
+
+// parseFnLiteral parses a function literal expression (fn(params) -> T { }).
+fn parseFnLiteral(p: *Parser) -> ast.Expr {
+    tok := p.curTok
+    advance(p)
+    params := parseParamList(p)
+    var retTypes []ast.Type
+    if curIs(p, lexer.T_ARROW) {
+        advance(p)
+        retTypes = parseReturnTypeList(p)
+    }
+    body := parseBlock(p)
+    e := ast.newExpr(ast.EX_FN_LIT, tok.line, tok.col)
+    e.fnLitParams = params
+    e.fnLitRetTypes = retTypes
+    e.fnLitBody = body
+    return e
+}
+
+// parseIfExpr parses an if expression (if cond { then } else { else }).
+fn parseIfExpr(p: *Parser) -> ast.Expr {
+    tok := p.curTok
+    advance(p)
+    cond := parseExpression(p, PREC_LOWEST)
+    thenExpr := parseIfExprBranch(p)
+    var elseExpr []ast.Expr
+    if curIs(p, lexer.T_ELSE) {
+        advance(p)
+        ee := parseIfExprBranch(p)
+        elseExpr = ast.singleExpr(ee)
+    }
+    e := ast.newExpr(ast.EX_IF_EXPR, tok.line, tok.col)
+    e.ifCond = ast.singleExpr(cond)
+    e.ifThen = ast.singleExpr(thenExpr)
+    e.ifElse = elseExpr
+    return e
+}
+
+// parseIfExprBranch parses a branch of an if expression (block or expr).
+fn parseIfExprBranch(p: *Parser) -> ast.Expr {
+    if curIs(p, lexer.T_LBRACE) {
+        body := parseBlock(p)
+        if len(body) > 0 {
+            last := body[len(body)-1]
+            if last.kind == ast.ST_EXPR && ast.hasExpr(last.expr) {
+                return last.expr[0]
+            }
+        }
+        return ast.newExpr(ast.EX_NIL, p.curTok.line, p.curTok.col)
+    }
+    return parseExpression(p, PREC_LOWEST)
+}
+
+// parseMatchExpr parses a match expression with subject and arms.
+fn parseMatchExpr(p: *Parser) -> ast.Expr {
+    tok := p.curTok
+    advance(p)
+    p.noStructInit = true
+    subject := parseExpression(p, PREC_LOWEST)
+    p.noStructInit = false
+    arms := parseMatchArms(p)
+    e := ast.newExpr(ast.EX_MATCH_EXPR, tok.line, tok.col)
+    e.matchExprSubject = ast.singleExpr(subject)
+    e.matchExprArms = arms
+    return e
+}
+
+// === Type Parsing ===
+
+// parseNestedCompositeLit parses a nested {elem1, elem2, ...} literal
+// inside a []Type{...} composite literal. The outerElemType is the element
+// type of the enclosing slice. If it's itself an array type (TY_ARRAY),
+// the nested literal becomes an EX_ARRAY_LIT with the inner element type
+// (outerElemType.elem[0]), not the full outer slice type.
+fn parseNestedCompositeLit(p: *Parser, outerElemType: ast.Type, line: int, col: int) -> ast.Expr {
+    expect(p, lexer.T_LBRACE, "{")
+    var elems []ast.Expr
+    for !curIs(p, lexer.T_RBRACE) && !curIs(p, lexer.T_EOF) {
+        if curIs(p, lexer.T_LBRACE) {
+            // Recursively handle deeper nesting
+            nestedE := parseNestedCompositeLit(p, outerElemType.elem[0], line, col)
+            elems = append(elems, nestedE)
+        } else {
+            el := parseExpression(p, PREC_LOWEST)
+            elems = append(elems, el)
+        }
+        if curIs(p, lexer.T_COMMA) {
+            advance(p)
+            continue
+        }
+        break
+    }
+    expect(p, lexer.T_RBRACE, "}")
+    e := ast.newExpr(ast.EX_ARRAY_LIT, line, col)
+    e.arrayElems = elems
+    if outerElemType.kind == ast.TY_ARRAY && len(outerElemType.elem) > 0 {
+        e.arrayType = ast.singleType(outerElemType.elem[0])
+    }
+    return e
+}
+
+// parseType parses a type expression (pointer, array, map, set, fn, named).
+fn parseType(p: *Parser) -> ast.Type {
+    tok := p.curTok
+
+    if tok.kind == lexer.T_STAR {
+        advance(p)
+        elem := parseType(p)
+        t := ast.newType(ast.TY_POINTER)
+        t.elem = ast.singleType(elem)
+        return t
+    }
+
+    if tok.kind == lexer.T_LBRACKET {
+        advance(p)
+        if !curIs(p, lexer.T_RBRACKET) {
+            // Fixed-size array [N]T: the emitter has no [N x T] storage —
+            // it compiles the declaration as a slice pointer left nil, so
+            // any access is a guaranteed null-pointer crash. Reject
+            // honestly instead of silently dropping the size
+            // (comp_error.md #35).
+            errorAt(p, p.curTok, "fixed-size arrays [N]T are not supported; use a []T slice")
+            for !curIs(p, lexer.T_RBRACKET) && !curIs(p, lexer.T_EOF) {
+                advance(p)
+            }
+        }
+        expect(p, lexer.T_RBRACKET, "]")
+        elem := parseType(p)
+        t := ast.newType(ast.TY_ARRAY)
+        t.elem = ast.singleType(elem)
+        return t
+    }
+
+    if tok.kind == lexer.T_MAP {
+        advance(p)
+        expect(p, lexer.T_LBRACKET, "[")
+        keyType := parseType(p)
+        expect(p, lexer.T_RBRACKET, "]")
+        elem := parseType(p)
+        t := ast.newType(ast.TY_MAP)
+        t.keyType = ast.singleType(keyType)
+        t.elem = ast.singleType(elem)
+        return t
+    }
+
+    if tok.kind == lexer.T_SET {
+        advance(p)
+        expect(p, lexer.T_LT, "<")
+        elem := parseType(p)
+        expect(p, lexer.T_GT, ">")
+        t := ast.newType(ast.TY_SET)
+        t.elem = ast.singleType(elem)
+        return t
+    }
+
+    if tok.kind == lexer.T_CHAN {
+        advance(p)
+        expect(p, lexer.T_LT, "<")
+        elem := parseType(p)
+        expect(p, lexer.T_GT, ">")
+        t := ast.newType(ast.TY_CHAN)
+        t.elem = ast.singleType(elem)
+        return t
+    }
+
+    if tok.kind == lexer.T_TENSOR {
+        advance(p)
+        expect(p, lexer.T_LT, "<")
+        elem := parseType(p)
+        expect(p, lexer.T_GT, ">")
+        t := ast.newType(ast.TY_TENSOR)
+        t.elem = ast.singleType(elem)
+        return t
+    }
+
+    if tok.kind == lexer.T_FN {
+        advance(p)
+        var paramTypes []ast.Type
+        expect(p, lexer.T_LPAREN, "(")
+        for !curIs(p, lexer.T_RPAREN) && !curIs(p, lexer.T_EOF) {
+            pt := parseType(p)
+            paramTypes = append(paramTypes, pt)
+            if curIs(p, lexer.T_COMMA) {
+                advance(p)
+                continue
+            }
+            break
+        }
+        expect(p, lexer.T_RPAREN, ")")
+        var retTypes []ast.Type
+        if curIs(p, lexer.T_ARROW) {
+            advance(p)
+            // Inside a type position, `-> T` must not consume commas —
+            // `f: fn(int) -> int, x: int` would otherwise swallow `x`.
+            // Multiple return types require parens: `fn() -> (int, int)`.
+            if curIs(p, lexer.T_LPAREN) {
+                retTypes = parseReturnTypeList(p)
+            } else {
+                rt := parseType(p)
+                retTypes = ast.singleType(rt)
+            }
+        }
+        t := ast.newType(ast.TY_FUNC)
+        t.paramTypes = paramTypes
+        t.retTypes = retTypes
+        return t
+    }
+
+    if tok.kind == lexer.T_LPAREN {
+        advance(p)
+        var types []ast.Type
+        for !curIs(p, lexer.T_RPAREN) && !curIs(p, lexer.T_EOF) {
+            tt := parseType(p)
+            types = append(types, tt)
+            if curIs(p, lexer.T_COMMA) {
+                advance(p)
+                continue
+            }
+            break
+        }
+        expect(p, lexer.T_RPAREN, ")")
+        t := ast.newType(ast.TY_TUPLE)
+        t.tupleTypes = types
+        return t
+    }
+
+    if tok.kind == lexer.T_IDENT || tok.kind == lexer.T_INT || tok.kind == lexer.T_INT8 || tok.kind == lexer.T_INT16 ||
+    tok.kind == lexer.T_INT32 || tok.kind == lexer.T_INT64 || tok.kind == lexer.T_UINT ||
+    tok.kind == lexer.T_UINT8 || tok.kind == lexer.T_UINT16 || tok.kind == lexer.T_UINT32 ||
+    tok.kind == lexer.T_UINT64 || tok.kind == lexer.T_BOOL || tok.kind == lexer.T_STRING_TYPE ||
+    tok.kind == lexer.T_BYTES_TYPE || tok.kind == lexer.T_VOID || tok.kind == lexer.T_ERROR ||
+    tok.kind == lexer.T_FLOAT {
+        name := tok.literal
+        if str.Len(name) == 0 {
+            name = lexer.KindName(tok.kind)
+        }
+        advance(p)
+        t := ast.newType(ast.TY_NAMED)
+        t.name = name
+        for curIs(p, lexer.T_DOT) {
+            advance(p)
+            if curIs(p, lexer.T_IDENT) {
+                name = str.Concat(str.Concat(name, "."), p.curTok.literal)
+                advance(p)
+            }
+        }
+        t.name = name
+        if curIs(p, lexer.T_LT) && looksLikeGenericArgs(p) {
+            t.genericArgs = parseGenericArgs(p)
+        }
+        return t
+    }
+
+    errorAt(p, tok, "expected type")
+    advance(p)
+    return ast.Type{}
+}

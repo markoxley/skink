@@ -31,6 +31,8 @@ import "std/fmt"
 import "std/strconv"
 import "std/libc"
 
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
+
 // Skink_tls_client_connect_ex performs a client TLS handshake: sends SNI,
 // verifies the peer certificate when verify != 0, offers ALPN
 // "http/1.1", and reuses a cached session for host:port when available.
@@ -176,7 +178,7 @@ pub struct Client {
             return Response{status: 0, body: ""}, errors.New("empty response")
         }
         // NUL-terminate the raw buffer so string operations see the end.
-        buf[total] = 0
+        Skink_mem_write_byte(buf, int64(total), 0)
         // Locate the header/body boundary (\r\n\r\n) to extract just the body.
         bodyStart := 0
         for i := 0; i < total - 3; i = i + 1 {
@@ -247,7 +249,7 @@ pub struct Client {
             libc.free(buf)
             return Response{status: 0, body: ""}, errors.New("empty response")
         }
-        buf[total] = 0
+        Skink_mem_write_byte(buf, int64(total), 0)
         // Locate the header/body boundary (\r\n\r\n) to extract just the body.
         bodyStart := 0
         for i := 0; i < total - 3; i = i + 1 {
@@ -319,7 +321,7 @@ pub struct Client {
             libc.free(buf)
             return Response{status: 0, body: ""}, errors.New("empty response")
         }
-        buf[total] = 0
+        Skink_mem_write_byte(buf, int64(total), 0)
         // For POST responses we return the entire buffer (headers + body).
         body := str.Substr(buf, 0, total)
         libc.free(buf)
@@ -389,7 +391,7 @@ pub struct Client {
             libc.free(buf)
             return Response{status: 0, body: ""}, errors.New("empty response")
         }
-        buf[total] = 0
+        Skink_mem_write_byte(buf, int64(total), 0)
         body := str.Substr(buf, 0, total)
         libc.free(buf)
         return Response{status: 200, body: body}, errors.New("")

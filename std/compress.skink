@@ -24,7 +24,10 @@
 module compress
 
 import "std/errors"
+extern fn Skink_mem_byte(ptr: string, idx: int64) -> int
 import "std/libc"
+
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
 import "std/str"
 
 // External C functions for DEFLATE compression and CRC32 checksum.
@@ -35,10 +38,12 @@ extern fn Skink_crc32(data: string, len: int) -> int
 
 // writeLE32 writes a 32-bit little-endian integer into buf at offset.
 fn writeLE32(buf: string, offset: int, val: int) {
-    buf[offset] = val & 255
-    buf[offset + 1] = (val >> 8) & 255
-    buf[offset + 2] = (val >> 16) & 255
-    buf[offset + 3] = (val >> 24) & 255
+    // Raw writes: buf is a freshly allocated binary buffer, not a
+    // NUL-terminated string (comp_error.md #149).
+    Skink_mem_write_byte(buf, int64(offset), val & 255)
+    Skink_mem_write_byte(buf, int64(offset + 1), (val >> 8) & 255)
+    Skink_mem_write_byte(buf, int64(offset + 2), (val >> 16) & 255)
+    Skink_mem_write_byte(buf, int64(offset + 3), (val >> 24) & 255)
 }
 
 // GzipWriter wraps a writer and applies gzip compression.
@@ -69,7 +74,7 @@ pub struct GzipWriter {
         }
         // Copy incoming bytes into the buffer
         for i := 0; i < len; i = i + 1 {
-            self.buf[self.bufLen + i] = data[i]
+            Skink_mem_write_byte(self.buf, int64(self.bufLen + i), Skink_mem_byte(data, int64(i)))
         }
         self.bufLen = self.bufLen + len
         return len, errors.New("")
@@ -83,9 +88,20 @@ pub struct GzipWriter {
             return "", errors.New("GzipWriter already closed")
         }
         self.closed = true
-        // Allocate output buffer with worst-case bound
+        // Allocate output buffer with worst-case bound. Skink_compress_bound
+        // returns -1 for a negative length or one whose bound overflows
+        // int32 (near 2 GiB) — reject instead of passing a wrapped size
+        // to zlib (comp_error.md #154).
         bound := Skink_compress_bound(self.bufLen)
+        if bound <= 0 {
+            libc.free(self.buf)
+            return "", errors.New("compression failed")
+        }
         compressed := libc.calloc(bound, 1)
+        if int64(compressed) == 0 {
+            libc.free(self.buf)
+            return "", errors.New("out of memory")
+        }
         compressedLen := Skink_compress(self.buf, self.bufLen, compressed, bound)
         if compressedLen < 0 {
             libc.free(compressed)
@@ -98,12 +114,12 @@ pub struct GzipWriter {
         outLen := 10 + compressedLen + 8
         out := libc.calloc(outLen + 1, 1)
         // gzip header: magic, deflate method, no flags, no timestamps
-        out[0] = 31   // 0x1f
-        out[1] = 139  // 0x8b
-        out[2] = 8    // deflate
-        out[3] = 0    // flags
+        Skink_mem_write_byte(out, int64(0), 31)   // 0x1f
+        Skink_mem_write_byte(out, int64(1), 139)  // 0x8b
+        Skink_mem_write_byte(out, int64(2), 8)    // deflate
+        Skink_mem_write_byte(out, int64(3), 0)    // flags
         for i := 4; i < 10; i = i + 1 {
-            out[i] = 0
+            Skink_mem_write_byte(out, int64(i), 0)
         }
         // Copy compressed payload after the header
         libc.memcpy(string(int64(out) + int64(10)), compressed, compressedLen)
@@ -147,6 +163,9 @@ pub struct Deflater {
             return "", 0
         }
         out := libc.calloc(bound + 1, 1)
+        if int64(out) == 0 {
+            return "", 0
+        }
         compressedLen := Skink_compress(data, len, out, bound)
         if compressedLen < 0 {
             // Compression failed; clean up and return empty
@@ -163,11 +182,16 @@ pub struct Inflater {
     pub fn Decompress(self: Inflater, data: string, dataLen: int, outCap: int) -> string {
         // Negative sizes became huge uLong values in zlib — a caller-
         // supplied outCap of -1 made calloc(0) succeed and then zlib
-        // wrote unboundedly (VULN-13).
-        if dataLen < 0 || outCap <= 0 {
+        // wrote unboundedly (VULN-13). outCap near INT_MAX also wraps
+        // the +1 in the allocation and hands zlib a huge destLen with a
+        // tiny (or NULL) buffer (comp_error.md #154).
+        if dataLen < 0 || outCap <= 0 || outCap > 1073741824 {
             return ""
         }
         out := libc.calloc(outCap + 1, 1)
+        if int64(out) == 0 {
+            return ""
+        }
         rc := Skink_uncompress(data, dataLen, out, outCap)
         if rc < 0 {
             // Decompression failed; clean up and return empty
@@ -198,7 +222,13 @@ pub fn NewGzipWriter(level: int) -> GzipWriter {
 pub fn Compress(data: string) -> (string, errors.Error) {
     n := str.Len(data)
     bound := Skink_compress_bound(n)
+    if bound <= 0 {
+        return "", errors.New("compression failed")
+    }
     out := libc.calloc(bound + 9, 1)
+    if int64(out) == 0 {
+        return "", errors.New("out of memory")
+    }
     dest := string(int64(out) + int64(8))
     clen := Skink_compress(data, n, dest, bound)
     if clen < 0 {
@@ -221,8 +251,8 @@ pub fn DecompressBuf(data: string, dataLen: int) -> (string, errors.Error) {
     if dataLen < 8 {
         return "", errors.New("not a compress.Compress buffer")
     }
-    origSize := int64(int(data[0])) | (int64(int(data[1])) << 8) | (int64(int(data[2])) << 16) | (int64(int(data[3])) << 24)
-    clen := int64(int(data[4])) | (int64(int(data[5])) << 8) | (int64(int(data[6])) << 16) | (int64(int(data[7])) << 24)
+    origSize := int64(Skink_mem_byte(data, int64(0))) | (int64(Skink_mem_byte(data, int64(1))) << 8) | (int64(Skink_mem_byte(data, int64(2))) << 16) | (int64(Skink_mem_byte(data, int64(3))) << 24)
+    clen := int64(Skink_mem_byte(data, int64(4))) | (int64(Skink_mem_byte(data, int64(5))) << 8) | (int64(Skink_mem_byte(data, int64(6))) << 16) | (int64(Skink_mem_byte(data, int64(7))) << 24)
     // The header fields are u32: reject sign-bit values, a payload
     // extending past the caller-provided length, and absurd output sizes.
     if origSize < 0 || origSize > int64(268435456) {
@@ -233,7 +263,7 @@ pub fn DecompressBuf(data: string, dataLen: int) -> (string, errors.Error) {
     }
     payload := libc.malloc(int(clen) + 1)
     for i := 0; i < int(clen); i = i + 1 {
-        payload[i] = data[i + 8]
+        Skink_mem_write_byte(payload, int64(i), Skink_mem_byte(data, int64(i + 8)))
     }
     out := libc.calloc(int(origSize) + 1, 1)
     rc := Skink_uncompress(payload, int(clen), out, int(origSize))

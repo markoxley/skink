@@ -25,6 +25,8 @@ module reader
 
 import "std/libc"
 
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
+
 // Reader is a template interface for anything that can read bytes.
 // Concrete types provide their own Read method.
 template Reader {
@@ -60,7 +62,7 @@ pub fn ReadAll(r: Reader) -> string {
     }
     libc.free(chunk)
     // Null-terminate the accumulated data.
-    result[total] = 0
+    Skink_mem_write_byte(result, int64(total), 0)
     return result
 }
 

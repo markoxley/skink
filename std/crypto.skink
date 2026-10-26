@@ -26,6 +26,8 @@ module crypto
 import "std/str"
 import "std/libc"
 
+extern fn Skink_mem_byte(ptr: string, idx: int64) -> int
+
 // External OpenSSL hash function declarations.
 extern fn MD5(d: string, n: int64, md: string) -> string
 extern fn SHA1(d: string, n: int64, md: string) -> string
@@ -116,8 +118,10 @@ pub fn HmacSha256Bytes(key: string, keyLen: int, message: string, msgLen: int) -
     ipad := libc.calloc(blockSize, 1)
     opad := libc.calloc(blockSize, 1)
     for i := 0; i < blockSize; i = i + 1 {
-        ipad[i] = paddedKey[i] ^ 54  // 0x36
-        opad[i] = paddedKey[i] ^ 92  // 0x5c
+        // Raw reads/writes: the calloc'd buffers are not NUL-terminated,
+        // so a strlen-based bounds check on them is meaningless.
+        Skink_mem_write_byte(ipad, int64(i), Skink_mem_byte(paddedKey, int64(i)) ^ 54)  // 0x36
+        Skink_mem_write_byte(opad, int64(i), Skink_mem_byte(paddedKey, int64(i)) ^ 92)  // 0x5c
     }
 
     // Inner hash: H(ipad || message)
@@ -171,7 +175,10 @@ fn bytesToHex(data: string, length: int) -> string {
     hexChars := "0123456789abcdef"
     result := ""
     for i := 0; i < length; i = i + 1 {
-        b := int(data[i])
+        // Raw read: digest buffers are binary, not NUL-terminated, so a
+        // strlen-based bounds check on them is meaningless (comp_error.md
+        // #149).
+        b := Skink_mem_byte(data, int64(i))
         // High nibble → first hex char
         hi := (b >> 4) & 15
         // Low nibble → second hex char

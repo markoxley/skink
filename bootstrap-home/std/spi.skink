@@ -24,7 +24,10 @@
 module spi
 
 import "std/errors"
+extern fn Skink_mem_byte(ptr: string, idx: int64) -> int
 import "std/libc"
+
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
 import "std/strconv"
 
 extern fn open(path: string, flags: int) -> int
@@ -39,16 +42,17 @@ pub const SPI_IOC_WR_MAX_SPEED_HZ  = 0x40046B04
 
 // pack_u32_le writes a 32-bit little-endian integer into buf at byte offset off.
 fn pack_u32_le(buf: string, off: int, v: int) {
-    buf[off]     = v & 255
-    buf[off + 1] = (v >> 8) & 255
-    buf[off + 2] = (v >> 16) & 255
-    buf[off + 3] = (v >> 24) & 255
+    // Raw writes: buf is an ioctl parameter block, not a string.
+    Skink_mem_write_byte(buf, int64(off), v & 255)
+    Skink_mem_write_byte(buf, int64(off + 1), (v >> 8) & 255)
+    Skink_mem_write_byte(buf, int64(off + 2), (v >> 16) & 255)
+    Skink_mem_write_byte(buf, int64(off + 3), (v >> 24) & 255)
 }
 
 // pack_u64_le writes a 64-bit little-endian integer into buf at byte offset off.
 fn pack_u64_le(buf: string, off: int, v: int64) {
     for i := 0; i < 8; i = i + 1 {
-        buf[off + i] = int((v >> (i * 8)) & 255)
+        Skink_mem_write_byte(buf, int64(off + i), int((v >> (i * 8)) & 255))
     }
 }
 
@@ -86,22 +90,22 @@ pub struct Device {
             pack_u64_le(tr, 8, int64(rx))
             pack_u32_le(tr, 16, len)
             pack_u32_le(tr, 20, self.speedHz)
-            tr[26] = self.bits & 255
+            Skink_mem_write_byte(tr, int64(26), self.bits & 255)
             rc := ioctl(self.fd, int64(SPI_IOC_MESSAGE_1), int64(tr))
             libc.free(tr)
             if rc < 0 {
-                rx[0] = 0
+                Skink_mem_write_byte(rx, int64(0), 0)
                 return rx, errors.New("spi transfer ioctl failed")
             }
-            rx[len] = 0
+            Skink_mem_write_byte(rx, int64(len), 0)
             return rx, errors.New("")
         }
         // Workstation fallback: loopback tx into rx so callers can test
         // full-duplex buffer handling without hardware.
         for i := 0; i < len; i = i + 1 {
-            rx[i] = tx[i]
+            Skink_mem_write_byte(rx, int64(i), Skink_mem_byte(tx, int64(i)))
         }
-        rx[len] = 0
+        Skink_mem_write_byte(rx, int64(len), 0)
         return rx, errors.New("")
     }
 
@@ -170,9 +174,9 @@ pub fn Open(bus: int, chipSelect: int, speedHz: int, mode: int) -> (Device, erro
     fd := open(path, 2) // O_RDWR = 2
     if fd >= 0 {
         buf := libc.malloc(4)
-        buf[0] = mode & 255
+        Skink_mem_write_byte(buf, int64(0), mode & 255)
         ioctl(fd, int64(SPI_IOC_WR_MODE), int64(buf))
-        buf[0] = 8
+        Skink_mem_write_byte(buf, int64(0), 8)
         ioctl(fd, int64(SPI_IOC_WR_BITS_PER_WORD), int64(buf))
         pack_u32_le(buf, 0, speedHz)
         ioctl(fd, int64(SPI_IOC_WR_MAX_SPEED_HZ), int64(buf))

@@ -1,0 +1,6 @@
+// expect: cannot use 'match' as an identifier
+module main
+fn main() -> int {
+    match := true
+    return 0
+}

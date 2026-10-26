@@ -1113,6 +1113,7 @@ pub struct Checker {
     scopeDepth:    int  // the scope depth
     loopDepth:     int  // the loop depth
     breakDepth:    int  // the break depth
+    exprDepth:     int  // the expression recursion depth (maxCheckExprDepth)
     currentFn:     []TType  // the current function
     currentFnRetNames: []string  // the current function return value names
     structs:       declTable  // the structs
@@ -3316,13 +3317,30 @@ fn findVariant(tu: TType, name: string) -> TaggedVariant {
 
 // === Expression Checking ===
 
+// maxCheckExprDepth bounds type-checker expression recursion
+// (comp_error.md #150). The parser's maxExprDepth only limits *nested*
+// nesting; a left-leaning infix chain (1+1+1+... of arbitrary length)
+// produces an AST as deep as the chain, and the checker recurses into
+// it — unbounded recursion would overflow the C stack on malicious
+// input, crashing the compiler (and the LSP parsing an attacker file).
+const maxCheckExprDepth = 200
+
 // checkExpr type-checks an expression and returns its inferred type,
 // recording the result in exprTypes keyed by "file line:col" so the
 // emitter can recover types it can't re-derive (channel elements,
 // integer signedness). Internal recursion also flows through this
 // wrapper, so nested expressions are recorded too.
 fn checkExpr(c: *Checker, e: ast.Expr) -> TType {
+    c.exprDepth = c.exprDepth + 1
+    if c.exprDepth > maxCheckExprDepth {
+        if c.exprDepth == maxCheckExprDepth + 1 {
+            reportAt(c, e.line, e.col, "expression too deeply nested (max 200)")
+        }
+        c.exprDepth = c.exprDepth - 1
+        return unknownType()
+    }
     t := checkExprImpl(c, e)
+    c.exprDepth = c.exprDepth - 1
     if !c.suppressExprTypes && t.kind != 0 && t.kind != TK_UNKNOWN && e.line > 0 {
         key := str.Concat(c.currentFile, str.Concat(" ", str.Concat(strconv.Itoa(e.line), str.Concat(":", strconv.Itoa(e.col)))))
         c.exprTypes.Set(key, t)
@@ -4363,7 +4381,10 @@ fn checkMethodCall(c: *Checker, e: ast.Expr) -> TType {
     }
     var fnType TType
     if str.Len(structName) > 0 {
-        fnType = resolve(c, str.Concat(str.Concat(structName, "."), fa.fieldName))
+        // resolveWithKey — NOT resolve — so a qualified miss cannot
+        // suffix-fallback to a bare global of the same name (e.g. a
+        // Conn.Open field hijacked by fs.Open through "D.Open"→"Open").
+        fnType = resolveWithKey(c, str.Concat(str.Concat(structName, "."), fa.fieldName))
     }
     if fnType.kind == TK_UNKNOWN && str.Contains(structName, ".") {
         // Try the unqualified struct name too — methods are registered
@@ -4371,23 +4392,23 @@ fn checkMethodCall(c: *Checker, e: ast.Expr) -> TType {
         // which may be unqualified when the defining module was loaded
         // transitively.
         parts := splitOnLastDot(structName)
-        fnType = resolve(c, str.Concat(str.Concat(parts[1], "."), fa.fieldName))
+        fnType = resolveWithKey(c, str.Concat(str.Concat(parts[1], "."), fa.fieldName))
     }
     if fnType.kind == TK_UNKNOWN && !str.Contains(structName, ".") && str.Len(c.currentModule) > 0 {
         // Try current-module qualification — structs in the same module
         // are registered under "module.Type" but receiver types may carry
         // the short name.
-        fnType = resolve(c, str.Concat(str.Concat(str.Concat(c.currentModule, "."), structName), str.Concat(".", fa.fieldName)))
-    }
-    if fnType.kind == TK_UNKNOWN {
-        fnType = resolve(c, fa.fieldName)
+        fnType = resolveWithKey(c, str.Concat(str.Concat(str.Concat(c.currentModule, "."), structName), str.Concat(".", fa.fieldName)))
     }
     if fnType.kind == TK_UNKNOWN && str.Len(structName) > 0 {
         // The "method" may be a fn-typed struct field: h.f(args) calls
         // the closure handle stored in the field rather than a
-        // registered method. Type-check args against the field's
-        // signature; the emitter routes these through the indirect
-        // closure-call path.
+        // registered method. This must be checked BEFORE the bare-name
+        // resolve below — otherwise an unrelated same-named function
+        // (e.g. fs.Open vs a Conn.Open field) shadows the field and the
+        // call is checked against the wrong signature. Type-check args
+        // against the field's signature; the emitter routes these
+        // through the indirect closure-call path.
         decl := c.structs.Get(structName)
         if decl.kind != 0 {
             for i := 0; i < len(decl.structFields); i = i + 1 {
@@ -4404,6 +4425,30 @@ fn checkMethodCall(c: *Checker, e: ast.Expr) -> TType {
                         return checkCallArgs(c, e, fieldType, false)
                     }
                 }
+            }
+        }
+    }
+    if fnType.kind == TK_UNKNOWN {
+        // UFCS fallback: a module-level function `methodName(x, ...)`
+        // whose first parameter takes the receiver type. Require a
+        // plausible receiver match so an unrelated same-named function
+        // cannot steal the call.
+        cand := resolve(c, fa.fieldName)
+        if cand.kind == TK_FUNCTION {
+            ok := len(cand.params) > 0
+            if ok {
+                want := recvType
+                if want.kind == TK_POINTER {
+                    want = typeOptT(want.elem)
+                }
+                p0 := cand.params[0]
+                if p0.kind == TK_POINTER {
+                    p0 = typeOptT(p0.elem)
+                }
+                ok = checkerIsAssignable(c, p0, want) || checkerIsAssignable(c, p0, recvType)
+            }
+            if ok {
+                fnType = cand
             }
         }
     }

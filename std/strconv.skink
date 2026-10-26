@@ -25,6 +25,8 @@ module strconv
 
 import "std/libc"
 
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
+
 extern fn strtod(s: string, endptr: string) -> float
 
 // ParseInt parses a decimal integer string and returns (value, ok).
@@ -239,8 +241,8 @@ pub fn ParseFloat(s: string) -> (float, bool) {
 pub fn Itoa(n: int) -> string {
     if n == 0 {
         s := libc.malloc(2)
-        s[0] = 48
-        s[1] = 0
+        Skink_mem_write_byte(s, int64(0), 48)
+        Skink_mem_write_byte(s, int64(1), 0)
         return s
     }
     negative := false
@@ -266,14 +268,14 @@ pub fn Itoa(n: int) -> string {
     pos := len - 1
     // Write digits from least significant to most, then reverse by position.
     for val > 0 {
-        s[pos] = 48 + int(val % 10)
+        Skink_mem_write_byte(s, int64(pos), 48 + int(val % 10))
         val = val / 10
         pos = pos - 1
     }
     if negative {
-        s[0] = 45 // '-'
+        Skink_mem_write_byte(s, int64(0), 45) // '-'
     }
-    s[len] = 0
+    Skink_mem_write_byte(s, int64(len), 0)
     return s
 }
 
@@ -282,8 +284,8 @@ pub fn Itoa(n: int) -> string {
 pub fn Itoa64(n: int64) -> string {
     if n == int64(0) {
         s := libc.malloc(2)
-        s[0] = 48
-        s[1] = 0
+        Skink_mem_write_byte(s, int64(0), 48)
+        Skink_mem_write_byte(s, int64(1), 0)
         return s
     }
     negative := false
@@ -305,14 +307,14 @@ pub fn Itoa64(n: int64) -> string {
     pos := len - 1
     // Write digits from least significant to most, filling backwards.
     for val > int64(0) {
-        s[pos] = 48 + int(val % int64(10))
+        Skink_mem_write_byte(s, int64(pos), 48 + int(val % int64(10)))
         val = val / int64(10)
         pos = pos - 1
     }
     if negative {
-        s[0] = 45 // '-'
+        Skink_mem_write_byte(s, int64(0), 45) // '-'
     }
-    s[len] = 0
+    Skink_mem_write_byte(s, int64(len), 0)
     return s
 }
 

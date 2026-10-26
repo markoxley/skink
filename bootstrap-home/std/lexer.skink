@@ -834,8 +834,15 @@ pub fn NextToken(self: *Lexer) -> Token {
             return self.readString(96, line, col)
         }
     if ch == 0 {
-            return Token{kind: T_EOF, literal: "", line: line, col: col}
+        // Distinguish a real NUL byte in the source from end-of-input: a
+        // raw NUL is an error (its presence would otherwise silently
+        // truncate the file at that byte — comp_error.md #151).
+        if self.pos < self.inputLen {
+            self.readChar()
+            return Token{kind: T_ILLEGAL, literal: str.Substr(self.input, self.pos - 1, 1), line: line, col: col}
         }
+        return Token{kind: T_EOF, literal: "", line: line, col: col}
+    }
     if isDigit(ch) {
                 return self.readNumber(line, col)
             }
@@ -964,10 +971,22 @@ fn readNumber(self: *Lexer, line: int, col: int) -> Token {
 
 // readString consumes a string literal up to the closing quote.
 // It interprets a small set of C-style backslash escapes.
+//
+// Embedded NUL bytes are rejected (comp_error.md #151): the runtime
+// treats strings as NUL-terminated C strings (str.Len is strlen), so a
+// literal carrying a NUL byte silently truncates every stdlib operation
+// — Len/Concat/fs.WriteAll/exec args/paths — and string-index writes
+// into the invisible region are unreachable data. The `\0` escape
+// therefore produces a T_ILLEGAL token (positioned parse error) rather
+// than a valid string.
 fn readString(self: *Lexer, quote: int, line: int, col: int) -> Token {
     self.readChar() // consume opening quote
     builder := str.NewBuilder(64)
+    hasNul := false
     // Backtick strings are raw: no escape processing, may span lines.
+    // (A raw NUL byte in the source exits this loop; the byte itself is
+    // then reported as T_ILLEGAL by NextToken, so such strings are
+    // rejected too.)
     if quote == 96 {
         for self.ch != 96 && self.ch != 0 {
             str.WriteByte(&builder, self.ch)
@@ -976,6 +995,9 @@ fn readString(self: *Lexer, quote: int, line: int, col: int) -> Token {
         rawLiteral := str.String(builder)
         if self.ch == 96 {
             self.readChar() // consume closing backtick
+        }
+        if hasNul {
+            return Token{kind: T_ILLEGAL, literal: rawLiteral, line: line, col: col}
         }
         return Token{kind: T_STRING, literal: rawLiteral, line: line, col: col}
     }
@@ -997,8 +1019,11 @@ fn readString(self: *Lexer, quote: int, line: int, col: int) -> Token {
                 str.WriteByte(&builder, 39)
             } else if self.ch == 92 { // '\\' -> backslash
                 str.WriteByte(&builder, 92)
-            } else if self.ch == 48 { // '\0' -> NUL
-                str.WriteByte(&builder, 0)
+            } else if self.ch == 48 { // '\0' -> NUL (rejected, #151)
+                // Mark the literal illegal WITHOUT writing the NUL byte —
+                // str.Builder.WriteByte(0) panics (NUL bytes are rejected
+                // in strings), and the token is illegal anyway.
+                hasNul = true
             } else {
                 // Unknown escape: keep both characters (backslash and following)
                 str.WriteByte(&builder, 92)
@@ -1012,6 +1037,9 @@ fn readString(self: *Lexer, quote: int, line: int, col: int) -> Token {
     literal := str.String(builder)
     if self.ch == quote {
         self.readChar() // consume closing quote
+    }
+    if hasNul {
+        return Token{kind: T_ILLEGAL, literal: literal, line: line, col: col}
     }
     return Token{kind: T_STRING, literal: literal, line: line, col: col}
 }

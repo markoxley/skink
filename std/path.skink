@@ -25,6 +25,8 @@ module path
 
 import "std/buf"
 import "std/libc"
+
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
 import "std/str"
 
 // Join joins path elements with a single '/' separator.
@@ -68,7 +70,7 @@ pub fn Base(p: string) -> string {
     length := last - start + 1
     result := libc.malloc(length + 1)
     libc.memcpy(result, string(int64(p) + int64(start)), length)
-    result[length] = 0
+    Skink_mem_write_byte(result, int64(length), 0)
     return result
 }
 
@@ -103,7 +105,7 @@ pub fn Dir(p: string) -> string {
     length := last + 1
     result := libc.malloc(length + 1)
     libc.memcpy(result, p, length)
-    result[length] = 0
+    Skink_mem_write_byte(result, int64(length), 0)
     return result
 }
 
@@ -122,7 +124,7 @@ pub fn Ext(p: string) -> string {
             extLen := n - i
             result := libc.malloc(extLen + 1)
             libc.memcpy(result, string(int64(p) + int64(i)), extLen)
-            result[extLen] = 0
+            Skink_mem_write_byte(result, int64(extLen), 0)
             return result
         }
     }
@@ -253,7 +255,7 @@ pub fn IsAbsolute(p: string) -> bool {
 fn substring(s: string, offset: int, length: int) -> string {
     result := libc.malloc(length + 1)
     libc.memcpy(result, string(int64(s) + int64(offset)), length)
-    result[length] = 0
+    Skink_mem_write_byte(result, int64(length), 0)
     return result
 }
 

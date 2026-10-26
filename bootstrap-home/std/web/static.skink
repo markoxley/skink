@@ -31,6 +31,8 @@ import "std/path"
 import "std/web/types"
 import "std/libc"
 
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
+
 extern fn Skink_mem_alloc(size: int64) -> string
 extern fn Skink_mem_realloc(ptr: string, size: int64) -> string
 
@@ -165,7 +167,7 @@ fn serveFile(rootDir: string, req: types.Request, w: *types.ResponseWriter) {
         total = total + n
     }
     f.Close()
-    content[total] = 0
+    Skink_mem_write_byte(content, int64(total), 0)
 
     // Set the Content-Type based on the file extension and send the body
     // with an explicit byte count so NUL bytes are preserved.

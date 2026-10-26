@@ -148,10 +148,59 @@ fn testDebugMetadataEscaping() {
     fs.Remove(dir)
 }
 
+// TestProjectCompile (-c flag): a project directory compiles via its
+// skink.toml [package] entry/name, falls back to main.skink without a
+// manifest, honours -o ordering both ways, and rejects a missing
+// directory cleanly.
+fn testCompileProject() {
+    dir := Skink_fs_mktemp("dsec_proj", "")
+    fs.Remove(dir)
+    fs.Mkdir(dir)
+    io.WriteFile(str.Concat(dir, "/skink.toml"),
+        "[package]\nname = \"myapp\"\nentry = \"app.skink\"\n")
+    io.WriteFile(str.Concat(dir, "/app.skink"),
+        "module main\nfn main() -> int { return 7 }\n")
+    _, rc := os.ExecWithOutput([]string{dsBin(), "-c", dir})
+    dsCheck(rc == 0, "-c project compile failed")
+    dsCheck(fs.Exists(str.Concat(dir, "/myapp")), "-c produced no <dir>/<name> binary")
+    _, rrc := os.ExecWithOutput([]string{str.Concat(dir, "/myapp")})
+    dsCheck(rrc == 7, "-c built binary returns wrong exit code")
+
+    // Fallback: no manifest → main.skink, binary named after entry.
+    dir2 := Skink_fs_mktemp("dsec_proj2", "")
+    fs.Remove(dir2)
+    fs.Mkdir(dir2)
+    io.WriteFile(str.Concat(dir2, "/main.skink"),
+        "module main\nfn main() -> int { return 3 }\n")
+    _, rc2 := os.ExecWithOutput([]string{dsBin(), "-c", dir2})
+    dsCheck(rc2 == 0, "-c no-manifest compile failed")
+    dsCheck(fs.Exists(str.Concat(dir2, "/main")), "-c no-manifest produced no <dir>/main")
+
+    // -o must work both before and after -c.
+    out := str.Concat(dir, "/custom")
+    _, rc3 := os.ExecWithOutput([]string{dsBin(), "-c", dir, "-o", out})
+    dsCheck(rc3 == 0, "-c dir -o out ordering failed")
+    dsCheck(fs.Exists(out), "-o after -c produced no binary")
+
+    // Missing directory is a clean error, not a crash.
+    _, rc4 := os.ExecWithOutput([]string{dsBin(), "-c", str.Concat(dir, "/nope")})
+    dsCheck(rc4 != 0, "-c missing dir should fail")
+
+    fs.Remove(str.Concat(dir, "/skink.toml"))
+    fs.Remove(str.Concat(dir, "/app.skink"))
+    fs.Remove(str.Concat(dir, "/myapp"))
+    fs.Remove(out)
+    fs.Remove(dir)
+    fs.Remove(str.Concat(dir2, "/main.skink"))
+    fs.Remove(str.Concat(dir2, "/main"))
+    fs.Remove(dir2)
+}
+
 fn main() -> int {
     testSemicolonFileName()
     testOutputInjection()
     testDebugMetadataEscaping()
+    testCompileProject()
     if dsFailures > 0 {
         println(str.Concat("driver_security_test: ", strconv.Itoa(dsFailures)))
         return 1

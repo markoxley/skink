@@ -25,6 +25,7 @@ module fs_test
 
 import "std/fs"
 import "std/str"
+import "std/strconv"
 import "testing"
 
 // TestOpenWriteRead verifies Open/WriteChar/Close and ReadAll roundtrip.
@@ -153,4 +154,35 @@ pub fn TestOpenInvalidPath() {
     if err.message == "" {
         Errorf("Open on invalid path should error")
     }
+}
+
+// TestReadAllRCReclaimed guards comp_error.md #153: ReadAll's buffer must
+// be RC-managed so dropping the reference reclaims it (a raw malloc
+// leaked once per call in every long-running caller — LSP, scales).
+// LiveObjects counts RC kind-0 blocks; the read buffer must not increase
+// the live count once the string goes out of scope.
+fn readAndDrop(path: string) -> int {
+    data, err := fs.ReadAll(path)
+    if err.message != "" {
+        return -1
+    }
+    // Return the length; `data` is released when this frame returns.
+    return str.Len(data)
+}
+
+pub fn TestReadAllRCReclaimed() {
+    path := "/tmp/skink_fs_rc_test.txt"
+    fs.Remove(path)
+    fs.WriteAll(path, "hello world")
+
+    before := testing.LiveObjects()
+    n := readAndDrop(path)
+    after := testing.LiveObjects()
+    if n != 11 {
+        Errorf("ReadAll should read 11 bytes")
+    }
+    if after != before {
+        Errorf(str.Concat(str.Concat("ReadAll buffer leaked: live objects ", strconv.Itoa(before)), str.Concat(" -> ", strconv.Itoa(after))))
+    }
+    fs.Remove(path)
 }

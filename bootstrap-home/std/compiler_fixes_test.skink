@@ -1915,3 +1915,53 @@ pub fn TestStructMapAndSetFields() {
     testing.AssertEqualInt(10, int(h.scores["alpha"]), "map struct field alpha")
     testing.AssertEqualInt(25, int(h.scores["beta"]), "map struct field beta")
 }
+
+// ==========================================================================
+// fn-typed struct fields + closure vars with multi-value returns
+// ==========================================================================
+
+// FnFieldBox mimics the driver-vtable pattern: a struct whose field holds
+// a function with a multi-value return signature.
+struct FnFieldBox {
+    Open: fn(int) -> (int, errors.Error)
+}
+
+// fnFieldOpen is a concrete two-return function stored in FnFieldBox.
+fn fnFieldOpen(x: int) -> (int, errors.Error) {
+    return x + 1, errors.New("")
+}
+
+// fnFieldPropCaller exercises `expr?` propagation on a field-closure call
+// inside a function that itself returns an error.
+fn fnFieldPropCaller(b: *FnFieldBox) -> (int, errors.Error) {
+    v := b.Open(1)?
+    return v * 10, errors.New("")
+}
+
+// TestFnFieldMultiReturn guards the emitter fix where tuple unpacking,
+// tuple assignment, ?-propagation, and exprLLType all miscompiled calls
+// through fn-typed struct fields and closure variables holding
+// multi-return functions (the element types defaulted to i32 and the
+// aggregate type was not resolved from the callee's signature).
+pub fn TestFnFieldMultiReturn() {
+    b := FnFieldBox{Open: fnFieldOpen}
+    // Field-closure call unpacking.
+    v, e := b.Open(5)
+    testing.AssertEqualString("", e.message, "field closure error nil")
+    testing.AssertEqualInt(6, v, "field closure result")
+    // Same call through a variable holding the closure handle.
+    f := b.Open
+    v2, e2 := f(7)
+    testing.AssertEqualString("", e2.message, "aliased closure error nil")
+    testing.AssertEqualInt(8, v2, "aliased closure result")
+    // Tuple-assign form (non-declaration targets).
+    v3 := 0
+    var e3 errors.Error
+    v3, e3 = b.Open(9)
+    testing.AssertEqualString("", e3.message, "tuple-assign error nil")
+    testing.AssertEqualInt(10, v3, "tuple-assign result")
+    // ?-propagation extracts the value type correctly.
+    pv, pe := fnFieldPropCaller(&b)
+    testing.AssertEqualString("", pe.message, "propagation error nil")
+    testing.AssertEqualInt(20, pv, "propagated value")
+}

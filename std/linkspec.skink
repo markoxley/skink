@@ -1,0 +1,482 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/linkspec.skink
+// Purpose: Parses and validates the [link] section of a skink.toml
+//          manifest, which lets a package declare native link and
+//          compile requirements — libraries, library and include search
+//          paths, compile/link flags, and C/C++ source files that clang
+//          compiles and links in the same invocation.
+//
+//          The compiler driver applies the [link] section of the nearest
+//          ancestor skink.toml of every resolved source file: the
+//          project's own manifest plus each cached mod/<owner>/<repo>
+//          package (including subpath packages carrying their own
+//          manifest). This gives scales-installed modules a declarative
+//          way to require native dependencies such as OpenCV or SDL2.
+//
+//          Example:
+//
+//            [link]
+//            libs = ["opencv_core", "opencv_imgproc"]
+//            lib_paths = ["native/lib"]          # -> -L<dir>
+//            include_paths = ["native/include"]  # -> -I<dir>
+//            sources = ["native/shim.cpp"]       # compiled into the binary
+//            cflags = ["-fPIC"]
+//            ldflags = ["-Wl,-rpath,/opt/lib"]
+//            frameworks = ["Cocoa"]              # macOS only
+//
+//          Validation rejects absolute paths, parent traversals, and
+//          flag values that do not start with '-', so a crafted manifest
+//          cannot smuggle extra positional arguments into the clang
+//          argv array (the driver execs argv directly, no shell).
+//
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module linkspec
+
+import "std/ast"
+import "std/errors"
+import "std/fs"
+import "std/str"
+
+// LinkSpec holds the parsed [link] section of a skink.toml manifest.
+// All path-bearing fields are relative to the manifest's directory.
+pub struct LinkSpec {
+    Libs:          []string // library names linked as -l<name>
+    LibPaths:      []string // library search dirs emitted as -L<dir>
+    IncludePaths:  []string // header search dirs emitted as -I<dir>
+    Sources:       []string // C/C++/asm files compiled into the binary
+    CFlags:        []string // extra compile flags (each starts with '-')
+    LDFlags:       []string // extra link flags (each starts with '-')
+    Frameworks:    []string // macOS frameworks emitted as -framework <name>
+    Present:       bool     // whether a [link] section was found at all
+}
+
+// stripComment removes a '#' comment from a TOML line while respecting
+// double-quoted strings (same rule as scales' manifest parser).
+fn stripComment(line: string) -> string {
+    inQuotes := false
+    n := str.Len(line)
+    for i := 0; i < n; i = i + 1 {
+        c := line[i]
+        if c == 34 { // '"'
+            if i == 0 || line[i - 1] != 92 {
+                inQuotes = !inQuotes
+            }
+        } else if c == 35 && !inQuotes { // '#'
+            return str.Substr(line, 0, i)
+        }
+    }
+    return line
+}
+
+// unquote removes surrounding double or single quotes from a TOML
+// string literal.
+fn unquote(s: string) -> string {
+    t := str.Trim(s)
+    n := str.Len(t)
+    if n >= 2 {
+        if (t[0] == 34 && t[n - 1] == 34) || (t[0] == 39 && t[n - 1] == 39) {
+            return str.Substr(t, 1, n - 2)
+        }
+    }
+    return t
+}
+
+// parseArray parses a TOML array-of-strings value ("[\"a\", 'b']") into
+// its elements. Returns (elements, error) — error is "" on success.
+fn parseArray(val: string, key: string) -> ([]string, string) {
+    var out []string
+    v := str.Trim(val)
+    if str.Len(v) < 2 || v[0] != 91 || v[str.Len(v) - 1] != 93 { // '[' ']'
+        return out, str.Concat("linkspec: [link] key '", str.Concat(key, "' must be a string array"))
+    }
+    inner := str.Substr(v, 1, str.Len(v) - 2)
+    // Split on commas not inside quotes — array elements are always
+    // quoted strings so embedded commas inside quotes are preserved.
+    var elem []string
+    cur := ""
+    inQ := false
+    qc := 0
+    n := str.Len(inner)
+    for i := 0; i < n; i = i + 1 {
+        c := inner[i]
+        if (c == 34 || c == 39) && !inQ {
+            inQ = true
+            qc = c
+            cur = str.Concat(cur, str.Substr(inner, i, 1))
+        } else if inQ && c == qc {
+            inQ = false
+            cur = str.Concat(cur, str.Substr(inner, i, 1))
+        } else if c == 44 && !inQ { // ','
+            if str.Len(str.Trim(cur)) > 0 {
+                elem = append(elem, cur)
+            }
+            cur = ""
+        } else {
+            cur = str.Concat(cur, str.Substr(inner, i, 1))
+        }
+    }
+    if str.Len(str.Trim(cur)) > 0 {
+        elem = append(elem, cur)
+    }
+    for i := 0; i < len(elem); i = i + 1 {
+        out = append(out, unquote(elem[i]))
+    }
+    return out, ""
+}
+
+// Parse extracts the [link] section from skink.toml content. Returns the
+// spec (Present=false when absent) and a list of soft errors for
+// malformed entries. Multi-line arrays (entries spanning lines until the
+// closing ']') are supported.
+pub fn Parse(content: string) -> (LinkSpec, []string) {
+    var spec LinkSpec
+    var errs []string
+    section := ""
+    lines := str.Split(content, "\n")
+    i := 0
+    for i < len(lines) {
+        cleaned := str.Trim(stripComment(str.Replace(lines[i], "\r", "")))
+        i = i + 1
+        if str.Len(cleaned) == 0 {
+            continue
+        }
+        if str.StartsWith(cleaned, "[") && str.EndsWith(cleaned, "]") &&
+            str.Len(cleaned) > 2 && cleaned[1] != 91 {
+            // Section header — but not the array-open of a value (those
+            // were already consumed by the multi-line accumulator below).
+            section = str.Trim(str.Substr(cleaned, 1, str.Len(cleaned) - 2))
+            continue
+        }
+        eqIdx := str.IndexOf(cleaned, "=")
+        if eqIdx < 0 {
+            continue
+        }
+        key := unquote(str.Substr(cleaned, 0, eqIdx))
+        val := str.Trim(str.Substr(cleaned, eqIdx + 1, str.Len(cleaned) - eqIdx - 1))
+        // Multi-line array: keep appending lines until a ']' balances
+        // the opening '['.
+        if str.StartsWith(val, "[") && !str.EndsWith(val, "]") {
+            for i < len(lines) {
+                more := str.Trim(stripComment(str.Replace(lines[i], "\r", "")))
+                i = i + 1
+                val = str.Concat(val, str.Concat(" ", more))
+                if str.EndsWith(more, "]") || str.Contains(more, "]") {
+                    break
+                }
+            }
+        }
+        if !str.Equal(section, "link") {
+            continue
+        }
+        spec.Present = true
+        var elems []string
+        var aerr string
+        if str.Equal(key, "libs") {
+            elems, aerr = parseArray(val, key)
+            spec.Libs = elems
+        } else if str.Equal(key, "lib_paths") {
+            elems, aerr = parseArray(val, key)
+            spec.LibPaths = elems
+        } else if str.Equal(key, "include_paths") {
+            elems, aerr = parseArray(val, key)
+            spec.IncludePaths = elems
+        } else if str.Equal(key, "sources") {
+            elems, aerr = parseArray(val, key)
+            spec.Sources = elems
+        } else if str.Equal(key, "cflags") {
+            elems, aerr = parseArray(val, key)
+            spec.CFlags = elems
+        } else if str.Equal(key, "ldflags") {
+            elems, aerr = parseArray(val, key)
+            spec.LDFlags = elems
+        } else if str.Equal(key, "frameworks") {
+            elems, aerr = parseArray(val, key)
+            spec.Frameworks = elems
+        }
+        if str.Len(aerr) > 0 {
+            errs = append(errs, aerr)
+        }
+    }
+    return spec, errs
+}
+
+// isRelativePath reports whether p is a usable relative path: not
+// absolute ("/x", "C:\x"), no "~" home expansion, and no ".." traversal.
+fn isRelativePath(p: string) -> bool {
+    if str.Len(p) == 0 {
+        return false
+    }
+    if p[0] == 47 || p[0] == 92 || p[0] == 126 { // '/', '\\', '~'
+        return false
+    }
+    if str.Len(p) >= 2 && p[1] == 58 { // "X:" drive
+        return false
+    }
+    segs := str.Split(str.Replace(p, "\\", "/"), "/")
+    for i := 0; i < len(segs); i = i + 1 {
+        if str.Equal(segs[i], "..") {
+            return false
+        }
+    }
+    return true
+}
+
+// isLibName reports whether s is a safe -l library name: letters,
+// digits, and the usual "libfoo.so.1" decorations, nothing that could
+// be reinterpreted as a flag or path.
+fn isLibName(s: string) -> bool {
+    n := str.Len(s)
+    if n == 0 {
+        return false
+    }
+    for i := 0; i < n; i = i + 1 {
+        c := int(s[i]) & 0xFF
+        ok := (c >= 97 && c <= 122) || (c >= 65 && c <= 90) ||
+            (c >= 48 && c <= 57) || c == 95 || c == 46 || c == 43 || c == 58
+        // letter, digit, '_', '.', '+', ':' (for -l:libfoo.so form)
+        if !ok {
+            return false
+        }
+    }
+    return true
+}
+
+// isFlag reports whether s is a single compiler/linker flag: starts
+// with '-' and contains no whitespace (each element becomes one argv
+// entry, so embedded spaces must be split by the manifest author).
+fn isFlag(s: string) -> bool {
+    n := str.Len(s)
+    if n < 2 || s[0] != 45 { // '-'
+        return false
+    }
+    for i := 0; i < n; i = i + 1 {
+        c := s[i]
+        if c == 32 || c == 9 || c == 10 || c == 13 { // space, tab, lf, cr
+            return false
+        }
+    }
+    return true
+}
+
+// isSourceName reports whether s ends in a compilable source extension.
+fn isSourceName(s: string) -> bool {
+    return str.EndsWith(s, ".c") || str.EndsWith(s, ".cc") ||
+        str.EndsWith(s, ".cpp") || str.EndsWith(s, ".cxx") ||
+        str.EndsWith(s, ".s") || str.EndsWith(s, ".S")
+}
+
+// Validate checks a parsed spec against the manifest directory:
+// paths must be relative and confined to the package tree, sources must
+// exist, and every value must survive intact as a single argv element.
+// Returns a list of error messages (empty when valid).
+pub fn Validate(spec: LinkSpec, manifestDir: string) -> []string {
+    var errs []string
+    for i := 0; i < len(spec.Libs); i = i + 1 {
+        if !isLibName(spec.Libs[i]) {
+            errs = append(errs, str.Concat("linkspec: invalid library name: ", spec.Libs[i]))
+        }
+    }
+    for i := 0; i < len(spec.Frameworks); i = i + 1 {
+        if !isLibName(spec.Frameworks[i]) {
+            errs = append(errs, str.Concat("linkspec: invalid framework name: ", spec.Frameworks[i]))
+        }
+    }
+    for i := 0; i < len(spec.LibPaths); i = i + 1 {
+        if !isRelativePath(spec.LibPaths[i]) {
+            errs = append(errs, str.Concat("linkspec: lib_paths entry must be a relative path inside the package: ", spec.LibPaths[i]))
+        }
+    }
+    for i := 0; i < len(spec.IncludePaths); i = i + 1 {
+        if !isRelativePath(spec.IncludePaths[i]) {
+            errs = append(errs, str.Concat("linkspec: include_paths entry must be a relative path inside the package: ", spec.IncludePaths[i]))
+        }
+    }
+    for i := 0; i < len(spec.Sources); i = i + 1 {
+        s := spec.Sources[i]
+        if !isRelativePath(s) {
+            errs = append(errs, str.Concat("linkspec: sources entry must be a relative path inside the package: ", s))
+            continue
+        }
+        if !isSourceName(s) {
+            errs = append(errs, str.Concat("linkspec: sources entry is not a C/C++/asm file: ", s))
+            continue
+        }
+        full := str.Concat(manifestDir, str.Concat("/", s))
+        if !fs.IsFile(full) {
+            errs = append(errs, str.Concat("linkspec: source file not found: ", full))
+        }
+    }
+    for i := 0; i < len(spec.CFlags); i = i + 1 {
+        if !isFlag(spec.CFlags[i]) {
+            errs = append(errs, str.Concat("linkspec: cflags entries must be single flags starting with '-': ", spec.CFlags[i]))
+        }
+    }
+    for i := 0; i < len(spec.LDFlags); i = i + 1 {
+        if !isFlag(spec.LDFlags[i]) {
+            errs = append(errs, str.Concat("linkspec: ldflags entries must be single flags starting with '-': ", spec.LDFlags[i]))
+        }
+    }
+    return errs
+}
+
+// ClangArgs converts a validated spec into clang argv elements, in the
+// order they should appear after the base object/library inputs:
+// include paths and compile flags first, then source files, then
+// library search paths, libraries, frameworks, and link flags. Source
+// paths are emitted relative to manifestDir so clang resolves them.
+pub fn ClangArgs(spec: LinkSpec, manifestDir: string) -> []string {
+    var args []string
+    for i := 0; i < len(spec.IncludePaths); i = i + 1 {
+        args = append(args, str.Concat("-I", str.Concat(manifestDir, str.Concat("/", spec.IncludePaths[i]))))
+    }
+    for i := 0; i < len(spec.CFlags); i = i + 1 {
+        args = append(args, spec.CFlags[i])
+    }
+    for i := 0; i < len(spec.Sources); i = i + 1 {
+        args = append(args, str.Concat(manifestDir, str.Concat("/", spec.Sources[i])))
+    }
+    for i := 0; i < len(spec.LibPaths); i = i + 1 {
+        args = append(args, str.Concat("-L", str.Concat(manifestDir, str.Concat("/", spec.LibPaths[i]))))
+    }
+    for i := 0; i < len(spec.Libs); i = i + 1 {
+        args = append(args, str.Concat("-l", spec.Libs[i]))
+    }
+    for i := 0; i < len(spec.Frameworks); i = i + 1 {
+        args = append(args, "-framework")
+        args = append(args, spec.Frameworks[i])
+    }
+    for i := 0; i < len(spec.LDFlags); i = i + 1 {
+        args = append(args, spec.LDFlags[i])
+    }
+    return args
+}
+
+// dirName returns the parent directory of p (last-component split on
+// both separators), or p itself when it has no parent.
+fn dirName(p: string) -> string {
+    n := str.Len(p)
+    for i := n - 1; i >= 0; i = i - 1 {
+        if p[i] == 47 || p[i] == 92 { // '/' '\\'
+            if i == 0 {
+                return str.Substr(p, 0, 1)
+            }
+            return str.Substr(p, 0, i)
+        }
+    }
+    return "."
+}
+
+// pkgRootFor returns the scales package root for a cached module file
+// path "<cache>/packages/<owner>/<repo>/<version>/<rest>": the path up
+// to and including <version>. Returns "" when fp is not under a
+// /packages/ tree.
+fn pkgRootFor(fp: string) -> string {
+    norm := str.Replace(fp, "\\", "/")
+    idx := str.IndexOf(norm, "/packages/")
+    if idx < 0 {
+        return ""
+    }
+    rest := str.Substr(norm, idx + 10, str.Len(norm) - idx - 10)
+    parts := str.Split(rest, "/")
+    if len(parts) < 4 {
+        // Need owner/repo/version/<file> at minimum.
+        return ""
+    }
+    prefix := str.Substr(norm, 0, idx + 10)
+    return str.Concat(prefix, str.Concat(parts[0], str.Concat("/", str.Concat(parts[1], str.Concat("/", parts[2])))))
+}
+
+// findManifest walks upward from startDir looking for skink.toml,
+// stopping (inclusive) at boundDir. Returns the manifest path or "".
+fn findManifest(startDir: string, boundDir: string) -> string {
+    d := startDir
+    for {
+        cand := str.Concat(d, "/skink.toml")
+        if fs.IsFile(cand) {
+            return cand
+        }
+        if str.Equal(d, boundDir) {
+            return ""
+        }
+        parent := dirName(d)
+        if str.Equal(parent, d) {
+            return ""
+        }
+        d = parent
+    }
+    return ""
+}
+
+// ArgsForDecls collects the clang arguments implied by the [link]
+// sections governing every resolved source file in decls. For cached
+// module files the search walks up to the scales package root (covering
+// subpath manifests); for all other files it walks up no further than
+// the parent of the entry directory, which locates the project's own
+// manifest and in-repo module manifests without leaking into unrelated
+// ancestor directories. Each manifest is parsed and validated once.
+// Returns (args, errors); non-empty errors should fail the build.
+pub fn ArgsForDecls(entryDir: string, decls: []ast.Stmt) -> ([]string, []string) {
+    var args []string
+    var errs []string
+    seen := make(map[string]bool)
+    entryBound := dirName(entryDir)
+
+    for i := 0; i < len(decls); i = i + 1 {
+        fp := decls[i].filePath
+        if str.Len(fp) == 0 {
+            continue
+        }
+        pkgRoot := pkgRootFor(fp)
+        bound := entryBound
+        if str.Len(pkgRoot) > 0 {
+            bound = pkgRoot
+        }
+        manifestPath := findManifest(dirName(fp), bound)
+        if str.Len(manifestPath) == 0 || seen[manifestPath] {
+            continue
+        }
+        seen[manifestPath] = true
+        content, rerr := fs.ReadAll(manifestPath)
+        if rerr.message != "" {
+            continue
+        }
+        spec, perrs := Parse(content)
+        if !spec.Present {
+            continue
+        }
+        for e := 0; e < len(perrs); e = e + 1 {
+            errs = append(errs, str.Concat(manifestPath, str.Concat(": ", perrs[e])))
+        }
+        manifestDir := dirName(manifestPath)
+        verrs := Validate(spec, manifestDir)
+        for e := 0; e < len(verrs); e = e + 1 {
+            errs = append(errs, str.Concat(manifestPath, str.Concat(": ", verrs[e])))
+        }
+        if len(verrs) == 0 {
+            carg := ClangArgs(spec, manifestDir)
+            for a := 0; a < len(carg); a = a + 1 {
+                args = append(args, carg[a])
+            }
+        }
+    }
+    return args, errs
+}

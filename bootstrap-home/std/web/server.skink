@@ -30,6 +30,8 @@ import "std/fmt"
 import "std/strconv"
 import "std/errors"
 import "std/libc"
+
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
 import "std/sync"
 import "std/time"
 import "std/waitgroup"
@@ -128,6 +130,19 @@ pub struct Server {
         self.activeConns = self.activeConns - 1
         self.slotMu.Unlock()
         self.slotCond.Signal()
+    }
+
+    // SetLimits configures the server's resource limits before
+    // ListenAndServe[TLS]. Each value selects the documented default
+    // when <= 0: maxRequestBytes bounds a single request head+body
+    // (default 1 MiB — raise for file-upload routes), readTimeoutMs and
+    // writeTimeoutMs bound each socket operation (default 30 s), and
+    // maxConns bounds concurrent connections (default 512).
+    pub fn SetLimits(self: *Server, maxRequestBytes: int, readTimeoutMs: int, writeTimeoutMs: int, maxConns: int) {
+        self.maxRequestBytes = maxRequestBytes
+        self.readTimeoutMs = readTimeoutMs
+        self.writeTimeoutMs = writeTimeoutMs
+        self.maxConns = maxConns
     }
 
     // AddTLSCertificate registers an additional cert/key pair served
@@ -290,10 +305,14 @@ pub struct Server {
         }()
         maxReq, rto, wto := self.effectiveLimits()
         conn.SetTimeouts(rto, wto)
-        r := connReader{conn: conn, ssl: 0, buf: libc.malloc(8192), bufCap: 8192, len: 0, head: 0, max: maxReq}
-        self.serveRequests(&r)
+        // RC buffer: Skink_str_len is then O(1) and deterministic (size-1)
+        // for the indexed header scans and the compaction loop.
+        r := connReader{conn: conn, ssl: 0, buf: Skink_mem_alloc(int64(8192)), bufCap: 8192, len: 0, head: 0, max: maxReq}
+        hijacked := self.serveRequests(&r)
         libc.free(r.buf)
-        conn.Close()
+        if !hijacked {
+            conn.Close()
+        }
     }
 
     // handleTLSConn wraps an accepted connection in TLS, then serves
@@ -312,40 +331,64 @@ pub struct Server {
             conn.Close()
             return
         }
-        r := connReader{conn: conn, ssl: ssl, buf: libc.malloc(8192), bufCap: 8192, len: 0, head: 0, max: maxReq}
-        self.serveRequests(&r)
+        r := connReader{conn: conn, ssl: ssl, buf: Skink_mem_alloc(int64(8192)), bufCap: 8192, len: 0, head: 0, max: maxReq}
+        hijacked := self.serveRequests(&r)
         libc.free(r.buf)
-        Skink_tls_close(ssl)
-        conn.Close()
+        if !hijacked {
+            Skink_tls_close(ssl)
+            conn.Close()
+        }
     }
 
     // serveRequests runs the keep-alive request loop shared by the
-    // plain-TCP and TLS paths.
-    fn serveRequests(self: *Server, r: *connReader) {
+    // plain-TCP and TLS paths. Returns true when a handler hijacked the
+    // connection via ResponseWriter.Hijack — in that case the callback
+    // owns the connection (and TLS handle) and the caller must not
+    // close either.
+    fn serveRequests(self: *Server, r: *connReader) -> bool {
         for {
             req, code := self.readRequest(r)
             if code == 400 {
                 self.sendError(r, 400)
-                return
+                return false
             }
             if code == 413 {
                 self.sendError(r, 413)
-                return
+                return false
             }
             if code != 200 {
                 // Connection closed or timed out — nothing more to send.
-                return
+                return false
             }
             w := types.ResponseWriter{status: 200, headers: make(map[string]string), body: "", bodyBuf: "", bodyLen: 0, bodyCap: 0}
             self.handler.ServeHTTP(req, &w)
+            if w.Hijacked() {
+                // The handler takes over the connection: hand it the
+                // socket, the TLS handle (0 for plain HTTP), and any
+                // bytes the buffered reader already consumed past the
+                // end of this request — those bytes belong to the
+                // hijacked protocol (e.g. the first WebSocket frames
+                // pipelined with the Upgrade request).
+                leftoverLen := r.len - r.head
+                leftover := ""
+                if leftoverLen > 0 {
+                    lb := libc.malloc(leftoverLen + 1)
+                    libc.memcpy(lb, string(int64(r.buf) + int64(r.head)), leftoverLen)
+                    Skink_mem_write_byte(lb, int64(leftoverLen), 0)
+                    leftover = lb
+                }
+                w.hijackFn(r.conn, r.ssl, leftover, leftoverLen)
+                return true
+            }
             keepAlive := wantsKeepAlive(req)
             if !self.sendResponse(r, &w, keepAlive, str.ToUpper(req.Method()) == "HEAD") {
-                return
+                return false
             }
             if !keepAlive {
-                return
+                return false
             }
         }
+        return false
     }
 
     // readRequest parses one complete HTTP request from the buffered
@@ -379,10 +422,16 @@ pub struct Server {
         // pure ASCII, so strlen-based parsing is safe there.
         hbuf := libc.malloc(headLen + 1)
         libc.memcpy(hbuf, string(int64(r.buf) + int64(r.head)), headLen)
-        hbuf[headLen] = 0
+        Skink_mem_write_byte(hbuf, int64(headLen), 0)
         req := parseRequestHead(hbuf)
         libc.free(hbuf)
         if str.Len(req.Method()) == 0 || str.Len(req.Path()) == 0 {
+            return empty, 400
+        }
+        // Duplicate Content-Length headers make the body boundary
+        // ambiguous (request smuggling behind a proxy, comp_error.md
+        // #155) — reject outright.
+        if req.DupCL() {
             return empty, 400
         }
         // 3. Determine body framing.
@@ -432,7 +481,7 @@ pub struct Server {
             if code != 200 {
                 return empty, code
             }
-            body[blen] = 0
+            Skink_mem_write_byte(body, int64(blen), 0)
             req.bodyBuf = body
             req.bodyLen = blen
             req.body = body
@@ -446,11 +495,18 @@ pub struct Server {
             if contentLen > 0 {
                 libc.memcpy(bbuf, string(int64(r.buf) + int64(bodyStart)), contentLen)
             }
-            bbuf[contentLen] = 0
+            Skink_mem_write_byte(bbuf, int64(contentLen), 0)
             req.bodyBuf = bbuf
             req.bodyLen = contentLen
             req.body = bbuf
             r.head = bodyStart + contentLen
+        }
+        // Record the real socket peer — the only client-address value
+        // that cannot be forged in headers (comp_error.md #146).
+        peerIP, peerPort := r.conn.PeerAddr()
+        if str.Len(peerIP) > 0 {
+            req.SetPeer(str.Concat(peerIP,
+                str.Concat(":", strconv.Itoa64(int64(peerPort)))))
         }
         return req, 200
     }
@@ -849,6 +905,7 @@ fn parseRequestHead(headStr: string) -> types.Request {
     query := ""
     proto := "HTTP/1.0"
     headers := make(map[string]string)
+    dupCL := false
 
     // Pick the line ending style: prefer CRLF, tolerate bare LF.
     sep := "\r\n"
@@ -882,21 +939,32 @@ fn parseRequestHead(headStr: string) -> types.Request {
     path = types.URLDecode(path, false)
 
     // Parse headers; keys are lowercased for case-insensitive lookup.
+    // A second Content-Length header marks the request ambiguous (a
+    // front-end proxy and this server could disagree on the body
+    // boundary — request smuggling, comp_error.md #155) — the header map
+    // would otherwise silently keep only the last value.
     if firstLineEnd < str.Len(headStr) {
         headerBlock := str.Substr(headStr, firstLineEnd + str.Len(sep), str.Len(headStr) - firstLineEnd - str.Len(sep))
         headerLines := str.Split(headerBlock, sep)
+        clSeen := false
         for i := 0; i < len(headerLines); i = i + 1 {
             line := headerLines[i]
             colon := str.IndexOf(line, ":")
             if colon >= 0 {
                 key := str.ToLower(str.Substr(line, 0, colon))
                 value := str.Trim(str.Substr(line, colon + 1, str.Len(line) - colon - 1))
+                if str.Equal(key, "content-length") {
+                    if clSeen {
+                        dupCL = true
+                    }
+                    clSeen = true
+                }
                 headers[key] = value
             }
         }
     }
 
-    return types.Request{method: method, path: path, query: query, proto: proto, headers: headers, params: make(map[string]string), body: "", bodyBuf: "", bodyLen: 0}
+    return types.Request{method: method, path: path, query: query, proto: proto, headers: headers, params: make(map[string]string), body: "", bodyBuf: "", bodyLen: 0, dupCL: dupCL}
 }
 
 // statusText returns the standard HTTP reason phrase for a status code
@@ -964,19 +1032,21 @@ pub fn SerializeResponse(w: types.ResponseWriter) -> string {
 
 // stripCRLF removes carriage-return and line-feed bytes from a header
 // name or value so a handler cannot inject extra headers or split the
-// response (comp_error.md #55).
+// response (comp_error.md #55). RC-managed so the stripped copy is
+// reclaimed with the response temporaries (a raw malloc leaked once per
+// header per response — comp_error.md #153).
 fn stripCRLF(v: string) -> string {
     n := str.Len(v)
-    out := libc.malloc(n + 1)
+    out := Skink_mem_alloc(int64(n + 1))
     j := 0
     for i := 0; i < n; i = i + 1 {
         c := v[i]
         if c != 13 && c != 10 {
-            out[j] = c
+            Skink_mem_write_byte(out, int64(j), c)
             j = j + 1
         }
     }
-    out[j] = 0
+    Skink_mem_write_byte(out, int64(j), 0)
     return out
 }
 

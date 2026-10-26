@@ -24,6 +24,7 @@
 module spi_test
 
 import "std/spi"
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
 import "std/libc"
 import "std/str"
 import "testing"
@@ -70,7 +71,7 @@ pub fn TestRead() {
     if err.message != "" {
         Errorf("Read should return empty error")
     }
-    data[0] = 1
+    Skink_mem_write_byte(data, int64(0), 1)
     if data[0] != 1 {
         Errorf("Read should return writable data pointer")
     }

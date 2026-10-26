@@ -28,6 +28,7 @@ module rand
 
 // C standard library functions.
 extern fn rand() -> int
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
 extern fn srand(seed: int)
 // Skink_rand_seed_once seeds libc rand() exactly once from OS entropy
 // under a pthread_once guard — replacing the old "srand(time) on first
@@ -265,7 +266,9 @@ pub fn Bytes(buf: string, len: int) -> int {
     seedOnce()
     for i := 0; i < len; i = i + 1 {
         v := rand() % 256
-        buf[i] = int8(v)
+        // Raw write: buf is a caller-provided byte buffer, not
+        // necessarily a NUL-terminated string.
+        Skink_mem_write_byte(buf, int64(i), v)
     }
     return len
 }

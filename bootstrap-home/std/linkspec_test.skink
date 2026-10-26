@@ -1,0 +1,182 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/linkspec_test.skink
+// Purpose: Test suite for std/linkspec — [link] manifest parsing
+//          (single and multi-line arrays), validation rules (relative
+//          path confinement, flag and library-name safety), clang argv
+//          emission, and the nearest-ancestor-manifest file→manifest
+//          resolution used by ArgsForDecls.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module linkspec_test
+
+import "std/ast"
+import "std/fs"
+import "std/linkspec"
+import "std/str"
+import "std/testing"
+
+const testManifest = "# comment\n" +
+    "[package]\n" +
+    "name = \"cv\"\n" +
+    "entry = \"cv.skink\"\n\n" +
+    "[link]\n" +
+    "libs = [\"opencv_core\", \"opencv_imgproc\"]\n" +
+    "lib_paths = [\"native/lib\"] # trailing comment\n" +
+    "include_paths = [\"native/include\"]\n" +
+    "cflags = [\"-fPIC\"]\n" +
+    "ldflags = [\"-Wl,-rpath,/opt/x\"]\n" +
+    "frameworks = [\"Cocoa\"]\n" +
+    "sources = [\"native/shim.cpp\"]\n"
+
+// TestParseFull verifies every [link] key parses into the right field
+// and that sections above and below are ignored.
+pub fn TestParseFull() {
+    spec, errs := linkspec.Parse(testManifest)
+    testing.AssertTrue(spec.Present, "[link] detected")
+    testing.AssertEqualInt(0, len(errs), "no parse errors")
+    testing.AssertEqualInt(2, len(spec.Libs), "two libs")
+    testing.AssertEqualString("opencv_core", spec.Libs[0], "first lib")
+    testing.AssertEqualInt(1, len(spec.Sources), "one source")
+    testing.AssertEqualString("native/shim.cpp", spec.Sources[0], "source path")
+    testing.AssertEqualInt(1, len(spec.Frameworks), "one framework")
+}
+
+// TestParseMultiLineArray verifies array values spanning several lines.
+pub fn TestParseMultiLineArray() {
+    content := "[link]\nlibs = [\n  \"a\",\n  \"b\"\n]\n"
+    spec, errs := linkspec.Parse(content)
+    testing.AssertTrue(spec.Present, "[link] detected")
+    testing.AssertEqualInt(0, len(errs), "no parse errors")
+    testing.AssertEqualInt(2, len(spec.Libs), "two libs")
+    testing.AssertEqualString("b", spec.Libs[1], "second lib")
+}
+
+// TestParseAbsent verifies a manifest without [link] reports absent.
+pub fn TestParseAbsent() {
+    spec, _ := linkspec.Parse("[package]\nname = \"x\"\n")
+    testing.AssertFalse(spec.Present, "no [link] section")
+}
+
+// TestParseNotArray verifies a scalar [link] value is reported.
+pub fn TestParseNotArray() {
+    _, errs := linkspec.Parse("[link]\nlibs = \"oops\"\n")
+    testing.AssertEqualInt(1, len(errs), "one parse error")
+}
+
+// TestClangArgs verifies argument ordering: -I, cflags, sources, -L,
+// -l, frameworks, ldflags — all rooted at the manifest dir.
+pub fn TestClangArgs() {
+    spec, _ := linkspec.Parse(testManifest)
+    args := linkspec.ClangArgs(spec, "/pkg")
+    joined := str.Join(args, "|")
+    testing.AssertEqualString(
+        "-I/pkg/native/include|-fPIC|/pkg/native/shim.cpp|-L/pkg/native/lib|-lopencv_core|-lopencv_imgproc|-framework|Cocoa|-Wl,-rpath,/opt/x",
+        joined, "ordered clang args")
+}
+
+// TestValidatePaths verifies relative-path confinement rejects escapes.
+pub fn TestValidatePaths() {
+    var spec linkspec.LinkSpec
+    spec.Sources = []string{"../escape.c", "/abs/x.c", "C:\\x.c", "ok.c", "bad.txt"}
+    spec.LibPaths = []string{"../lib", "lib"}
+    spec.IncludePaths = []string{"inc"}
+    errs := linkspec.Validate(spec, "/nonexistent-dir-xyz")
+    // ../escape.c, /abs/x.c, C:\x.c (not relative), bad.txt (not a
+    // source ext), ok.c (missing file), ../lib → six errors.
+    testing.AssertEqualInt(6, len(errs), "six validation errors")
+}
+
+// TestValidateFlagSafety verifies cflags/ldflags must be single flags.
+pub fn TestValidateFlagSafety() {
+    var spec linkspec.LinkSpec
+    spec.CFlags = []string{"-fPIC", "rm -rf", "-x y", "naked"}
+    spec.LDFlags = []string{"-lm"}
+    spec.Libs = []string{"m", "-evil", "lib/slash", "ok.so.1", ""}
+    errs := linkspec.Validate(spec, "/tmp")
+    testing.AssertEqualInt(6, len(errs), "bad flags and lib names rejected")
+}
+
+// TestArgsForDecls verifies manifest discovery over a decl file set:
+// a project dir manifest applies to the project's file, a cached
+// package manifest applies to files under /packages/, and a deeper
+// subpath manifest wins for its files.
+// mkdirs creates every path segment in turn (fs.Mkdir is not recursive).
+fn mkdirs(p: string) {
+    cur := ""
+    if str.StartsWith(p, "/") {
+        cur = "/"
+    }
+    parts := str.Split(p, "/")
+    for i := 0; i < len(parts); i = i + 1 {
+        seg := parts[i]
+        if str.Len(seg) == 0 {
+            continue
+        }
+        if str.Equal(cur, "/") || str.Len(cur) == 0 {
+            cur = cur + seg
+        } else {
+            cur = cur + "/" + seg
+        }
+        fs.Mkdir(cur)
+    }
+}
+
+pub fn TestArgsForDecls() {
+    root := "/tmp/skink_linkspec_test"
+    mkdirs(root + "/proj/sub")
+    fs.Remove(root + "/proj/skink.toml")
+    fs.Remove(root + "/proj/sub/skink.toml")
+    mkdirs(root + "/cache/packages/acme/widget/1.0.0/native")
+    mkdirs(root + "/cache/packages/acme/widget/1.0.0/sub")
+    fs.WriteAll(root + "/cache/packages/acme/widget/1.0.0/native/shim.c", "int x(void){return 0;}\n")
+    fs.WriteAll(root + "/cache/packages/acme/widget/1.0.0/skink.toml",
+        "[package]\nname=\"widget\"\n\n[link]\nlibs=[\"m\"]\nsources=[\"native/shim.c\"]\n")
+    fs.WriteAll(root + "/cache/packages/acme/widget/1.0.0/sub/skink.toml",
+        "[package]\nname=\"wsub\"\n\n[link]\nlibs=[\"dl\"]\n")
+
+    var decls []ast.Stmt
+    // Project file: entryDir is <root>/proj, so proj/skink.toml (absent)
+    // is the bound — nothing found, nothing applied.
+    decls = append(decls, ast.Stmt{filePath: root + "/proj/sub/a.skink"})
+    // Cached package root file and subpath file.
+    decls = append(decls, ast.Stmt{filePath: root + "/cache/packages/acme/widget/1.0.0/widget.skink"})
+    decls = append(decls, ast.Stmt{filePath: root + "/cache/packages/acme/widget/1.0.0/sub/extra.skink"})
+
+    args, errs := linkspec.ArgsForDecls(root + "/proj", decls)
+    testing.AssertEqualInt(0, len(errs), "no errors")
+    joined := str.Join(args, "|")
+    testing.AssertContains(joined, root+"/cache/packages/acme/widget/1.0.0/native/shim.c", "package source")
+    testing.AssertContains(joined, "-lm", "package lib")
+    testing.AssertContains(joined, "-ldl", "subpath lib")
+}
+
+// TestArgsForDeclsBadSpec verifies a manifest with an invalid [link]
+// entry produces a build error rather than silently dropping it.
+pub fn TestArgsForDeclsBadSpec() {
+    root := "/tmp/skink_linkspec_bad"
+    mkdirs(root + "/cache/packages/acme/bad/1.0.0")
+    fs.WriteAll(root + "/cache/packages/acme/bad/1.0.0/skink.toml",
+        "[package]\nname=\"bad\"\n\n[link]\nsources=[\"missing.c\"]\n")
+    var decls []ast.Stmt
+    decls = append(decls, ast.Stmt{filePath: root + "/cache/packages/acme/bad/1.0.0/bad.skink"})
+    _, errs := linkspec.ArgsForDecls(root + "/proj", decls)
+    testing.AssertTrue(len(errs) > 0, "missing source is an error")
+}

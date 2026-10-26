@@ -28,6 +28,7 @@
 module server_tls_live_test
 
 import "std/fs"
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
 import "std/libc"
 import "std/net"
 import "std/os"
@@ -81,7 +82,7 @@ fn tlsGet(c: *tlsClient) -> string {
         }
         total = total + n
     }
-    buf[total] = 0
+    Skink_mem_write_byte(buf, int64(total), 0)
     resp := str.Substr(buf, 0, total)
     libc.free(buf)
     return resp

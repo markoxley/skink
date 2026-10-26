@@ -31,6 +31,7 @@ import "std/regex"
 import "std/rand"
 import "std/str"
 import "std/libc"
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
 import "testing"
 
 // fuzzIterations is the number of random inputs to generate per parser.
@@ -46,9 +47,9 @@ fn genRandomString(n: int) -> string {
     buf := libc.malloc(n + 1)
     for i := 0; i < n; i = i + 1 {
         b := rand.Intn(95) + 32
-        buf[i] = b
+        Skink_mem_write_byte(buf, int64(i), b)
     }
-    buf[n] = 0
+    Skink_mem_write_byte(buf, int64(n), 0)
     return buf
 }
 
@@ -62,13 +63,13 @@ fn genDeepJSON(n: int, useBraces: bool) -> string {
     }
     buf := libc.malloc(n * 2 + 2)
     for i := 0; i < n; i = i + 1 {
-        buf[i] = openChar
+        Skink_mem_write_byte(buf, int64(i), openChar)
     }
-    buf[n] = 48 // '0'
+    Skink_mem_write_byte(buf, int64(n), 48) // '0'
     for i := 0; i < n; i = i + 1 {
-        buf[n + 1 + i] = closeChar
+        Skink_mem_write_byte(buf, int64(n + 1 + i), closeChar)
     }
-    buf[n * 2 + 1] = 0
+    Skink_mem_write_byte(buf, int64(n * 2 + 1), 0)
     return buf
 }
 
@@ -78,21 +79,21 @@ fn genDeepXML(n: int) -> string {
     buf := libc.malloc(total + 1)
     pos := 0
     for i := 0; i < n; i = i + 1 {
-        buf[pos] = 60     // '<'
-        buf[pos + 1] = 97 // 'a'
-        buf[pos + 2] = 62 // '>'
+        Skink_mem_write_byte(buf, int64(pos), 60)     // '<'
+        Skink_mem_write_byte(buf, int64(pos + 1), 97) // 'a'
+        Skink_mem_write_byte(buf, int64(pos + 2), 62) // '>'
         pos = pos + 3
     }
-    buf[pos] = 120 // 'x'
+    Skink_mem_write_byte(buf, int64(pos), 120) // 'x'
     pos = pos + 1
     for i := 0; i < n; i = i + 1 {
-        buf[pos] = 60      // '<'
-        buf[pos + 1] = 47  // '/'
-        buf[pos + 2] = 97  // 'a'
-        buf[pos + 3] = 62  // '>'
+        Skink_mem_write_byte(buf, int64(pos), 60)      // '<'
+        Skink_mem_write_byte(buf, int64(pos + 1), 47)  // '/'
+        Skink_mem_write_byte(buf, int64(pos + 2), 97)  // 'a'
+        Skink_mem_write_byte(buf, int64(pos + 3), 62)  // '>'
         pos = pos + 4
     }
-    buf[pos] = 0
+    Skink_mem_write_byte(buf, int64(pos), 0)
     return buf
 }
 
@@ -107,25 +108,25 @@ fn genDeepYAML(n: int) -> string {
     pos := 0
     for i := 0; i < n; i = i + 1 {
         for j := 0; j < i; j = j + 1 {
-            buf[pos] = 32
+            Skink_mem_write_byte(buf, int64(pos), 32)
             pos = pos + 1
         }
-        buf[pos] = 107     // 'k'
-        buf[pos + 1] = 101 // 'e'
-        buf[pos + 2] = 121 // 'y'
-        buf[pos + 3] = 58  // ':'
-        buf[pos + 4] = 10  // '\n'
+        Skink_mem_write_byte(buf, int64(pos), 107)     // 'k'
+        Skink_mem_write_byte(buf, int64(pos + 1), 101) // 'e'
+        Skink_mem_write_byte(buf, int64(pos + 2), 121) // 'y'
+        Skink_mem_write_byte(buf, int64(pos + 3), 58)  // ':'
+        Skink_mem_write_byte(buf, int64(pos + 4), 10)  // '\n'
         pos = pos + 5
     }
     for j := 0; j < n; j = j + 1 {
-        buf[pos] = 32
+        Skink_mem_write_byte(buf, int64(pos), 32)
         pos = pos + 1
     }
-    buf[pos] = 118     // 'v'
-    buf[pos + 1] = 97  // 'a'
-    buf[pos + 2] = 108 // 'l'
+    Skink_mem_write_byte(buf, int64(pos), 118)     // 'v'
+    Skink_mem_write_byte(buf, int64(pos + 1), 97)  // 'a'
+    Skink_mem_write_byte(buf, int64(pos + 2), 108) // 'l'
     pos = pos + 3
-    buf[pos] = 0
+    Skink_mem_write_byte(buf, int64(pos), 0)
     return buf
 }
 
@@ -137,10 +138,10 @@ fn genMalformed(base: string, flips: int) -> string {
     }
     buf := libc.malloc(n + 1)
     libc.memcpy(buf, base, n)
-    buf[n] = 0
+    Skink_mem_write_byte(buf, int64(n), 0)
     for i := 0; i < flips; i = i + 1 {
         pos := rand.Intn(n)
-        buf[pos] = rand.Intn(128)
+        Skink_mem_write_byte(buf, int64(pos), rand.Intn(128))
     }
     return buf
 }
@@ -155,41 +156,41 @@ fn genCSVWithQuotes(rows: int, cols: int) -> string {
     for r := 0; r < rows; r = r + 1 {
         for c := 0; c < cols; c = c + 1 {
             if c > 0 {
-                buf[pos] = 44 // ','
+                Skink_mem_write_byte(buf, int64(pos), 44) // ','
                 pos = pos + 1
             }
             if rand.Intn(3) == 0 {
-                buf[pos] = 34 // '"'
+                Skink_mem_write_byte(buf, int64(pos), 34) // '"'
                 pos = pos + 1
                 fieldLen := rand.Intn(20)
                 for k := 0; k < fieldLen; k = k + 1 {
                     ch := rand.Intn(128)
                     if ch == 34 {
-                        buf[pos] = 34
-                        buf[pos + 1] = 34
+                        Skink_mem_write_byte(buf, int64(pos), 34)
+                        Skink_mem_write_byte(buf, int64(pos + 1), 34)
                         pos = pos + 2
                     } else {
-                        buf[pos] = ch
+                        Skink_mem_write_byte(buf, int64(pos), ch)
                         pos = pos + 1
                     }
                 }
-                buf[pos] = 34 // '"'
+                Skink_mem_write_byte(buf, int64(pos), 34) // '"'
                 pos = pos + 1
             } else {
                 fieldLen := rand.Intn(20)
                 for k := 0; k < fieldLen; k = k + 1 {
                     ch := rand.Intn(128)
                     if ch != 44 && ch != 10 && ch != 13 && ch != 34 {
-                        buf[pos] = ch
+                        Skink_mem_write_byte(buf, int64(pos), ch)
                         pos = pos + 1
                     }
                 }
             }
         }
-        buf[pos] = 10 // '\n'
+        Skink_mem_write_byte(buf, int64(pos), 10) // '\n'
         pos = pos + 1
     }
-    buf[pos] = 0
+    Skink_mem_write_byte(buf, int64(pos), 0)
     return buf
 }
 
@@ -199,9 +200,9 @@ fn genRandomRegex(n: int) -> string {
     chars := "abcdefghij0123456789.*+?()[]"
     clen := str.Len(chars)
     for i := 0; i < n; i = i + 1 {
-        buf[i] = chars[rand.Intn(clen)]
+        Skink_mem_write_byte(buf, int64(i), int(chars[rand.Intn(clen)]))
     }
-    buf[n] = 0
+    Skink_mem_write_byte(buf, int64(n), 0)
     return buf
 }
 

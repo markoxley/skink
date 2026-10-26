@@ -46,6 +46,11 @@
 // block (heap strings, slices). Declared in rc_rt.c (VULN-17).
 extern int Skink_rc_is_registered(const void *ptr);
 
+// Skink_rc_registered_size returns the tracked allocation size of a
+// registered kind-0/kind-1 block, or -1 for untracked pointers.
+// Declared in rc_rt.c (comp_error.md #153).
+extern int64_t Skink_rc_registered_size(const void *ptr);
+
 #if defined(__unix__) || defined(__APPLE__)
 #include <pthread.h>
 #include <setjmp.h>
@@ -219,22 +224,47 @@ static int skink_streq(const char *sa, const char *sb) {
 }
 
 // Heuristic: does the erased i8* value look like a readable string
-// pointer? RC-registered blocks are trusted outright; otherwise the
-// page must be resident AND verifiably readable (PROT_NONE guard pages
-// pass mincore but fault on read — VULN-17), and a NUL terminator must
-// exist within the readable span so the subsequent strcmp/hash cannot
-// run off into unverified memory.
+// pointer? RC-registered blocks are trusted outright; otherwise each
+// scanned page must be resident AND verifiably readable (PROT_NONE
+// guard pages pass mincore but fault on read — VULN-17), and a NUL
+// terminator must exist within the readable span so the subsequent
+// strcmp/hash cannot run off into unverified memory.
+//
+// comp_error.md #148: the terminator may sit just past the end of p's
+// page — scanning only page-remainder bytes misclassifies a short
+// literal straddling a page boundary as an int (its hash then becomes
+// the pointer value and lookups miss). Walk forward page by page,
+// re-verifying readability at every boundary; the cap bounds the cost
+// of probing a pointer that is mapped but not actually a string.
 static int skink_looks_like_string(const void *p) {
   if (!p)
     return 0;
-  if (Skink_rc_is_registered(p))
-    return 1;
-  if (!skink_is_mapped(p) || !skink_byte_readable(p))
+  // Registered RC blocks are trusted to be strings only when a NUL
+  // terminator exists WITHIN the block's own allocation — scanning the
+  // block's bytes is bounded, so a registered non-string (e.g. a struct
+  // or other composite boxed into a generic container) can never make
+  // the later hash/equality walk run past the allocation into unmapped
+  // memory (comp_error.md #153). Strings always carry a NUL inside their
+  // allocation (len+1 bytes).
+  int64_t regSize = Skink_rc_registered_size(p);
+  if (regSize >= 0) {
+    int64_t scan = regSize < (1 << 20) ? regSize : (1 << 20);
+    if (memchr(p, 0, (size_t)scan) != NULL)
+      return 1;
     return 0;
-  size_t span = skink_probe_span(p);
-  if (span == 0)
-    return 0;
-  return memchr(p, 0, span) != NULL;
+  }
+  const char *q = (const char *)p;
+  for (int i = 0; i < 64; i++) {
+    if (!skink_is_mapped(q) || !skink_byte_readable(q))
+      return 0;
+    size_t span = skink_probe_span(q);
+    if (span == 0)
+      return 0;
+    if (memchr(q, 0, span) != NULL)
+      return 1;
+    q += span;
+  }
+  return 0;
 }
 
 // reflect_get_bool reads a boolean value at the given offset from a struct address.

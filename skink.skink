@@ -29,6 +29,7 @@ import "std/ast"
 import "std/checker"
 import "std/emitter"
 import "std/fs"
+import "std/linkspec"
 import "std/os"
 import "std/resolver"
 import "std/str"
@@ -43,10 +44,88 @@ extern fn getenv(name: string) -> string
 extern fn remove(path: string) -> int
 extern fn fputs(s: string, fp: int64) -> int
 extern fn Skink_fs_mktemp(prefix: string, suffix: string) -> string
+extern fn Skink_fs_mktemp_fopen(prefix: string, suffix: string, pathBuf: string) -> int64
 
 // usage prints the command-line usage message for the compiler.
 fn usage() {
-    println("usage: skink [-v | -version] [-t <target>] [-b <target>] [-o <output>] [-check | -emit-ll] <file.skink>")
+    println("usage: skink [-v | -version] [-t <target>] [-b <target>] [-o <output>] [-cov] [-c <dir>] [-check | -emit-ll] <file.skink>")
+}
+
+// projectEntry resolves a -c project directory to (entryFile, outName,
+// errMsg). The manifest's [package] entry/name fields win when present;
+// otherwise the entry defaults to <dir>/main.skink and the binary name
+// to the entry file's basename. -c <file.skink> is accepted as a
+// shortcut for compiling that file directly.
+fn projectEntry(dir: string) -> (string, string, string) {
+    if !fs.IsDir(dir) {
+        if fs.Exists(dir) && str.EndsWith(dir, ".skink") {
+            out := path.Base(dir)
+            dot := str.LastIndexOf(out, ".")
+            if dot >= 0 {
+                out = str.Substr(out, 0, dot)
+            }
+            return dir, out, ""
+        }
+        return "", "", str.Concat("no such project directory: ", dir)
+    }
+    entry := "main.skink"
+    name := ""
+    tomlPath := str.Concat(dir, "/skink.toml")
+    if fs.Exists(tomlPath) {
+        data, rerr := fs.ReadAll(tomlPath)
+        if str.Len(rerr.message) == 0 {
+            // Minimal [package] scan: only name/entry keys are needed,
+            // so a full TOML parser would be overkill here. Keys are
+            // honoured only inside the [package] table.
+            inPkg := false
+            lines := str.Split(data, "\n")
+            li := 0
+            for li < len(lines) {
+                l := str.Trim(lines[li])
+                li = li + 1
+                if str.StartsWith(l, "[") {
+                    inPkg = str.Equal(l, "[package]")
+                    continue
+                }
+                if !inPkg {
+                    continue
+                }
+                eq := str.IndexOf(l, "=")
+                if eq < 0 {
+                    continue
+                }
+                key := str.Trim(str.Substr(l, 0, eq))
+                q1 := str.IndexOf(l, "\"")
+                if q1 < 0 {
+                    continue
+                }
+                rest := str.Substr(l, q1 + 1, str.Len(l) - q1 - 1)
+                q2 := str.IndexOf(rest, "\"")
+                if q2 < 0 {
+                    continue
+                }
+                val := str.Substr(rest, 0, q2)
+                if str.Equal(key, "entry") {
+                    entry = val
+                }
+                if str.Equal(key, "name") {
+                    name = val
+                }
+            }
+        }
+    }
+    src := str.Concat(dir, str.Concat("/", entry))
+    if !fs.Exists(src) {
+        return "", "", str.Concat("no entry file: ", src)
+    }
+    if str.Len(name) == 0 {
+        name = path.Base(entry)
+        dot := str.LastIndexOf(name, ".")
+        if dot >= 0 {
+            name = str.Substr(name, 0, dot)
+        }
+    }
+    return src, str.Concat(dir, str.Concat("/", name)), ""
 }
 
 // findHarnessScript locates a helper script (skink_test.sh / skink_bench.sh)
@@ -129,13 +208,18 @@ fn main() -> int {
     checkOnly := false
     emitOnly := false
     debugInfo := false
+    covEnabled := false
+    projDir := ""
 
     // Parse flags that precede the input file path.
     i := 1
     for i < argc - 1 {
         arg := argv[i]
         if arg == "-o" {
-            if i + 1 >= argc - 1 {
+            // -o may consume the final positional when -c supplies the
+            // compilation target (skink -c dir -o out); a bare `skink
+            // -o` still errors via the missing-input check below.
+            if i + 1 >= argc {
                 println("missing -o argument")
                 return 1
             }
@@ -158,6 +242,26 @@ fn main() -> int {
             i = i + 1
             continue
         }
+        // -cov instruments every executable statement with a coverage
+        // counter; the instrumented binary writes <prog>.skinkcov (or
+        // $SKINK_COV_OUT) at exit. See std/runtime/cov_rt.c.
+        if arg == "-cov" {
+            covEnabled = true
+            i = i + 1
+            continue
+        }
+        // -c compiles a project directory: the entry file and binary
+        // name come from skink.toml's [package] section (entry/name),
+        // falling back to <dir>/main.skink and the entry basename.
+        if arg == "-c" {
+            if i + 1 >= argc {
+                println("missing -c argument")
+                return 1
+            }
+            projDir = argv[i + 1]
+            i = i + 2
+            continue
+        }
         println(str.Concat("unknown flag: ", arg))
         usage()
         return 1
@@ -165,10 +269,25 @@ fn main() -> int {
 
     // The last argument is always the input source file.
     fileName := argv[argc - 1]
-    if fileName == "-o" || fileName == "-check" || fileName == "-emit-ll" || fileName == "-g" {
+    if fileName == "-o" || fileName == "-check" || fileName == "-emit-ll" || fileName == "-g" || fileName == "-cov" || fileName == "-c" {
         println("missing input file")
         usage()
         return 1
+    }
+
+    // -c <dir> compiles a whole project: resolve the entry file and
+    // default output name from the directory's skink.toml (or
+    // main.skink when no manifest exists). An explicit -o still wins.
+    if str.Len(projDir) > 0 {
+        ent, oname, perr := projectEntry(projDir)
+        if str.Len(perr) > 0 {
+            println(perr)
+            return 1
+        }
+        fileName = ent
+        if str.Len(outName) == 0 {
+            outName = oname
+        }
     }
 
     // Derive the output binary name from the input file name if -o was not given.
@@ -209,7 +328,7 @@ fn main() -> int {
     }
 
     // Generate LLVM IR from the type-checked program.
-    cg := emitter.newCodeGen(&c, debugInfo)
+    cg := emitter.newCodeGen(&c, debugInfo, covEnabled)
     ir := emitter.emitProgram(&cg, decls)
     emitErrs := emitter.Errors(&cg)
     if len(emitErrs) > 0 {
@@ -231,16 +350,18 @@ fn main() -> int {
     // clang to consume. The old code used <outName>.ll in the working
     // directory, which could clobber a user file or collide
     // predictably between concurrent compiles (VULN-01).
-    llPath := Skink_fs_mktemp("skink", ".ll")
-    if int64(llPath) == 0 || str.Len(llPath) == 0 {
+    // Skink_fs_mktemp_fopen creates the file with O_CREAT|O_EXCL|0600 and
+    // returns a FILE* on that same descriptor — there is no close-and-
+    // reopen window in which another process could swap the path for a
+    // symlink (comp_error.md #153). The created path is copied into
+    // llPathBuf so it can be removed after clang consumes it.
+    llPathBuf := str.Repeat(" ", 4096)
+    fp := Skink_fs_mktemp_fopen("skink", ".ll", llPathBuf)
+    if fp == 0 {
         println("cannot create temporary .ll file")
         return 1
     }
-    fp := fopen(llPath, "w")
-    if fp == 0 {
-        println(str.Concat("cannot open ", llPath))
-        return 1
-    }
+    llPath := llPathBuf
     fputs(ir, fp)
     fclose(fp)
 
@@ -281,6 +402,30 @@ fn main() -> int {
     if needsUI {
         rt = append(rt, str.Concat(skinkHome, "/runtime/ui_rt.c"))
     }
+
+    // Coverage builds link the counter/dump runtime — it is only
+    // needed when -cov instrumentation was emitted (VULN-free: no
+    // conditional symbols in uninstrumented binaries).
+    if covEnabled {
+        rt = append(rt, str.Concat(skinkHome, "/runtime/cov_rt.c"))
+    }
+
+    // Collect [link] requirements (extra C/C++ sources, -I/-L paths,
+    // -l libraries, frameworks, and raw flags) declared by the nearest
+    // ancestor skink.toml of every resolved source file — the project's
+    // own manifest plus each cached mod/<owner>/<repo> package. A
+    // malformed [link] section fails the build rather than silently
+    // dropping flags.
+    linkArgs, linkErrs := linkspec.ArgsForDecls(path.Dir(fileName), decls)
+    if len(linkErrs) > 0 {
+        ei := 0
+        for ei < len(linkErrs) {
+            println(linkErrs[ei])
+            ei = ei + 1
+        }
+        return 1
+    }
+
     // Detect platform at runtime to choose appropriate linker flags.
     // Windows sets the OS environment variable to "Windows_NT".
     osEnv := getenv("OS")
@@ -344,6 +489,13 @@ fn main() -> int {
     if needsUI {
         // SDL2 headers/libs must be installed (sdl2-devel / libsdl2-dev).
         clangArgs = append(clangArgs, "-lSDL2")
+    }
+    // Module-supplied link arguments go last so package libraries can
+    // satisfy references from package sources and from the .ll object.
+    li := 0
+    for li < len(linkArgs) {
+        clangArgs = append(clangArgs, linkArgs[li])
+        li = li + 1
     }
     rc := os.Exec(clangArgs)
     remove(llPath)

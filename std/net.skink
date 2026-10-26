@@ -25,9 +25,12 @@
 module net
 
 import "std/errors"
+extern fn Skink_mem_byte(ptr: string, idx: int64) -> int
 import "std/fmt"
 import "std/libc"
 import "std/str"
+
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
 
 extern fn socket(domain: int, ty: int, protocol: int) -> int
 extern fn connect(fd: int, addr: string, len: int) -> int
@@ -39,6 +42,8 @@ extern fn bind(fd: int, addr: string, len: int) -> int
 extern fn accept(fd: int, addr: string, len: *int) -> int
 extern fn htons(port: int) -> int
 extern fn inet_addr(ip: string) -> int
+extern fn getpeername(fd: int, addr: string, len: *int) -> int
+extern fn inet_ntoa(inAddr: int) -> string
 extern fn Skink_net_resolve_and_connect(host: string, port: int, timeoutMs: int) -> int
 extern fn Skink_set_socket_timeout(fd: int, timeoutMs: int) -> int
 extern fn Skink_set_socket_timeouts(fd: int, recvMs: int, sendMs: int) -> int
@@ -104,7 +109,8 @@ pub struct Connection {
             libc.free(buf)
             return "", errors.New("recv failed")
         }
-        buf[bytesRead] = 0
+        // Terminator byte (raw write — calloc'd buffer).
+        Skink_mem_write_byte(buf, int64(bytesRead), 0)
         return buf, errors.New("")
     }
 
@@ -116,6 +122,31 @@ pub struct Connection {
     // Write implements the Writer template interface.
     pub fn Write(self: *Connection, buf: string, len: int) -> int {
         return send(self.fd, buf, len, 16384) // MSG_NOSIGNAL = 0x4000
+    }
+
+    // PeerAddr returns the remote IPv4 address and port of the peer,
+    // or ("", 0) when it cannot be determined. Unlike anything carried
+    // in request headers, this comes from the socket itself and cannot
+    // be forged by the client (comp_error.md #146).
+    pub fn PeerAddr(self: *Connection) -> (string, int) {
+        // sockaddr_in fits in the first 16 bytes of a sockaddr_storage.
+        buf := libc.calloc(128, 1)
+        alen := 128
+        if getpeername(self.fd, buf, &alen) != 0 {
+            libc.free(buf)
+            return "", 0
+        }
+        // port is bytes 2..3 (big-endian), IPv4 addr bytes 4..7.
+        // Raw reads: buf is a raw sockaddr buffer, not a string.
+        port := (Skink_mem_byte(buf, int64(2)) << 8) | Skink_mem_byte(buf, int64(3))
+        ina := Skink_mem_byte(buf, int64(4)) | (Skink_mem_byte(buf, int64(5)) << 8) |
+            (Skink_mem_byte(buf, int64(6)) << 16) | (Skink_mem_byte(buf, int64(7)) << 24)
+        libc.free(buf)
+        // inet_ntoa returns a static buffer — copy before returning.
+        raw := inet_ntoa(ina)
+        out := libc.malloc(str.Len(raw) + 1)
+        libc.memcpy(out, raw, str.Len(raw) + 1)
+        return out, port
     }
 }
 
@@ -168,17 +199,18 @@ pub fn Listen(address: string, port: int) -> (Connection, errors.Error) {
     Skink_set_reuseaddr(fd)
     // Build a sockaddr_in structure (16 bytes) in a raw buffer.
     addr := libc.calloc(16, 1)
-    addr[0] = 2 // sin_family = AF_INET
+    // Raw writes: addr is a raw sockaddr buffer, not a string.
+    Skink_mem_write_byte(addr, int64(0), 2) // sin_family = AF_INET
     // Store the port in network byte order (big-endian).
     portBE := htons(port)
-    addr[2] = portBE & 255
-    addr[3] = (portBE >> 8) & 255
+    Skink_mem_write_byte(addr, int64(2), portBE & 255)
+    Skink_mem_write_byte(addr, int64(3), (portBE >> 8) & 255)
     // Store the IPv4 address in network byte order.
     ipAddr := inet_addr(address)
-    addr[4] = ipAddr & 255
-    addr[5] = (ipAddr >> 8) & 255
-    addr[6] = (ipAddr >> 16) & 255
-    addr[7] = (ipAddr >> 24) & 255
+    Skink_mem_write_byte(addr, int64(4), ipAddr & 255)
+    Skink_mem_write_byte(addr, int64(5), (ipAddr >> 8) & 255)
+    Skink_mem_write_byte(addr, int64(6), (ipAddr >> 16) & 255)
+    Skink_mem_write_byte(addr, int64(7), (ipAddr >> 24) & 255)
     rc := bind(fd, addr, 16)
     libc.free(addr)
     if rc < 0 {
@@ -253,7 +285,8 @@ pub fn HTTPGet(host: string, path: string, port: int) -> (HTTPResponse, errors.E
     }
     conn.Close()
 
-    buf[total] = 0
+    // Terminator byte (raw write — growable buffer).
+    Skink_mem_write_byte(buf, int64(total), 0)
     // Very simple parse: look for double CRLF to find body start
     bodyStart := 0
     for i := 0; i < total - 3; i = i + 1 {
@@ -307,7 +340,8 @@ pub fn HTTPPost(host: string, path: string, bodyData: string, port: int) -> (HTT
         total = total + n
     }
     conn.Close()
-    buf[total] = 0
+    // Terminator byte (raw write — growable buffer).
+    Skink_mem_write_byte(buf, int64(total), 0)
     // For POST responses we return the entire buffer (headers + body).
     postBody := str.Substr(buf, 0, total)
     libc.free(buf)

@@ -26,6 +26,7 @@ module reflect_test
 import "std/reflect"
 import "std/str"
 import "testing"
+import "std/libc"
 
 // TestTypeOfSize verifies TypeOf returns correct size via sizeof(T).
 pub fn TestTypeOfSize() {
@@ -425,4 +426,29 @@ pub fn TestErasedGenericHeuristic() {
     a := "same"
     b := str.Concat("sa", "me")
     testing.AssertTrue(reflect.Equals(a, b, "K"), "string content equality under generic")
+}
+
+// Page-aligned allocation for the boundary regression below.
+extern fn posix_memalign(out: *string, alignment: int64, size: int64) -> int
+
+// TestPageBoundaryStringHash — regression for comp_error.md #148.
+// skink_looks_like_string used to scan only page-remainder bytes for a
+// NUL terminator, so a string whose contents crossed a page boundary
+// was misclassified as an int: its hash became the pointer value and
+// erased-generic hashmap lookups missed present keys. Build "the\0" at
+// pageSize-3 so the NUL lands on the next page, then assert the string
+// path is taken: Equals must hold and the hash must match the plain
+// literal's content hash.
+pub fn TestPageBoundaryStringHash() {
+    var p string
+    rc := posix_memalign(&p, 4096, 8192)
+    testing.AssertEqualInt(0, rc, "posix_memalign succeeded")
+    s := string(int64(p) + 4093)
+    s[0] = 116
+    s[1] = 104
+    s[2] = 101
+    s[3] = 0
+    testing.AssertTrue(reflect.Equals(s, "the", "K"), "page-straddling string classifies as string")
+    testing.AssertEqualInt(reflect.Hash("the", "K"), reflect.Hash(s, "K"), "equal content hashes")
+    libc.free(p)
 }

@@ -28,6 +28,10 @@ SKINK="${SKINK:-./skink}"
 SKINK_HOME="${SKINK_HOME:-./bootstrap-home}"
 TARGET="$1"
 
+# SKINK_COV=1 builds test binaries with -cov instrumentation; each run
+# then writes <bin>.skinkcov for the skinkcov report tool.
+COVFLAG="${SKINK_COV:+-cov}"
+
 run_one() {
     f="$1"
     dir=$(dirname "$f")
@@ -72,7 +76,7 @@ run_one() {
         echo '}'
     } > "$main"
 
-    if SKINK_HOME="$SKINK_HOME" "$SKINK" -o "$bin" "$main"; then
+    if SKINK_HOME="$SKINK_HOME" "$SKINK" $COVFLAG -o "$bin" "$main"; then
         rm -f "$main"
         if "$bin"; then
             echo "PASS $f"
@@ -97,7 +101,7 @@ if [ -f "$TARGET" ]; then
             ;;
         *)
             bin="${TARGET%.*}_bin"
-            if SKINK_HOME="$SKINK_HOME" "$SKINK" -o "$bin" "$TARGET"; then
+            if SKINK_HOME="$SKINK_HOME" "$SKINK" $COVFLAG -o "$bin" "$TARGET"; then
                 if "$bin"; then
                     echo "PASS $TARGET"
                     rm -f "$bin"

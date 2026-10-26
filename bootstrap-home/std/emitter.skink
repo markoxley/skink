@@ -182,6 +182,8 @@ pub struct CodeGen {
     scopeVars:          []ScopeV
     scopeDepth:         int  // the scope depth
     terminated:         bool  // the terminated
+    emitDepth:          int  // the expression-emission recursion depth
+                             // (comp_error.md #150)
     currentFnRetType:   string  // the current function return value type
     currentFnRetTypes:  []string  // the current function return value types
     currentFnRetNames:  []string  // the current function return value names
@@ -233,6 +235,13 @@ pub struct CodeGen {
     // externs return borrowed or aliased pointers (e.g. memcpy returns
     // dest), so their results must not be released as temporaries.
     externFns:          map[string]bool
+
+    // Coverage instrumentation (-cov): one counter id per executable
+    // statement, with covEntries recording "file\tline\tcol\tfn" for
+    // the .skinkcov map emitted alongside the binary.
+    covEnabled:         bool
+    covEntries:         []string
+    covN:               int
 
     // Panic/recover support
     hasDefer:         bool
@@ -344,8 +353,9 @@ pub struct CodeGen {
 // === Constructor ===
 
 // newCodeGen creates and initializes a CodeGen instance for IR emission.
-pub fn newCodeGen(c: *checker.Checker, dbgEnabled: bool) -> CodeGen {
+pub fn newCodeGen(c: *checker.Checker, dbgEnabled: bool, covEnabled: bool) -> CodeGen {
     cg := CodeGen{}
+    cg.covEnabled = covEnabled
     cg.moduleHeader = str.NewBuilder(4096)
     cg.stringGlobals = str.NewBuilder(4096)
     cg.out = str.NewBuilder(4096)
@@ -3724,6 +3734,28 @@ fn emitMapKeyHash(cg: *CodeGen, keyReg: string, keyLL: string, typeName: string)
         emitfmt(cg, "  %s = call i32 @reflect_hash(i8* %s, i8* %s)\n", []string{hashReg, keyReg, tnReg})
         return hashReg
     }
+    // Non-string keys hash by their raw bits. Every bucket index site
+    // below computes `srem i32 hash, cap`, so non-i32 scalars must be
+    // normalized — an i64 key otherwise produces `srem i32 %i64` which
+    // clang rejects.
+    if str.Equal(keyLL, "i32") {
+        return keyReg
+    }
+    if str.Equal(keyLL, "i64") {
+        r := nextReg(cg)
+        emitfmt(cg, "  %s = trunc i64 %s to i32\n", []string{r, keyReg})
+        return r
+    }
+    if str.Equal(keyLL, "i1") || str.Equal(keyLL, "i8") || str.Equal(keyLL, "i16") {
+        r := nextReg(cg)
+        emitfmt(cg, "  %s = zext %s %s to i32\n", []string{r, keyLL, keyReg})
+        return r
+    }
+    if str.EndsWith(keyLL, "*") {
+        r := nextReg(cg)
+        emitfmt(cg, "  %s = ptrtoint %s %s to i32\n", []string{r, keyLL, keyReg})
+        return r
+    }
     return keyReg
 }
 
@@ -4574,12 +4606,18 @@ fn computeCompoundOp(cg: *CodeGen, oldVal: string, valReg: string, op: string, l
         if str.Equal(llType, "double") {
             return emitBinaryOp(cg, "fdiv", llType, oldVal, valReg)
         }
+        // Division by zero and INT_MIN / -1 are LLVM UB — panic instead
+        // (comp_error.md #150).
+        emitIntDivRemGuard(cg, oldVal, valReg, llType, isUnsigned)
         if isUnsigned {
             return emitBinaryOp(cg, "udiv", llType, oldVal, valReg)
         }
         return emitBinaryOp(cg, "sdiv", llType, oldVal, valReg)
     }
     if str.Equal(baseOp, "%") {
+        // Remainder by zero and INT_MIN % -1 are LLVM UB — panic instead
+        // (comp_error.md #150).
+        emitIntDivRemGuard(cg, oldVal, valReg, llType, isUnsigned)
         if isUnsigned {
             return emitBinaryOp(cg, "urem", llType, oldVal, valReg)
         }
@@ -4595,13 +4633,17 @@ fn computeCompoundOp(cg: *CodeGen, oldVal: string, valReg: string, op: string, l
         return emitBinaryOp(cg, "xor", llType, oldVal, valReg)
     }
     if str.Equal(baseOp, "<<") {
-        return emitBinaryOp(cg, "shl", llType, oldVal, valReg)
+        // Out-of-range shift counts are LLVM UB — panic instead
+        // (comp_error.md #150).
+        return emitCheckedShift(cg, "shl", llType, oldVal, valReg)
     }
     if str.Equal(baseOp, ">>") {
+        // Out-of-range shift counts are LLVM UB — panic instead
+        // (comp_error.md #150).
         if isUnsigned {
-            return emitBinaryOp(cg, "lshr", llType, oldVal, valReg)
+            return emitCheckedShift(cg, "lshr", llType, oldVal, valReg)
         }
-        return emitBinaryOp(cg, "ashr", llType, oldVal, valReg)
+        return emitCheckedShift(cg, "ashr", llType, oldVal, valReg)
     }
     return valReg
 }
@@ -5824,6 +5866,89 @@ fn closureCallTypes(cg: *CodeGen, ft: checker.TType) -> (string, []string) {
     return retType, params
 }
 
+// callExprRetLLTypes returns the LLVM return types of a call expression
+// for every callee shape the emitter supports: direct functions and
+// methods (resolved to a fnRetTypes key), and fn-typed values invoked
+// through variables, struct fields, or arbitrary expressions (resolved
+// through the checker's recorded semantic type). Returns an empty slice
+// when the callee cannot be resolved.
+fn callExprRetLLTypes(cg: *CodeGen, e: ast.Expr) -> []string {
+    var out []string
+    if e.kind != ast.EX_CALL || len(e.callFunc) == 0 {
+        return out
+    }
+    fnExpr := e.callFunc[0]
+    // fnTypedCalleeTypes maps a checker TK_FUNCTION type to LLVM return
+    // types; shared by the variable/field/expression callee paths.
+    if fnExpr.kind == ast.EX_IDENT {
+        sv, isVar := lookupVar(cg, fnExpr.ident)
+        isG := mapStringStringHasKeyCG(cg.globalVarTypes, fnExpr.ident)
+        if isVar || isG {
+            // A variable shadows any like-named function; if it holds a
+            // function value its type gives the returns.
+            ft := checker.unknownType()
+            if isVar {
+                ft = sv.synType
+            }
+            if ft.kind == 0 || ft.kind == checker.TK_UNKNOWN {
+                ft = exprSkinkType(cg, fnExpr)
+            }
+            if ft.kind == checker.TK_NAMED {
+                ft = resolveAliasCG(cg, ft)
+            }
+            if ft.kind == checker.TK_FUNCTION {
+                i := 0
+                for i < len(ft.retTypes) {
+                    out = append(out, llvmType(cg, ft.retTypes[i]))
+                    i = i + 1
+                }
+                return out
+            }
+        }
+        name := resolveDirectFnName(cg, fnExpr.ident)
+        if mapStringStringSliceHasKeyCG(cg.fnRetTypes, name) {
+            return cg.fnRetTypes[name]
+        }
+        return out
+    }
+    if fnExpr.kind == ast.EX_FIELD {
+        // Field-closure calls record the field access's TK_FUNCTION
+        // type; check it first so a same-named free function cannot
+        // shadow the field (mirrors emitMethodCall's early branch).
+        ft := exprSkinkType(cg, fnExpr)
+        if ft.kind == checker.TK_NAMED {
+            ft = resolveAliasCG(cg, ft)
+        }
+        if ft.kind == checker.TK_FUNCTION {
+            i := 0
+            for i < len(ft.retTypes) {
+                out = append(out, llvmType(cg, ft.retTypes[i]))
+                i = i + 1
+            }
+            return out
+        }
+        resolved, dummy := resolveMethodCallFnName(cg, fnExpr)
+        if mapStringStringSliceHasKeyCG(cg.fnRetTypes, resolved) {
+            return cg.fnRetTypes[resolved]
+        }
+        return out
+    }
+    // Arbitrary callee expressions (index, deref, immediately-invoked
+    // literals) — the checker's type is the only source.
+    ft2 := exprSkinkType(cg, fnExpr)
+    if ft2.kind == checker.TK_NAMED {
+        ft2 = resolveAliasCG(cg, ft2)
+    }
+    if ft2.kind == checker.TK_FUNCTION {
+        i := 0
+        for i < len(ft2.retTypes) {
+            out = append(out, llvmType(cg, ft2.retTypes[i]))
+            i = i + 1
+        }
+    }
+    return out
+}
+
 // emitClosureValue materializes an i8* closure handle for a named
 // function. Emits (once per function) a thunk with the closure calling
 // convention — hidden i8* env first argument, then the real params —
@@ -5972,8 +6097,22 @@ fn emitRet(cg: *CodeGen, llType: string, val: string) {
 // If the expression produces an owned (refcount +1) heap/composite value,
 // the result is registered as a scope temporary so it is released when
 // the enclosing scope exits.
+//
+// maxEmitExprDepth bounds the recursion: the parser's maxExprDepth only
+// limits *nested* expression nesting, but a left-leaning chain
+// (1+1+1+... of arbitrary length) produces an AST as deep as the chain —
+// unbounded recursion here would overflow the C stack on malicious input
+// (comp_error.md #150). The checker rejects such programs first with the
+// same cap; this guard keeps the emitter from crashing regardless.
+const maxEmitExprDepth = 200
 fn emitExpression(cg: *CodeGen, e: ast.Expr) -> string {
+    cg.emitDepth = cg.emitDepth + 1
+    if cg.emitDepth > maxEmitExprDepth {
+        cg.emitDepth = cg.emitDepth - 1
+        return "0"
+    }
     reg := emitExpressionRaw(cg, e)
+    cg.emitDepth = cg.emitDepth - 1
     if cg.terminated {
         return reg
     }
@@ -6192,7 +6331,7 @@ fn emitAddressOf(cg: *CodeGen, e: ast.Expr) -> string {
         arrReg := emitExpression(cg, arrExpr)
         leftType := exprLLType(cg, arrExpr)
         idxReg := emitExpression(cg, e.indexExpr[0])
-        emitIndexBoundsCheck(cg, arrExpr, arrReg, leftType, idxReg, e.indexExpr[0])
+        emitIndexBoundsCheck(cg, arrExpr, arrReg, leftType, idxReg, e.indexExpr[0], false)
         idxReg = emitIndexAsI32(cg, idxReg, e.indexExpr[0])
         elemType := exprLLType(cg, e)
         if str.Equal(leftType, "i8*") && exprIsByteSlice(cg, arrExpr) {
@@ -6571,21 +6710,9 @@ fn emitErrorProp(cg: *CodeGen, e: ast.Expr) -> string {
     aggType := exprLLType(cg, e.postfixTarget[0])
     // If the target is a call to a multi-return function, use the function's
     // return types to determine the aggregate type.
-    calleeRetTypes := []string{}
-    if e.postfixTarget[0].kind == ast.EX_CALL {
-        callFn := e.postfixTarget[0].callFunc[0]
-        callFnName := ""
-        if callFn.kind == ast.EX_IDENT {
-            callFnName = resolveDirectFnName(cg, callFn.ident)
-        } else if callFn.kind == ast.EX_FIELD {
-            dummy := false
-            callFnName, dummy = resolveMethodCallFnName(cg, callFn)
-        }
-        hasFn := mapStringStringSliceHasKeyCG(cg.fnRetTypes, callFnName)
-        if hasFn && len(cg.fnRetTypes[callFnName]) > 1 {
-            aggType = aggregateRetType(cg.fnRetTypes[callFnName])
-            calleeRetTypes = cg.fnRetTypes[callFnName]
-        }
+    calleeRetTypes := callExprRetLLTypes(cg, e.postfixTarget[0])
+    if len(calleeRetTypes) > 1 {
+        aggType = aggregateRetType(calleeRetTypes)
     }
     // Only handle aggregate returns (multi-value with error as last)
     if !str.StartsWith(aggType, "{ ") {
@@ -6603,15 +6730,42 @@ fn emitErrorProp(cg: *CodeGen, e: ast.Expr) -> string {
     errReg := nextReg(cg)
     emitfmt(cg, "  %s = extractvalue %s %s, %s\n", []string{errReg, aggType, aggReg, strconv.Itoa(errIdx)})
 
-    // Check if the error is non-nil. For errors.Error (a struct with a
-    // message: string field), "nil" means the message is empty (i8* null).
-    // The struct is %struct.errors_Error = { i8* }. Check field 0 against null.
+    // Check if the error is non-nil. For struct errors carrying a
+    // `message: string` field (e.g. errors.Error), "nil" follows the same
+    // semantics as `err == nil` in emitBinaryExpr: the message is empty —
+    // a null pointer OR a pointer to a zero byte. A bare null check would
+    // misclassify Error{message: ""} (e.g. errors.None()/New("")) as a
+    // real error, since string literals lower to non-null globals.
     errIsNilReg := nextReg(cg)
-    if str.Equal(errType, "%struct.errors_Error") {
-        // Extract the message field (index 0) from the error struct
+    errMsgFieldIdx := -1
+    if str.StartsWith(errType, "%struct.") && !str.EndsWith(errType, "*") {
+        errStructName := str.Substr(errType, str.Len("%struct."), str.Len(errType) - str.Len("%struct."))
+        errLayout := cg.structLayouts[errStructName]
+        if str.Len(errLayout.llType) > 0 {
+            for fi := 0; fi < len(errLayout.fields); fi = fi + 1 {
+                if str.Equal(errLayout.fields[fi], "message") {
+                    errMsgFieldIdx = fi
+                    break
+                }
+            }
+        }
+    }
+    if errMsgFieldIdx >= 0 {
+        // Extract the message field, then apply the null-or-empty check
+        // (mirrors the `== nil` struct-error comparison).
         msgReg := nextReg(cg)
-        emitfmt(cg, "  %s = extractvalue %s %s, 0\n", []string{msgReg, errType, errReg})
-        emitfmt(cg, "  %s = icmp eq i8* %s, null\n", []string{errIsNilReg, msgReg})
+        emitfmt(cg, "  %s = extractvalue %s %s, %s\n", []string{msgReg, errType, errReg, strconv.Itoa(errMsgFieldIdx)})
+        msgNullReg := nextReg(cg)
+        emitfmt(cg, "  %s = icmp eq i8* %s, null\n", []string{msgNullReg, msgReg})
+        zeroByteAlloca := emitAlloca(cg, "i8")
+        emitfmt(cg, "  store i8 0, i8* %s\n", []string{zeroByteAlloca})
+        safePtr := nextReg(cg)
+        emitfmt(cg, "  %s = select i1 %s, i8* %s, i8* %s\n", []string{safePtr, msgNullReg, zeroByteAlloca, msgReg})
+        firstByte := nextReg(cg)
+        emitfmt(cg, "  %s = load i8, i8* %s\n", []string{firstByte, safePtr})
+        emptyReg := nextReg(cg)
+        emitfmt(cg, "  %s = icmp eq i8 %s, 0\n", []string{emptyReg, firstByte})
+        emitfmt(cg, "  %s = or i1 %s, %s\n", []string{errIsNilReg, msgNullReg, emptyReg})
     } else {
         // For pointer-typed errors, compare against null directly
         if str.EndsWith(errType, "*") {
@@ -6758,6 +6912,108 @@ fn emitPowerOp(cg: *CodeGen, left: string, right: string, operandType: string) -
     finalResult := nextReg(cg)
     emitfmt(cg, "  %s = load %s, %s* %s\n", []string{finalResult, operandType, operandType, resultAlloca})
     return finalResult
+}
+
+// llvmIntWidth returns the bit width of an LLVM integer type name
+// ("i8" → 8, "i16" → 16, "i32" → 32, "i64" → 64); 0 for non-integers.
+fn llvmIntWidth(llType: string) -> int {
+    if str.Equal(llType, "i8") { return 8 }
+    if str.Equal(llType, "i16") { return 16 }
+    if str.Equal(llType, "i32") { return 32 }
+    if str.Equal(llType, "i64") { return 64 }
+    return 0
+}
+
+// emitIntDivRemGuard emits runtime guards for integer division and
+// remainder (comp_error.md #150): a zero divisor, and — signed only —
+// INT_MIN / -1 / INT_MIN % -1, both of which are LLVM undefined behavior
+// (sdiv/srem UB: optimizer miscompiles, x86 idiv traps). Skink_panic
+// never returns, so each guard block ends in `unreachable`.
+fn emitIntDivRemGuard(cg: *CodeGen, leftReg: string, rightReg: string, llType: string, isUnsigned: bool) {
+    width := llvmIntWidth(llType)
+    if width == 0 {
+        return
+    }
+    // Divisor zero → panic.
+    zeroCmp := nextReg(cg)
+    emitfmt(cg, "  %s = icmp eq %s %s, 0\n", []string{zeroCmp, llType, rightReg})
+    zeroLabel := nextLabel(cg)
+    okLabel := nextLabel(cg)
+    emitCondBranch(cg, zeroCmp, zeroLabel, okLabel)
+    emitLabel(cg, zeroLabel)
+    zeroMsg := emitStringLiteral(cg, "integer divide by zero")
+    emitfmt(cg, "  call void @Skink_panic(i8* %s)\n", []string{zeroMsg})
+    emitln(cg, "  unreachable")
+    emitLabel(cg, okLabel)
+    if isUnsigned {
+        return
+    }
+    // INT_MIN / -1 and INT_MIN % -1 → panic. Build the INT_MIN bit
+    // pattern as 1 << (width-1); `sub 0, 1` is -1.
+    minBits := nextReg(cg)
+    emitfmt(cg, "  %s = shl %s 1, %s\n", []string{minBits, llType, strconv.Itoa(width - 1)})
+    negOne := nextReg(cg)
+    emitfmt(cg, "  %s = sub %s 0, 1\n", []string{negOne, llType})
+    leftIsMin := nextReg(cg)
+    emitfmt(cg, "  %s = icmp eq %s %s, %s\n", []string{leftIsMin, llType, leftReg, minBits})
+    rightIsNegOne := nextReg(cg)
+    emitfmt(cg, "  %s = icmp eq %s %s, %s\n", []string{rightIsNegOne, llType, rightReg, negOne})
+    both := nextReg(cg)
+    emitfmt(cg, "  %s = and i1 %s, %s\n", []string{both, leftIsMin, rightIsNegOne})
+    ovfLabel := nextLabel(cg)
+    ok2Label := nextLabel(cg)
+    emitCondBranch(cg, both, ovfLabel, ok2Label)
+    emitLabel(cg, ovfLabel)
+    ovfMsg := emitStringLiteral(cg, "integer overflow")
+    emitfmt(cg, "  call void @Skink_panic(i8* %s)\n", []string{ovfMsg})
+    emitln(cg, "  unreachable")
+    emitLabel(cg, ok2Label)
+}
+
+// emitNegShiftGuard panics on a negative shift count (comp_error.md
+// #150). Counts at/above the bit width are NOT panics: like Go they
+// yield a defined result (0 for shl/lshr, all sign bits for ashr) —
+// see emitCheckedShift.
+fn emitNegShiftGuard(cg: *CodeGen, shiftReg: string, llType: string) {
+    width := llvmIntWidth(llType)
+    if width == 0 {
+        return
+    }
+    negCmp := nextReg(cg)
+    emitfmt(cg, "  %s = icmp slt %s %s, 0\n", []string{negCmp, llType, shiftReg})
+    badLabel := nextLabel(cg)
+    okLabel := nextLabel(cg)
+    emitCondBranch(cg, negCmp, badLabel, okLabel)
+    emitLabel(cg, badLabel)
+    badMsg := emitStringLiteral(cg, "negative shift amount")
+    emitfmt(cg, "  call void @Skink_panic(i8* %s)\n", []string{badMsg})
+    emitln(cg, "  unreachable")
+    emitLabel(cg, okLabel)
+}
+
+// emitCheckedShift emits a shift whose count is guarded against LLVM UB
+// (comp_error.md #150). A negative count panics; a count at/above the
+// bit width yields the Go-defined result (0 for shl/lshr, sign-extension
+// for ashr) — a select discards the UB instruction's poison result.
+fn emitCheckedShift(cg: *CodeGen, op: string, llType: string, left: string, right: string) -> string {
+    width := llvmIntWidth(llType)
+    if width == 0 {
+        return emitBinaryOp(cg, op, llType, left, right)
+    }
+    emitNegShiftGuard(cg, right, llType)
+    norm := emitBinaryOp(cg, op, llType, left, right)
+    wideCmp := nextReg(cg)
+    emitfmt(cg, "  %s = icmp sge %s %s, %s\n", []string{wideCmp, llType, right, strconv.Itoa(width)})
+    wide := "0"
+    if str.Equal(op, "ashr") {
+        // Arithmetic right shift by >= width produces all sign bits.
+        wideReg := nextReg(cg)
+        emitfmt(cg, "  %s = ashr %s %s, %s\n", []string{wideReg, llType, left, strconv.Itoa(width - 1)})
+        wide = wideReg
+    }
+    result := nextReg(cg)
+    emitfmt(cg, "  %s = select i1 %s, %s %s, %s %s\n", []string{result, wideCmp, llType, wide, llType, norm})
+    return result
 }
 
 // emitInfixExpr handles binary infix expressions.
@@ -7081,12 +7337,18 @@ fn emitInfixExpr(cg: *CodeGen, e: ast.Expr) -> string {
         return emitBinaryOp(cg, "mul", integerType, left, right)
     }
     if str.Equal(op, "/") {
+        // Division by zero and INT_MIN / -1 are LLVM UB — panic instead
+        // (comp_error.md #150).
+        emitIntDivRemGuard(cg, left, right, integerType, unsignedOps)
         if unsignedOps {
             return emitBinaryOp(cg, "udiv", integerType, left, right)
         }
         return emitBinaryOp(cg, "sdiv", integerType, left, right)
     }
     if str.Equal(op, "%") {
+        // Remainder by zero and INT_MIN % -1 are LLVM UB — panic instead
+        // (comp_error.md #150).
+        emitIntDivRemGuard(cg, left, right, integerType, unsignedOps)
         if unsignedOps {
             return emitBinaryOp(cg, "urem", integerType, left, right)
         }
@@ -7136,15 +7398,18 @@ fn emitInfixExpr(cg: *CodeGen, e: ast.Expr) -> string {
         return emitBinaryOp(cg, "xor", integerType, left, right)
     }
     if str.Equal(op, "<<") {
-        return emitBinaryOp(cg, "shl", integerType, left, right)
+        // Out-of-range shift counts are LLVM UB — panic instead
+        // (comp_error.md #150).
+        return emitCheckedShift(cg, "shl", integerType, left, right)
     }
     if str.Equal(op, ">>") {
         // Unsigned values need a logical shift (zero-fill); signed values
-        // need an arithmetic shift to preserve the sign bit.
+        // need an arithmetic shift to preserve the sign bit. Out-of-range
+        // counts are LLVM UB — panic instead (comp_error.md #150).
         if unsignedOps {
-            return emitBinaryOp(cg, "lshr", integerType, left, right)
+            return emitCheckedShift(cg, "lshr", integerType, left, right)
         }
-        return emitBinaryOp(cg, "ashr", integerType, left, right)
+        return emitCheckedShift(cg, "ashr", integerType, left, right)
     }
 
     return "0"
@@ -10509,6 +10774,35 @@ fn emitMethodCall(cg: *CodeGen, e: ast.Expr) -> string {
     receiverExpr := fnExpr.fieldTarget[0]
     methodName := fnExpr.fieldName
 
+    // A fn-typed struct field invoked as obj.f(args): the checker only
+    // records the field access's semantic type in the field-closure
+    // branch, so TK_FUNCTION here unambiguously means "call the stored
+    // closure". This must run before method-name resolution — a free
+    // function coincidentally named like the field (e.g. a module-level
+    // Open next to a Driver.Open field) would otherwise steal the call.
+    fft := exprSkinkType(cg, fnExpr)
+    if fft.kind == checker.TK_NAMED {
+        fft = resolveAliasCG(cg, fft)
+    }
+    if fft.kind == checker.TK_FUNCTION {
+        retType, cparams := closureCallTypes(cg, fft)
+        handleReg := emitExpression(cg, fnExpr)
+        fargs := []string{}
+        i := 0
+        for i < len(e.callArgs) {
+            argReg := emitExpression(cg, e.callArgs[i])
+            argType := exprLLType(cg, e.callArgs[i])
+            if i < len(cparams) {
+                expected := cparams[i]
+                argReg = coerceExprToParamType(cg, argReg, argType, expected, e.callArgs[i])
+                argType = expected
+            }
+            fargs = append(fargs, str.Concat(argType, str.Concat(" ", argReg)))
+            i = i + 1
+        }
+        return emitClosureCall(cg, retType, cparams, handleReg, fargs)
+    }
+
     // Template dispatch: if receiver is a template fat pointer, emit indirect call
     tmplRecvLLType := exprLLType(cg, receiverExpr)
     if str.StartsWith(tmplRecvLLType, "%template.") {
@@ -10895,14 +11189,20 @@ fn i64Operand(cg: *CodeGen, op32: string) -> string {
 
 // emitIndexBoundsCheck emits Skink_bounds_check(i, i+1, len) before an
 // element index `a[i]` — unchecked indexing is silent UB
-// (comp_error.md #78). Only slice-typed targets are checked: the checker's
-// recorded type must be TK_ARRAY (or, lacking a record, an i8* target
-// that exprIsByteSlice recognises as a byte slice). Raw *T pointer
-// indexing stays unchecked — pointers have no length header. Plain
-// strings are also unchecked: they are NUL-terminated with no header,
-// and a strlen per index would make per-char loops quadratic.
-fn emitIndexBoundsCheck(cg: *CodeGen, targetExpr: ast.Expr, target: string, leftType: string, idxReg: string, idxExpr: ast.Expr) {
+// (comp_error.md #78). Slice-typed targets are checked via
+// Skink_slice_len; plain strings via Skink_str_len (O(1) for RC strings —
+// the header size field at payload-8 — so per-char loops stay linear;
+// strlen only for literals/foreign NUL-terminated text). Previously
+// strings were unchecked: `s[i]` read past the allocation (info leak)
+// and `s[i] = c` wrote past it (heap corruption) (comp_error.md #149).
+// Reads are bounded by the allocation length (len+1: the NUL terminator
+// byte is readable as 0); writes are bounded by the string length (len:
+// writing over the terminator would leave the string unterminated).
+// Raw *T pointer indexing stays unchecked — pointers have no length
+// header.
+fn emitIndexBoundsCheck(cg: *CodeGen, targetExpr: ast.Expr, target: string, leftType: string, idxReg: string, idxExpr: ast.Expr, isWrite: bool) {
     isSlice := false
+    isString := false
     tt := checker.exprTypeLookup(cg.checker, cg.currentFilePath, targetExpr.line, targetExpr.col)
     if tt.kind == checker.TK_NAMED {
         tt = resolveAliasCG(cg, tt)
@@ -10912,15 +11212,35 @@ fn emitIndexBoundsCheck(cg: *CodeGen, targetExpr: ast.Expr, target: string, left
     } else if tt.kind == 0 && str.Equal(leftType, "i8*") && exprIsByteSlice(cg, targetExpr) {
         isSlice = true
     }
-    if !isSlice {
+    if tt.kind == checker.TK_BUILTIN && str.Equal(tt.name, "string") {
+        isString = true
+    } else if tt.kind == 0 && str.Equal(leftType, "i8*") && !exprIsByteSlice(cg, targetExpr) {
+        // No recorded type (emit-time re-derivation failed): an i8*
+        // target that is not a byte slice is a string value — channels
+        // and fn values cannot be indexed (rejected by the checker), so
+        // the remaining i8* indexable is a string.
+        isString = true
+    }
+    if !isSlice && !isString {
         return
     }
-    // Slice element count via Skink_slice_len: nil-safe (0, so any index
+    // Element count/length via the runtime: nil-safe (0, so any index
     // trips the bounds panic — comp_error.md #69) and view-aware, since a
     // view's length is not stored at payload-8.
     rawPtr := emitI8Ptr(cg, target, leftType)
     lenReg := nextReg(cg)
-    emitfmt(cg, "  %s = call i64 @Skink_slice_len(i8* %s)\n", []string{lenReg, rawPtr})
+    if isSlice {
+        emitfmt(cg, "  %s = call i64 @Skink_slice_len(i8* %s)\n", []string{lenReg, rawPtr})
+    } else {
+        emitfmt(cg, "  %s = call i64 @Skink_str_len(i8* %s)\n", []string{lenReg, rawPtr})
+        if !isWrite {
+            // Reads may touch the NUL terminator byte (index == len) —
+            // it is part of the allocation and reads as 0.
+            plusOne := nextReg(cg)
+            emitfmt(cg, "  %s = add i64 %s, 1\n", []string{plusOne, lenReg})
+            lenReg = plusOne
+        }
+    }
     // Skink_bounds_check takes i32 params; coerce the index and length.
     lo := emitIndexAsI32(cg, idxReg, idxExpr)
     hi := nextReg(cg)
@@ -10949,7 +11269,7 @@ fn emitIndexExpr(cg: *CodeGen, e: ast.Expr) -> string {
     // ABI — unwrap the element base pointer before the GEP.
     if str.Equal(leftType, "i8*") {
         idx := emitExpression(cg, e.indexExpr[0])
-        emitIndexBoundsCheck(cg, e.indexTarget[0], target, leftType, idx, e.indexExpr[0])
+        emitIndexBoundsCheck(cg, e.indexTarget[0], target, leftType, idx, e.indexExpr[0], false)
         idx = emitIndexAsI32(cg, idx, e.indexExpr[0])
         base := target
         if exprIsByteSlice(cg, e.indexTarget[0]) {
@@ -10965,7 +11285,7 @@ fn emitIndexExpr(cg: *CodeGen, e: ast.Expr) -> string {
     }
 
     idx := emitExpression(cg, e.indexExpr[0])
-    emitIndexBoundsCheck(cg, e.indexTarget[0], target, leftType, idx, e.indexExpr[0])
+    emitIndexBoundsCheck(cg, e.indexTarget[0], target, leftType, idx, e.indexExpr[0], false)
     idx = emitIndexAsI32(cg, idx, e.indexExpr[0])
     elemType := exprLLType(cg, e)
 
@@ -11352,9 +11672,10 @@ fn emitSliceExpr(cg: *CodeGen, e: ast.Expr) -> string {
     // Byte slices ([]uint8/[]int8) share the i8* LLVM type and must use the
     // array-slice path (length at offset -8).
     if str.Equal(targetType, "i8*") && !exprIsByteSlice(cg, e.sliceTarget[0]) {
-        // Compute the source length
+        // Compute the source length — Skink_str_len is O(1) for RC
+        // strings (payload-8 size field) and strlen for literals.
         srcLen := nextReg(cg)
-        emitfmt(cg, "  %s = call i64 @strlen(i8* %s)\n", []string{srcLen, target})
+        emitfmt(cg, "  %s = call i64 @Skink_str_len(i8* %s)\n", []string{srcLen, target})
         srcLen32 := nextReg(cg)
         emitfmt(cg, "  %s = trunc i64 %s to i32\n", []string{srcLen32, srcLen})
 
@@ -11640,6 +11961,9 @@ fn emitStatement(cg: *CodeGen, stmt: ast.Stmt) {
     if cg.dbgEnabled {
         emitDbgLocation(cg, stmt.line, stmt.col)
     }
+    if cg.covEnabled && stmt.line > 0 && stmt.kind != ast.ST_BLOCK && !cg.terminated {
+        emitCovProbe(cg, stmt)
+    }
     if stmt.kind == ast.ST_VAR {
         emitVarStmt(cg, stmt)
         return
@@ -11709,6 +12033,47 @@ fn emitStatement(cg: *CodeGen, stmt: ast.Stmt) {
         return
     }
     emitExprStmt(cg, stmt)
+}
+
+// emitCovProbe emits a coverage counter increment for a statement and
+// records the statement's source position in the coverage map. Each
+// statement gets a monotonically increasing counter id that indexes the
+// counter array in cov_rt.c at runtime.
+fn emitCovProbe(cg: *CodeGen, stmt: ast.Stmt) {
+    id := cg.covN
+    cg.covN = cg.covN + 1
+    emit(cg, str.Concat("  call void @Skink_cov_hit(i32 ",
+        str.Concat(strconv.Itoa(id), ")\n")))
+    cg.covEntries = append(cg.covEntries,
+        str.Concat(cg.currentFilePath,
+            str.Concat("\t", str.Concat(strconv.Itoa(stmt.line),
+                str.Concat("\t", str.Concat(strconv.Itoa(stmt.col),
+                    str.Concat("\t", cg.currentFnName)))))))
+}
+
+// emitCoverageGlobals emits the coverage-map globals consumed by
+// cov_rt.c: the probe count, the serialized "file\tline\tcol\tfn" map,
+// and a declaration for the hit function. Called once at the end of
+// emitProgram when -cov is active.
+fn emitCoverageGlobals(cg: *CodeGen) {
+    emitStringGlobal(cg, "declare void @Skink_cov_hit(i32)\n")
+    blob := str.NewBuilder(4096)
+    i := 0
+    for i < len(cg.covEntries) {
+        blob.Write(cg.covEntries[i])
+        blob.Write("\n")
+        i = i + 1
+    }
+    blobStr := str.BuilderValue(blob)
+    blobLen := str.Len(blobStr) + 1
+    emitStringGlobal(cg, str.Concat("@__skink_cov_n = global i32 ",
+        str.Concat(strconv.Itoa(cg.covN), "\n")))
+    emitStringGlobal(cg, str.Concat("@__skink_covmap = constant [",
+        str.Concat(strconv.Itoa(blobLen),
+            str.Concat(" x i8] c\"",
+                str.Concat(escapeLLVMString(blobStr), "\\00\"\n")))))
+    emitStringGlobal(cg, str.Concat("@__skink_covmap_len = constant i32 ",
+        str.Concat(strconv.Itoa(str.Len(blobStr)), "\n")))
 }
 
 // emitMatchStmt handles bare match statements (used as control flow, not
@@ -12306,28 +12671,18 @@ fn emitVarStmt(cg: *CodeGen, stmt: ast.Stmt) {
             return
         }
         aggReg := emitExpression(cg, stmt.varValue[0])
-        // Determine the return types of the call
-        callFnName := ""
-        hasFn := false
-        if stmt.varValue[0].kind == ast.EX_CALL {
-            callFn := stmt.varValue[0].callFunc[0]
-            if callFn.kind == ast.EX_IDENT {
-                callFnName = resolveDirectFnName(cg, callFn.ident)
-            } else if callFn.kind == ast.EX_FIELD {
-                dummy := false
-                callFnName, dummy = resolveMethodCallFnName(cg, callFn)
-            }
-            hasFn = mapStringStringSliceHasKeyCG(cg.fnRetTypes, callFnName)
-        }
+        // Determine the return types of the call — covers direct calls,
+        // methods, and fn-typed callees (closure vars and fields).
+        callRets := callExprRetLLTypes(cg, stmt.varValue[0])
         aggType := exprLLType(cg, stmt.varValue[0])
-        if hasFn && len(cg.fnRetTypes[callFnName]) > 1 {
-            aggType = aggregateRetType(cg.fnRetTypes[callFnName])
+        if len(callRets) > 1 {
+            aggType = aggregateRetType(callRets)
         }
         i := 0
         for i < len(stmt.varNames) {
             elemType := "i32"
-            if hasFn && i < len(cg.fnRetTypes[callFnName]) {
-                elemType = cg.fnRetTypes[callFnName][i]
+            if i < len(callRets) {
+                elemType = callRets[i]
             }
             ptrReg := emitAlloca(cg, elemType)
             reg := nextReg(cg)
@@ -12621,27 +12976,16 @@ fn emitTupleAssignStmt(cg: *CodeGen, stmt: ast.Stmt) {
         return
     }
     aggReg := emitExpression(cg, stmt.assignValue[0])
-    callFnName := ""
-    hasFn := false
-    if stmt.assignValue[0].kind == ast.EX_CALL {
-        callFn := stmt.assignValue[0].callFunc[0]
-        if callFn.kind == ast.EX_IDENT {
-            callFnName = resolveDirectFnName(cg, callFn.ident)
-        } else if callFn.kind == ast.EX_FIELD {
-            dummy := false
-            callFnName, dummy = resolveMethodCallFnName(cg, callFn)
-        }
-        hasFn = mapStringStringSliceHasKeyCG(cg.fnRetTypes, callFnName)
-    }
+    callRets := callExprRetLLTypes(cg, stmt.assignValue[0])
     aggType := exprLLType(cg, stmt.assignValue[0])
-    if hasFn && len(cg.fnRetTypes[callFnName]) > 1 {
-        aggType = aggregateRetType(cg.fnRetTypes[callFnName])
+    if len(callRets) > 1 {
+        aggType = aggregateRetType(callRets)
     }
     i := 0
     for i < len(stmt.tupleTargets) {
         elemType := "i32"
-        if hasFn && i < len(cg.fnRetTypes[callFnName]) {
-            elemType = cg.fnRetTypes[callFnName][i]
+        if i < len(callRets) {
+            elemType = callRets[i]
         }
         reg := nextReg(cg)
         emitln(cg, str.Concat(str.Concat(str.Concat(str.Concat(str.Concat(str.Concat("  ", reg), " = extractvalue "), aggType), " "), aggReg), str.Concat(", ", strconv.Itoa(i))))
@@ -12777,7 +13121,7 @@ fn emitIndexAssignment(cg: *CodeGen, target: ast.Expr, valReg: string, valType: 
     // for writes we must store a single byte. Byte slices share the i8*
     // LLVM type but are slice headers — unwrap the data pointer first.
     if str.Equal(leftType, "i8*") {
-        emitIndexBoundsCheck(cg, arrExpr, arrReg, leftType, idxReg, idxExpr)
+        emitIndexBoundsCheck(cg, arrExpr, arrReg, leftType, idxReg, idxExpr, true)
         idxReg = emitIndexAsI32(cg, idxReg, idxExpr)
         base := arrReg
         if exprIsByteSlice(cg, arrExpr) {
@@ -12809,7 +13153,7 @@ fn emitIndexAssignment(cg: *CodeGen, target: ast.Expr, valReg: string, valType: 
         return
     }
 
-    emitIndexBoundsCheck(cg, arrExpr, arrReg, leftType, idxReg, idxExpr)
+    emitIndexBoundsCheck(cg, arrExpr, arrReg, leftType, idxReg, idxExpr, true)
     idxReg = emitIndexAsI32(cg, idxReg, idxExpr)
     // Slice values are headers — the element base lives at h->data.
     actualBase := arrReg
@@ -14675,6 +15019,10 @@ fn emitFnDecl(cg: *CodeGen, d: ast.Decl) {
     savedEscapedVars := cg.escapedVars
     savedCapturedVars := cg.capturedVars
     savedDeferQueueAlloca := cg.deferQueueAlloca
+    savedCurrentFnName := cg.currentFnName
+    // Record the enclosing function for coverage-map entries (-cov);
+    // restored with the rest of the saved state below.
+    cg.currentFnName = d.fnName
     cg.currentModule = ""
     // Use the original function name (d.fnName) for module detection,
     // since fnName may have been renamed (e.g. main -> _skink_main).
@@ -15112,6 +15460,7 @@ fn emitFnDecl(cg: *CodeGen, d: ast.Decl) {
     cg.dbgCurrentFile = ""
     cg.dbgCurrentLoc = ""
     cg.dbgDefaultLoc = ""
+    cg.currentFnName = savedCurrentFnName
 }
 
 // emitStructDecl handles struct declarations (emits type definition).
@@ -15832,6 +16181,13 @@ pub fn emitProgram(cg: *CodeGen, decls: []ast.Stmt) -> string {
     // Emit debug metadata at the end of the module
     if cg.dbgEnabled {
         emitDebugMetadata(cg)
+    }
+
+    // Emit the coverage map globals consumed by cov_rt.c when -cov is
+    // active; the map is embedded in the binary so the .skinkcov file
+    // written at exit is self-describing.
+    if cg.covEnabled {
+        emitCoverageGlobals(cg)
     }
 
     return String(cg)
@@ -16562,6 +16918,7 @@ fn emitRuntimeDecls(cg: *CodeGen) {
     emitHeader(cg, "declare i64 @Skink_rc_count(i8*)\n")
     emitHeader(cg, "declare i8* @Skink_slice_ensure(i8*, i64)\n")
     emitHeader(cg, "declare i64 @Skink_slice_len(i8*)\n")
+    emitHeader(cg, "declare i64 @Skink_str_len(i8*)\n")
     emitHeader(cg, "declare i64 @Skink_slice_cap(i8*)\n")
     emitHeader(cg, "declare i8* @Skink_slice_data(i8*)\n")
     emitHeader(cg, "declare i8* @Skink_slice_base(i8*)\n")
@@ -17050,6 +17407,15 @@ fn exprCallLLType(cg: *CodeGen, e: ast.Expr) -> string {
                 ft = resolveAliasCG(cg, ft)
             }
             if ft.kind == checker.TK_FUNCTION && len(ft.retTypes) > 0 {
+                // Multi-return closures yield an aggregate — matching
+                // the call emission, which wraps >1 retTypes.
+                if len(ft.retTypes) > 1 {
+                    var rets []string
+                    for ri := 0; ri < len(ft.retTypes); ri = ri + 1 {
+                        rets = append(rets, llvmType(cg, ft.retTypes[ri]))
+                    }
+                    return aggregateRetType(rets)
+                }
                 return llvmType(cg, ft.retTypes[0])
             }
             // Function-pointer LLVM types look like "i32 (i32, i32)*".
@@ -17100,7 +17466,22 @@ fn exprCallLLType(cg: *CodeGen, e: ast.Expr) -> string {
             return rt
         }
         // Unknown method target (e.g. a function-typed field invoked via
-        // method-call syntax): use the checker's recorded type.
+        // method-call syntax): the field access's recorded TK_FUNCTION
+        // type gives the exact return shape, including aggregates.
+        ftt := exprSkinkType(cg, fnExpr)
+        if ftt.kind == checker.TK_NAMED {
+            ftt = resolveAliasCG(cg, ftt)
+        }
+        if ftt.kind == checker.TK_FUNCTION && len(ftt.retTypes) > 0 {
+            if len(ftt.retTypes) > 1 {
+                var frets []string
+                for ri := 0; ri < len(ftt.retTypes); ri = ri + 1 {
+                    frets = append(frets, llvmType(cg, ftt.retTypes[ri]))
+                }
+                return aggregateRetType(frets)
+            }
+            return llvmType(cg, ftt.retTypes[0])
+        }
         st := exprSkinkType(cg, e)
         if st.kind == checker.TK_NAMED {
             st = resolveAliasCG(cg, st)

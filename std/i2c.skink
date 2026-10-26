@@ -25,6 +25,8 @@ module i2c
 
 import "std/errors"
 import "std/libc"
+
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
 import "std/strconv"
 
 extern fn open(path: string, flags: int) -> int
@@ -62,13 +64,13 @@ pub struct Bus {
         if self.hw {
             n := read(self.fd, buf, len)
             if n < 0 {
-                buf[0] = 0
+                Skink_mem_write_byte(buf, int64(0), 0)
                 return buf, errors.New("i2c read failed")
             }
-            buf[n] = 0
+            Skink_mem_write_byte(buf, int64(n), 0)
             return buf, errors.New("")
         }
-        buf[len] = 0
+        Skink_mem_write_byte(buf, int64(len), 0)
         return buf, errors.New("")
     }
 
@@ -76,8 +78,8 @@ pub struct Bus {
     pub fn WriteReg(self: *Bus, reg: int, val: int) -> errors.Error {
         if self.hw {
             buf := libc.malloc(2)
-            buf[0] = reg & 255
-            buf[1] = val & 255
+            Skink_mem_write_byte(buf, int64(0), reg & 255)
+            Skink_mem_write_byte(buf, int64(1), val & 255)
             n := write(self.fd, buf, 2)
             libc.free(buf)
             if n != 2 {
@@ -91,7 +93,7 @@ pub struct Bus {
     pub fn ReadReg(self: *Bus, reg: int) -> (int, errors.Error) {
         if self.hw {
             buf := libc.malloc(2)
-            buf[0] = reg & 255
+            Skink_mem_write_byte(buf, int64(0), reg & 255)
             if write(self.fd, buf, 1) != 1 {
                 libc.free(buf)
                 return 0, errors.New("i2c register select failed")

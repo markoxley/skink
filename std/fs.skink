@@ -40,6 +40,16 @@ extern fn fread(buf: string, size: int64, count: int64, fp: int64) -> int
 extern fn fseek(fp: int64, offset: int64, whence: int) -> int
 extern fn ftell(fp: int64) -> int64
 extern fn fflush(fp: int64) -> int
+// Skink_mem_alloc returns an RC-managed block — strings returned by
+// ReadAll must be RC so ordinary reference release reclaims them; a raw
+// libc.malloc buffer is only freed by an explicit libc.free and leaks in
+// every caller that just drops the reference (comp_error.md #153).
+extern fn Skink_mem_alloc(size: int64) -> string
+// Skink_mem_write_byte stores a byte without the string bounds check —
+// used for the NUL terminator at the end of a freshly allocated buffer
+// (comp_error.md #149). Caller guarantees the allocation covers idx+1.
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
+extern fn Skink_mem_byte(ptr: string, idx: int64) -> int
 
 // Platform-agnostic filesystem runtime (fs_rt.c).
 // These wrappers abstract platform-specific struct layouts (stat, dirent)
@@ -233,6 +243,9 @@ pub fn Open(path: string, mode: string) -> (File, errors.Error) {
 }
 
 // ReadAll reads the entire contents of a file into a string.
+// Text-only contract: the result is NUL-terminated, so a binary file
+// containing NUL bytes is truncated at the first one — binary readers
+// must use explicit-length APIs (comp_error.md #151).
 pub fn ReadAll(path: string) -> (string, errors.Error) {
     if isIntPath(path) {
         key := intKey(path)
@@ -241,12 +254,15 @@ pub fn ReadAll(path: string) -> (string, errors.Error) {
             return "", errors.New("open failed")
         }
         count := int(size)
-        buf := libc.malloc(count + 1)
+        // RC-managed so ordinary reference release reclaims the buffer
+        // (comp_error.md #153).
+        buf := Skink_mem_alloc(int64(count + 1))
         data := Skink_embed_ptr(key)
         if count > 0 {
             libc.memcpy(buf, data, count)
         }
-        buf[count] = 0
+        // Terminator byte (raw write — index == allocation size - 1).
+        Skink_mem_write_byte(buf, int64(count), 0)
         return buf, errors.New("")
     }
     fp := fopen(path, "r")
@@ -264,13 +280,19 @@ pub fn ReadAll(path: string) -> (string, errors.Error) {
         fclose(fp)
         return "", errors.New("tell failed")
     }
+    // Reject files too large for the int32 string length model rather
+    // than truncating the read (comp_error.md #153).
+    if size > int64(2147483646) {
+        fclose(fp)
+        return "", errors.New("file too large")
+    }
     // Seek back to the beginning before reading.
     fseek(fp, int64(0), 0) // SEEK_SET = 0
     count := int(size)
-    buf := libc.malloc(count + 1)
+    buf := Skink_mem_alloc(int64(count + 1))
     n := fread(buf, 1, count, fp)
-    // Null-terminate the buffer at the actual read count.
-    buf[n] = 0
+    // Null-terminate the buffer at the actual read count (raw write).
+    Skink_mem_write_byte(buf, int64(n), 0)
     fclose(fp)
     return buf, errors.New("")
 }
@@ -388,13 +410,15 @@ pub fn Stat(path: string) -> (FileInfo, errors.Error) {
         libc.free(mtimeBuf)
         return FileInfo{}, errors.New("stat failed")
     }
-    // Read mode (4 bytes, little-endian int32)
-    mode := int(modeBuf[0]) | (int(modeBuf[1]) << 8) |
-            (int(modeBuf[2]) << 16) | (int(modeBuf[3]) << 24)
+    // Read mode (4 bytes, little-endian int32). Raw reads: the stat
+    // out-buffers are raw malloc'd blocks, not NUL-terminated strings
+    // (comp_error.md #149).
+    mode := Skink_mem_byte(modeBuf, int64(0)) | (Skink_mem_byte(modeBuf, int64(1)) << 8) |
+            (Skink_mem_byte(modeBuf, int64(2)) << 16) | (Skink_mem_byte(modeBuf, int64(3)) << 24)
     // Read size (8 bytes, little-endian int64)
     size := int64(0)
     for i := 0; i < 8; i = i + 1 {
-        b := int64(sizeBuf[i])
+        b := int64(Skink_mem_byte(sizeBuf, int64(i)))
         shift := int64(i * 8)
         size = size | (b << shift)
     }
@@ -465,9 +489,10 @@ pub fn ReadDir(path: string) -> ([]DirEntry, errors.Error) {
         // Copy the name into its own allocation.
         name := libc.malloc(nameLen + 1)
         libc.memcpy(name, nameBuf, nameLen)
-        name[nameLen] = 0
+        // Terminator byte (raw write — freshly malloc'd buffer).
+        Skink_mem_write_byte(name, int64(nameLen), 0)
         // Read isDir flag (4 bytes, little-endian int32)
-        isDir := int(isDirBuf[0]) != 0
+        isDir := Skink_mem_byte(isDirBuf, int64(0)) != 0
         entries = append(entries, DirEntry{Name: name, IsDir: isDir})
     }
     libc.free(nameBuf)
@@ -499,7 +524,8 @@ fn pathBase(p: string) -> string {
     length := last - start + 1
     result := libc.malloc(length + 1)
     libc.memcpy(result, string(int64(p) + int64(start)), length)
-    result[length] = 0
+    // Terminator byte (raw write — freshly malloc'd buffer).
+    Skink_mem_write_byte(result, int64(length), 0)
     return result
 }
 

@@ -24,6 +24,8 @@
 module encrypt_test
 
 import "std/encrypt"
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
+extern fn Skink_mem_byte(ptr: string, idx: int64) -> int
 import "std/libc"
 import "std/str"
 import "std/strconv"
@@ -168,7 +170,7 @@ pub fn TestAESDifferentKeys() {
     }
     same := true
     for i := 0; i < r1.length; i = i + 1 {
-        if r1.data[i] != r2.data[i] {
+        if Skink_mem_byte(r1.data, int64(i)) != Skink_mem_byte(r2.data, int64(i)) {
             same = false
         }
     }
@@ -248,13 +250,13 @@ pub fn TestAESLenNulKey() {
     k1 := libc.malloc(16)
     k2 := libc.malloc(16)
     for i := 0; i < 16; i = i + 1 {
-        k1[i] = 65
-        k2[i] = 65
+        Skink_mem_write_byte(k1, int64(i), 65)
+        Skink_mem_write_byte(k2, int64(i), 65)
     }
-    k1[5] = 0
-    k2[5] = 0
-    k1[6] = 66 // differ only after the NUL
-    k2[6] = 67
+    Skink_mem_write_byte(k1, int64(5), 0)
+    Skink_mem_write_byte(k2, int64(5), 0)
+    Skink_mem_write_byte(k1, int64(6), 66) // differ only after the NUL
+    Skink_mem_write_byte(k2, int64(6), 67)
     c1 := encrypt.NewAESLen(k1, 16)
     c2 := encrypt.NewAESLen(k2, 16)
     plaintext := "secret data"
@@ -281,7 +283,7 @@ pub fn TestAESGCMTagReject() {
         Errorf("encrypt failed: " + e1.message)
     }
     // Layout is nonce(12) || tag(16) || ciphertext — corrupt a tag byte.
-    enc.data[20] = (int(enc.data[20]) + 1) % 256
+    Skink_mem_write_byte(enc.data, int64(20), (int(Skink_mem_byte(enc.data, int64(20))) + 1) % 256)
     _, e2 := aes.Decrypt(enc.data, enc.length)
     if e2.message == "" {
         Errorf("corrupted GCM tag decrypted successfully")

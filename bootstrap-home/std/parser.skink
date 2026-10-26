@@ -1142,6 +1142,20 @@ fn parseStatement(p: *Parser) -> ast.Stmt {
         return parseDeferStmt(p)
     }
     if curIs(p, lexer.T_MATCH) {
+        // `match` followed by an operator that cannot begin a match
+        // subject means the user picked the keyword as an identifier —
+        // say so plainly instead of cascading through arm parsing.
+        pk := peek(p).kind
+        if pk == lexer.T_COLONASS || pk == lexer.T_ASSIGN ||
+            pk == lexer.T_COMMA || pk == lexer.T_SEMICOLON ||
+            pk == lexer.T_DOT || pk == lexer.T_LBRACKET {
+            errorAt(p, p.curTok, "cannot use 'match' as an identifier")
+            // Drop the keyword so the next statement parses fresh;
+            // the operator left behind errors normally, not as a
+            // match-arm cascade.
+            advance(p)
+            return ast.Stmt{kind: 0, line: p.curTok.line, col: p.curTok.col}
+        }
         return parseMatchStmt(p)
     }
     if curIs(p, lexer.T_SPAWN) {
