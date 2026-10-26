@@ -98,6 +98,13 @@ static int skink_is_mapped(const void *p) {
 // back only when this thread's probe flag is set — faults on other
 // threads (or outside a probe) restore the default disposition and
 // re-raise so genuine crashes still crash (VULN-17).
+#if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
+// AddressSanitizer interface: reports the first poisoned byte in a
+// region so the string heuristic stops at the true object boundary.
+extern const void *__asan_region_is_poisoned(const volatile void *beg,
+                                             size_t size);
+#endif
+
 static __thread sigjmp_buf skink_probe_jb;
 static __thread volatile sig_atomic_t skink_probe_active = 0;
 
@@ -119,8 +126,15 @@ static void skink_probe_install(void) {
   sigaction(SIGBUS, &sa, NULL);
 }
 
-// skink_byte_readable returns 1 if reading *p does not fault.
+// skink_byte_readable returns 1 if reading *p does not fault. Under
+// AddressSanitizer the probe byte is checked against the poison map
+// first — a fault-free OS read of a redzone is still a reportable
+// overread.
 static int skink_byte_readable(const void *p) {
+#if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
+  if (__asan_region_is_poisoned((const volatile void *)p, 1) != NULL)
+    return 0;
+#endif
   static pthread_once_t once = PTHREAD_ONCE_INIT;
   pthread_once(&once, skink_probe_install);
   if (sigsetjmp(skink_probe_jb, 1) == 0) {
@@ -260,6 +274,21 @@ static int skink_looks_like_string(const void *p) {
     size_t span = skink_probe_span(q);
     if (span == 0)
       return 0;
+#if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
+    // Under AddressSanitizer the OS-level probes report redzone bytes as
+    // readable, so a page-spanning memchr reads poisoned shadow. Clamp
+    // the scan to the first poisoned byte — which is also the true end
+    // of the object, making the heuristic strictly more precise.
+    {
+      void *poisoned = __asan_region_is_poisoned((const volatile void *)q,
+                                               span);
+      if (poisoned != NULL) {
+        span = (size_t)((const char *)poisoned - q);
+        if (span == 0)
+          return 0;
+      }
+    }
+#endif
     if (memchr(q, 0, span) != NULL)
       return 1;
     q += span;

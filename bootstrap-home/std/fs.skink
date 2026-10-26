@@ -37,8 +37,10 @@ extern fn fputc(c: int, fp: int64) -> int
 extern fn fwrite(ptr: string, size: int64, count: int64, fp: int64) -> int
 extern fn feof(fp: int64) -> int
 extern fn fread(buf: string, size: int64, count: int64, fp: int64) -> int
-extern fn fseek(fp: int64, offset: int64, whence: int) -> int
-extern fn ftell(fp: int64) -> int64
+// fseek/ftell go through 64-bit wrappers — plain fseek/ftell use
+// 32-bit long on Windows, silently truncating >2 GiB positions.
+extern fn Skink_fs_seek64(fp: int64, offset: int64, whence: int) -> int
+extern fn Skink_fs_tell64(fp: int64) -> int64
 extern fn fflush(fp: int64) -> int
 // Skink_mem_alloc returns an RC-managed block — strings returned by
 // ReadAll must be RC so ordinary reference release reclaims them; a raw
@@ -270,12 +272,12 @@ pub fn ReadAll(path: string) -> (string, errors.Error) {
         return "", errors.New("open failed")
     }
     // Seek to end to determine size.
-    rc := fseek(fp, int64(0), 2) // SEEK_END = 2
+    rc := Skink_fs_seek64(fp, int64(0), 2) // SEEK_END = 2
     if rc != 0 {
         fclose(fp)
         return "", errors.New("seek failed")
     }
-    size := ftell(fp)
+    size := Skink_fs_tell64(fp)
     if size < 0 {
         fclose(fp)
         return "", errors.New("tell failed")
@@ -287,7 +289,7 @@ pub fn ReadAll(path: string) -> (string, errors.Error) {
         return "", errors.New("file too large")
     }
     // Seek back to the beginning before reading.
-    fseek(fp, int64(0), 0) // SEEK_SET = 0
+    Skink_fs_seek64(fp, int64(0), 0) // SEEK_SET = 0
     count := int(size)
     buf := Skink_mem_alloc(int64(count + 1))
     n := fread(buf, 1, count, fp)

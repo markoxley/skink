@@ -37,6 +37,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 #include <time.h>
 #include <sys/stat.h>  // MinGW provides sys/stat.h
 #include <io.h>        // _access, _close, _read, _write, _dup2
@@ -942,4 +943,25 @@ int Skink_embed_isdir(const char *path) {
     }
   }
   return 0;
+}
+
+// Skink_fs_seek64/Skink_fs_tell64 provide 64-bit file positioning on all
+// platforms: plain fseek/ftell use `long`, which is only 32-bit on Windows,
+// so seeks and sizes past 2 GiB silently truncated (VULNERABILITIES.md
+// ">2GiB file ops" limitation). Windows uses _fseeki64/_ftelli64; POSIX
+// uses fseeko/ftello with off_t (64-bit under _FILE_OFFSET_BITS=64).
+int Skink_fs_seek64(void *fp, int64_t offset, int whence) {
+#ifdef _WIN32
+  return _fseeki64((FILE *)fp, offset, whence);
+#else
+  return fseeko((FILE *)fp, (off_t)offset, whence);
+#endif
+}
+
+int64_t Skink_fs_tell64(void *fp) {
+#ifdef _WIN32
+  return (int64_t)_ftelli64((FILE *)fp);
+#else
+  return (int64_t)ftello((FILE *)fp);
+#endif
 }

@@ -24,6 +24,8 @@
 module mcp
 
 import "std/json"
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
+extern fn Skink_mem_byte(ptr: string, idx: int64) -> int
 import "std/errors"
 import "std/str"
 import "std/libc"
@@ -120,7 +122,7 @@ fn readLineStdio() -> (string, bool) {
             buffer.Free()
             return result, false
         }
-        buffer.WriteByte(int(ch[0]))
+        buffer.WriteByte(Skink_mem_byte(ch, int64(0)))
     }
 }
 
@@ -141,7 +143,7 @@ fn readLineSocket(conn: *net.Connection) -> (string, bool) {
             buffer.Free()
             return result, false
         }
-        buffer.WriteByte(int(ch[0]))
+        buffer.WriteByte(Skink_mem_byte(ch, int64(0)))
     }
 }
 
@@ -201,7 +203,7 @@ fn parseHttpRequest(conn: net.Connection) -> (string, string, string, bool) {
             headerBuf.Free()
             return "", "", "", false
         }
-        headerBuf.WriteByte(int(ch[0]))
+        headerBuf.WriteByte(Skink_mem_byte(ch, int64(0)))
         libc.free(ch)
 
         hdr := headerBuf.String()
@@ -283,6 +285,9 @@ fn parseHttpRequest(conn: net.Connection) -> (string, string, string, bool) {
             }
             readSoFar = readSoFar + n
         }
+        // Terminate before Substr — strlen-based ops would scan past the
+        // contentLength+1 allocation on binary payloads (ASan OOB).
+        Skink_mem_write_byte(bodyBuf, int64(readSoFar), 0)
         body = str.Substr(bodyBuf, 0, readSoFar)
         libc.free(bodyBuf)
     }

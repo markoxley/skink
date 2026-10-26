@@ -30,6 +30,7 @@
 // === Windows (Winsock2) ===
 #include <stdio.h>
 #include <string.h>
+#include <limits.h>
 
 // WSAStartup is called lazily by Skink_net_init() (defined in skink_compat.h).
 // We use a constructor to ensure WSAStartup runs before any socket call.
@@ -169,12 +170,46 @@ int Skink_net_resolve_and_connect(const char *host, int port, int timeoutMs) {
         continue;
       }
     }
+    // The Skink fd ABI is int (32-bit): a SOCKET handle outside that
+    // range cannot be represented — fail rather than silently truncating
+    // it (VULNERABILITIES.md "Windows SOCKET width" limitation).
+    if (sock > (SOCKET)INT_MAX) {
+      closesocket(sock);
+      continue;
+    }
     fd = (int)sock;
     break; // Success
   }
 
   freeaddrinfo(result);
   return fd;
+}
+
+
+// Skink_socket_wrap/Skink_accept_wrap mirror the POSIX socket()/accept()
+// signatures but validate that the returned SOCKET fits the int fd ABI —
+// a handle beyond INT32_MAX is closed and reported as -1 instead of being
+// silently truncated (VULNERABILITIES.md "Windows SOCKET width").
+int Skink_socket_wrap(int domain, int ty, int protocol) {
+  SOCKET s = socket(domain, ty, protocol);
+  if (s == INVALID_SOCKET)
+    return -1;
+  if (s > (SOCKET)INT_MAX) {
+    closesocket(s);
+    return -1;
+  }
+  return (int)s;
+}
+
+int Skink_accept_wrap(int fd, char *addr, int *len) {
+  SOCKET s = accept((SOCKET)fd, (struct sockaddr *)addr, len);
+  if (s == INVALID_SOCKET)
+    return -1;
+  if (s > (SOCKET)INT_MAX) {
+    closesocket(s);
+    return -1;
+  }
+  return (int)s;
 }
 
 #else
@@ -355,3 +390,13 @@ int Skink_net_resolve_and_connect(const char *host, int port, int timeoutMs) {
 }
 
 #endif // _WIN32
+
+// POSIX counterparts of the Windows SOCKET-width wrappers — socket fds are
+// already int here, so these are pass-throughs (VULNERABILITIES.md).
+int Skink_socket_wrap(int domain, int ty, int protocol) {
+  return socket(domain, ty, protocol);
+}
+
+int Skink_accept_wrap(int fd, char *addr, int *len) {
+  return accept(fd, (struct sockaddr *)addr, (socklen_t *)len);
+}

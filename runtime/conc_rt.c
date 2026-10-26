@@ -32,6 +32,9 @@ extern void Skink_panic(char *msg);
 extern void *Skink_rc_alloc_typed(int64_t payload_size, void *dtor_ptr);
 extern void Skink_rc_retain(void *ptr);
 extern void Skink_rc_release(void *ptr);
+// Frees the calling thread's panic-handler pool before a detached
+// thread exits (panic_rt.c) — prevents a ~12.8KB per-thread leak.
+extern void Skink_panic_thread_cleanup(void);
 #include <stdint.h>
 #ifdef _WIN32
 // close() for file descriptors provided by io.h via skink_compat.h
@@ -449,6 +452,7 @@ static void *spawn_trampoline(void *arg) {
     Skink_rc_release(sa->future);
   }
   free(sa);
+  Skink_panic_thread_cleanup();
   return result;
 }
 
@@ -493,6 +497,7 @@ static void *web_conn_trampoline(void *arg) {
   void *code = *(void **)wc->fn;
   ((void (*)(void *, void *, int))code)(wc->fn, wc->server, wc->fd);
   free(wc);
+  Skink_panic_thread_cleanup();
   return NULL;
 }
 
@@ -536,6 +541,7 @@ static void *web_tls_conn_trampoline(void *arg) {
   ((void (*)(void *, void *, int, int64_t))code)(wc->fn, wc->server, wc->fd,
                                                 wc->ctx);
   free(wc);
+  Skink_panic_thread_cleanup();
   return NULL;
 }
 

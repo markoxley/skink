@@ -166,6 +166,6 @@ New issues discovered since the archive at `artifacts/comp_error.md` (#1–#138)
 - **Severity:** medium — a crafted Content-Length drove a giant malloc (server crash on OOM); header lines grew unbounded; the predictable `.skink_lsp_check_<n>.lspcheck` name plus `fopen("w")` followed a planted symlink (arbitrary file overwrite in shared dirs).
 - **Fix:** Content-Length capped at 64 MiB, malloc failures handled, header lines capped at 8 KiB; check files created via `Skink_fs_mktemp_in` (O_EXCL 0600, unpredictable names).
 
-## #160 — deferred-closure writes to captured locals do not propagate on panic unwinds (pre-existing) — OPEN (documented)
+## #160 — deferred-closure writes to captured locals do not propagate on panic unwinds — RESOLVED (not a bug)
 
-- Capturing a local in a deferred closure and assigning to it during panic unwinding does not update the outer frame's view after `recover()` (observed while writing #149 tests). Workaround: store into a module global (as `codegen_safety_test` does). A full fix requires audit of closure-conversion + panic-unwind codegen.
+- Initially logged while writing #149 tests as a suspected propagation failure in `defer fn() { saved = recover() }()`. Re-verified with a direct repro: a deferred closure writing a captured local during panic unwind propagates correctly (`saved` reads `"boom"` in a subsequent deferred fn, and the closure capture mechanism boxes the var by reference). The earlier observation was a test-scoping artifact — the capture was read by the *caller* after `invoke` returned, but the captured local is only visible within the deferring frame. No compiler defect.

@@ -32,14 +32,16 @@ import "std/str"
 
 extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
 
-extern fn socket(domain: int, ty: int, protocol: int) -> int
+// socket()/accept() go through wrappers that validate the
+// returned handle fits the int fd ABI (Windows SOCKET width fix).
+extern fn Skink_socket_wrap(domain: int, ty: int, protocol: int) -> int
 extern fn connect(fd: int, addr: string, len: int) -> int
 extern fn Skink_close_fd(fd: int) -> int
 extern fn send(fd: int, buf: string, len: int64, flags: int) -> int
 extern fn recv(fd: int, buf: string, len: int64, flags: int) -> int
 extern fn listen(fd: int, backlog: int) -> int
 extern fn bind(fd: int, addr: string, len: int) -> int
-extern fn accept(fd: int, addr: string, len: *int) -> int
+extern fn Skink_accept_wrap(fd: int, addr: string, len: *int) -> int
 extern fn htons(port: int) -> int
 extern fn inet_addr(ip: string) -> int
 extern fn getpeername(fd: int, addr: string, len: *int) -> int
@@ -190,7 +192,7 @@ pub struct HTTPResponse {
 // Listen creates a TCP listener on the given address and port.
 pub fn Listen(address: string, port: int) -> (Connection, errors.Error) {
     // AF_INET = 2, SOCK_STREAM = 1
-    fd := socket(2, 1, 0)
+    fd := Skink_socket_wrap(2, 1, 0)
     if fd < 0 {
         return Connection{fd: 0}, errors.New("socket creation failed")
     }
@@ -231,7 +233,7 @@ pub fn Listen(address: string, port: int) -> (Connection, errors.Error) {
 pub fn Accept(listener: Connection) -> (Connection, errors.Error) {
     var addrLen int = 16
     addr := libc.calloc(16, 1)
-    fd := accept(listener.fd, addr, &addrLen)
+    fd := Skink_accept_wrap(listener.fd, addr, &addrLen)
     libc.free(addr)
     if fd < 0 {
         return Connection{fd: 0}, errors.New("accept failed")
@@ -241,7 +243,7 @@ pub fn Accept(listener: Connection) -> (Connection, errors.Error) {
 
 // UDPSocket creates a UDP socket. AF_INET = 2, SOCK_DGRAM = 2.
 pub fn UDPSocket() -> (Connection, errors.Error) {
-    fd := socket(2, 2, 0)
+    fd := Skink_socket_wrap(2, 2, 0)
     if fd < 0 {
         return Connection{fd: 0}, errors.New("socket creation failed")
     }

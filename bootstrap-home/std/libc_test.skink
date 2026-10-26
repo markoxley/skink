@@ -26,6 +26,7 @@ module libc_test
 import "std/libc"
 
 extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
+extern fn Skink_mem_byte(ptr: string, idx: int64) -> int
 import "std/str"
 import "testing"
 
@@ -33,7 +34,7 @@ import "testing"
 pub fn TestMallocFree() {
     p := libc.malloc(32)
     Skink_mem_write_byte(p, int64(0), 42)
-    if p[0] != 42 {
+    if Skink_mem_byte(p, int64(0)) != 42 {
         Errorf("malloc should return writable memory")
     }
     libc.free(p)
@@ -74,7 +75,7 @@ pub fn TestMemset() {
     buf := libc.malloc(4)
     libc.memset(buf, 65, 3)
     Skink_mem_write_byte(buf, int64(3), 0)
-    if buf[0] != 65 || buf[1] != 65 || buf[2] != 65 {
+    if Skink_mem_byte(buf, int64(0)) != 65 || Skink_mem_byte(buf, int64(1)) != 65 || Skink_mem_byte(buf, int64(2)) != 65 {
         Errorf("memset should fill bytes with given value")
     }
     libc.free(buf)

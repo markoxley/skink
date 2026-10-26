@@ -105,6 +105,20 @@ int Skink_panic_push_handler(void *jmp_buf_ptr) {
   return 1;
 }
 
+// Skink_panic_thread_cleanup frees this thread's panic-handler pool and
+// stored message. Thread trampolines call it just before returning so
+// detached workers (web connection handlers, spawn/async threads,
+// ruleset loops) do not leak the ~64-slot jmp_buf pool — LeakSanitizer
+// flagged 12800 bytes lost per thread exit.
+void Skink_panic_thread_cleanup(void) {
+  free(panic_jmps);
+  panic_jmps = NULL;
+  panic_jmps_cap = 0;
+  panic_depth = 0;
+  panic_msg_storage = NULL;
+  panic_pending = 0;
+}
+
 // Skink_panic_pop_handler removes the topmost recovery point.
 void Skink_panic_pop_handler() {
   if (panic_depth > 0) {
@@ -182,11 +196,22 @@ void Skink_panic(char *msg) {
 // them — a plain malloc leaks under RC ownership (comp_error.md #104).
 extern void *Skink_rc_alloc(int64_t payload_size);
 // Skink_format_float formats a double as a string with the given precision.
+// The buffer is sized by an snprintf probe instead of a fixed 64 bytes —
+// a large precision or magnitude silently truncated output before
+// (VULNERABILITIES.md "Skink_format_float" edge). prec is clamped to a
+// sane range so a hostile/garbage value cannot force a giant allocation.
 char *Skink_format_float(double f, int prec) {
-  char *buf = (char *)Skink_rc_alloc(64);
+  if (prec < 0)
+    prec = 0;
+  if (prec > 400)
+    prec = 400;
+  int n = snprintf(NULL, 0, "%.*f", prec, f);
+  if (n < 0)
+    return NULL;
+  char *buf = (char *)Skink_rc_alloc((int64_t)n + 1);
   if (!buf)
     return NULL;
-  snprintf(buf, 64, "%.*f", prec, f);
+  snprintf(buf, (size_t)n + 1, "%.*f", prec, f);
   return buf;
 }
 

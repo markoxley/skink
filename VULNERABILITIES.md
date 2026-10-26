@@ -120,10 +120,34 @@ regression test per the AGENTS.md policy.
 - **L7** coverage file O_NOFOLLOW (#153) — fixed.
 - **L8** fmt width overflow + unchecked mallocs (#157) — fixed.
 - **L13** resolver semver parse overflow (#156) — fixed.
-- **L9/L10/L11/L12** documented Windows/2 GiB/`Skink_format_float`/
-  binary-file-NUL limitations — see comp_error.md.
+- **L9** Windows SOCKET width — `Skink_socket_wrap`/`Skink_accept_wrap`
+  validate SOCKET ≤ INT_MAX; the `(int)sock` narrowing in
+  `Skink_net_resolve_and_connect` is bounds-checked — fixed.
+- **L10** >2 GiB file ops — `Skink_fs_seek64`/`Skink_fs_tell64` use
+  `_fseeki64`/`fseeko` — fixed.
+- **L11** `Skink_format_float` fixed-64B truncation — snprintf-probed
+  buffer + precision clamp — fixed.
+- **L12** binary-file NUL — Skink strings reject embedded NULs (M2), and
+  file I/O uses explicit-length `fread`/`fwrite`/`Skink_mem_byte` paths —
+  covered.
+
+## ASan gate findings (second pass — all fixed)
+
+- **Per-thread panic pool leak** — `panic_jmps`/`panic_msg_storage`
+  __thread allocations leaked ~12800 bytes per detached thread exit
+  (28× in web live tests, per-goroutine). `Skink_panic_thread_cleanup`
+  is now called at the end of every thread trampoline (`spawn`,
+  `web_conn`, `web_tls_conn`, `Skink_ruleset_loop`).
+- **strlen overreads on raw buffers** — `p[0]`/`buf[i]`/`ch[0]`
+  checked-index reads on uninitialized `libc.malloc` storage called
+  `strlen` and scanned past the allocation (libc_test, mcp_test 2-byte
+  thread overread, reflect_test global overread). Converted to
+  `Skink_mem_byte`; `mcp` body buffer is now terminated before
+  `str.Substr`.
 
 ## Open / documented
 
-- **#160** deferred-closure writes to captured locals do not propagate on
-  panic unwinds (pre-existing; workaround: module globals).
+- **#160** deferred-closure writes to captured locals do not propagate
+  on panic unwinds — re-verified: NOT a bug. The capture-by-reference
+  mechanism propagates correctly; the earlier observation was a
+  test-scoping artifact (comp_error.md #160 updated).
