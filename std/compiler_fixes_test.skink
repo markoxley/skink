@@ -1915,3 +1915,128 @@ pub fn TestStructMapAndSetFields() {
     testing.AssertEqualInt(10, int(h.scores["alpha"]), "map struct field alpha")
     testing.AssertEqualInt(25, int(h.scores["beta"]), "map struct field beta")
 }
+
+// === comp_error.md #125 — cross-module fn-type alias unification ===
+// types.Middleware-style aliases keep the inner alias nominal on the
+// expected side while declared functions report the expanded signature;
+// the checker now unifies aliases recursively inside composite types.
+
+// rhLogMw is a middleware written against the helper module's aliases —
+// this is the exact shape that failed to compile before the fix.
+fn rhLogMw(next: regress_helper.RHHandler) -> regress_helper.RHHandler {
+    return fn(r: regress_helper.RHReq, w: *regress_helper.RHResp) {
+        next(r, w)
+    }
+}
+
+// TestMiddlewareAliasUnify guards comp_error.md #125: a fn(Handler) ->
+// Handler value must be assignable to a Middleware alias parameter.
+pub fn TestMiddlewareAliasUnify() {
+    testing.AssertEqualInt(0, regress_helper.ApplyMiddleware(rhLogMw), "middleware alias accepts structural fn")
+    var m regress_helper.RHMiddleware = rhLogMw
+    _ = m
+}
+
+// === comp_error.md #128 — simple enums are transparent int aliases ===
+// Previously nothing could produce a value of a nominal enum type:
+// `var k CFKind = CFKindA` and `take(CFKindB)` were rejected.
+
+enum CFKind {
+    CFKindA
+    CFKindB
+}
+
+fn takeKind(k: CFKind) -> int {
+    return k
+}
+
+// TestEnumNominalUse guards comp_error.md #128.
+pub fn TestEnumNominalUse() {
+    var k CFKind = CFKindA
+    testing.AssertEqualInt(0, takeKind(k), "enum value assignable to enum type")
+    testing.AssertEqualInt(1, takeKind(CFKindB), "enum const passed to enum param")
+    testing.AssertEqualInt(1, takeKind(CFKind(1)), "enum conversion Kind(int)")
+    switch k {
+    case CFKindA:
+        testing.AssertTrue(true, "case on enum subject")
+    default:
+        testing.Fail()
+    }
+}
+
+// === comp_error.md #129 — byte is a transparent uint8 alias ===
+
+// TestByteSliceAssign guards comp_error.md #129: element assignment into
+// a []byte must accept int literals and uint8 values like []uint8 does.
+pub fn TestByteSliceAssign() {
+    f := make([]byte, 4)
+    f[0] = 30
+    f[1] = uint8(7)
+    testing.AssertEqualInt(37, int(f[0]) + int(f[1]), "[]byte element assign")
+}
+
+// === comp_error.md #131 — fn declared before its struct return type ===
+// mkFwdCfg is declared textually BEFORE struct FwdCfg; reading a field
+// off the returned value previously emitted `ptr` instead of i32.
+
+fn mkFwdCfg() -> (FwdCfg, errors.Error) {
+    return FwdCfg{port: 42}, errors.None()
+}
+
+struct FwdCfg {
+    port: int
+}
+
+// TestFnBeforeStructReturn guards comp_error.md #131.
+pub fn TestFnBeforeStructReturn() {
+    c, _ := mkFwdCfg()
+    testing.AssertEqualInt(42, c.port, "forward-declared struct return field")
+}
+
+// === comp_error.md #132 — &s[i] on a string strides 1 byte ===
+
+// TestStringAddrOfIndex guards comp_error.md #132: &s[i] must compute
+// base+i (stride 1), matching byte-wise s[i] semantics — it previously
+// stepped 4 bytes per index.
+pub fn TestStringAddrOfIndex() {
+    s := "abcdef0123456789"
+    p0 := int64(&s[0])
+    p1 := int64(&s[1])
+    p2 := int64(&s[2])
+    testing.AssertTrue(p1 - p0 == 1, "&s[1] - &s[0] stride")
+    testing.AssertTrue(p2 - p0 == 2, "&s[2] - &s[0] stride")
+}
+
+// === comp_error.md #133 — wide int literals in int64 contexts ===
+
+// TestInt64LiteralContext guards comp_error.md #133: an integer literal
+// wider than i32 assigned to or combined with int64 must keep its full
+// value — it was silently truncated to int32 and sign-extended.
+pub fn TestInt64LiteralContext() {
+    var b int64 = 2208988800
+    testing.AssertTrue(b == 2208988800, "var int64 = literal > i32 max")
+    secs := b - 2208988800
+    testing.AssertTrue(secs == 0, "int64 op with oversized literal")
+    testing.AssertTrue(int64(0) - 2208988800 == -2208988800, "0 - oversized literal")
+}
+
+// === comp_error.md #134 — tuple assignment to package-level vars ===
+
+struct TupleBox {
+    v: int
+}
+
+var cfTupleGlobal TupleBox
+var cfTupleFlag bool
+
+fn mkTuplePair() -> (TupleBox, bool) {
+    return TupleBox{v: 42}, true
+}
+
+// TestGlobalTupleAssign guards comp_error.md #134: `g, _ = mk()` on a
+// package-level var was silently dropped, leaving the zero value.
+pub fn TestGlobalTupleAssign() {
+    cfTupleGlobal, cfTupleFlag = mkTuplePair()
+    testing.AssertEqualInt(42, cfTupleGlobal.v, "global tuple-assign value")
+    testing.AssertTrue(cfTupleFlag, "global tuple-assign second value")
+}

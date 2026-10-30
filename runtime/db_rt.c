@@ -24,6 +24,27 @@
 #include <sqlite3.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
+
+/* Skink strings handed to Skink code must outlive the sqlite row buffer:
+ * sqlite3_column_text/name return pointers into the statement, which
+ * sqlite3_finalize (Result.Close) and the next sqlite3_step (Result.Next)
+ * invalidate — Scan callers then observed corrupted bytes
+ * (comp_error.md #130). Copy into an RC-managed block so ordinary release
+ * reclaims it. */
+extern void *Skink_rc_alloc(int64_t payload_size);
+static char *skink_db_copy_text(const unsigned char *txt) {
+  if (!txt) {
+    return "";
+  }
+  size_t len = strlen((const char *)txt);
+  char *out = (char *)Skink_rc_alloc((int64_t)len + 1);
+  if (!out) {
+    return "";
+  }
+  memcpy(out, txt, len + 1); // includes the NUL terminator
+  return out;
+}
 
 /* Skink_res_track / Skink_res_untrack (rc_rt.c) register native-resource
  * blocks so heap scanners treat them as reachable and the process-exit
@@ -131,11 +152,7 @@ const char *Skink_db_column_text(int64_t stmt, int col) {
   if (!stmt) {
     return "";
   }
-  const unsigned char *txt = sqlite3_column_text((sqlite3_stmt *)stmt, col);
-  if (!txt) {
-    return "";
-  }
-  return (const char *)txt;
+  return skink_db_copy_text(sqlite3_column_text((sqlite3_stmt *)stmt, col));
 }
 
 // Return the name of a column in the result set.
@@ -143,7 +160,7 @@ const char *Skink_db_column_name(int64_t stmt, int col) {
   if (!stmt) {
     return "";
   }
-  return sqlite3_column_name((sqlite3_stmt *)stmt, col);
+  return skink_db_copy_text((const unsigned char *)sqlite3_column_name((sqlite3_stmt *)stmt, col));
 }
 
 // Finalize a prepared statement, releasing its resources.  Untracks the

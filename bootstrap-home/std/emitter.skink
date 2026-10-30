@@ -195,6 +195,7 @@ pub struct CodeGen {
     arraySizes:    map[string]ArrayMeta  // the array sizes
     structLayouts: map[string]StructLayout  // the struct layouts
     structDecls:   map[string]ast.Decl  // the struct decls
+    layoutPending: map[string]bool  // struct layouts being lazily computed
     structLLNames: map[string]string  // the struct LLVM names
     structDtors:   map[string]string  // the struct dtors
     arrayDtors:    map[string]string  // the array dtors
@@ -374,6 +375,7 @@ pub fn newCodeGen(c: *checker.Checker, dbgEnabled: bool, covEnabled: bool) -> Co
     cg.arraySizes = make(map[string]ArrayMeta)
     cg.structLayouts = make(map[string]StructLayout)
     cg.structDecls = make(map[string]ast.Decl)
+    cg.layoutPending = make(map[string]bool)
     cg.structLLNames = make(map[string]string)
     cg.structDtors = make(map[string]string)
     cg.arrayDtors = make(map[string]string)
@@ -2222,11 +2224,54 @@ fn namedLLType(cg: *CodeGen, name: string) -> string {
     if str.Contains(name, ".") {
         return str.Concat("%struct.", sanitizeName(name))
     }
+    // A declared struct whose layout has not been computed yet — e.g. a
+    // function declared textually before the struct it returns
+    // (comp_error.md #131). Without this the type degraded to i8*, so
+    // call sites passed/read `ptr` where the signature promised a struct.
+    // The pending guard keeps mutually-recursive pointer structs
+    // (A{*B}, B{*A}) from recursing forever during lazy layout.
+    structKey := checker.structDeclKey(cg.checker, name)
+    if str.Len(structKey) == 0 && str.Len(cg.currentModule) > 0 {
+        structKey = checker.structDeclKey(cg.checker, str.Concat(str.Concat(cg.currentModule, "."), name))
+    }
+    if str.Len(structKey) > 0 {
+        if !cg.layoutPending[structKey] && str.Len(cg.structLayouts[structKey].llType) == 0 {
+            cg.layoutPending[structKey] = true
+            sd := checker.getStructDecl(cg.checker, structKey)
+            if sd.kind != 0 {
+                registerStructLayout(cg, structKey, computeStructLayout(cg, structKey, sd), sd)
+            }
+            cg.layoutPending[structKey] = false
+        }
+        layout := cg.structLayouts[structKey]
+        if str.Len(layout.llType) > 0 {
+            return layout.llType
+        }
+        return str.Concat("%struct.", sanitizeName(structKey))
+    }
     // Generic type parameters (unqualified, not a known struct/tagged-union)
     // are erased to opaque pointers. This matches the Go compiler's behavior
     // after monomorphization replaces T with concrete types; when emitting
     // a library module standalone, generic functions remain with T as i8*.
     return "i8*"
+}
+
+// registerStructLayout stores a struct layout under its qualified name,
+// the short name, and the sanitized name — the same keying the emitProgram
+// pre-pass uses — plus the declaration. Used both by the pre-pass and by
+// namedLLType's lazy layout path (comp_error.md #131).
+fn registerStructLayout(cg: *CodeGen, name: string, layout: StructLayout, d: ast.Decl) {
+    cg.structLayouts[name] = layout
+    cg.structDecls[name] = d
+    idx := str.LastIndexOf(name, ".")
+    if idx >= 0 {
+        shortName := str.Substr(name, idx + 1, str.Len(name) - idx - 1)
+        cg.structLayouts[shortName] = layout
+        cg.structDecls[shortName] = d
+    }
+    sanitizedName := sanitizeName(name)
+    cg.structLayouts[sanitizedName] = layout
+    cg.structDecls[sanitizedName] = d
 }
 
 // === Tagged union helpers ===
@@ -5692,6 +5737,18 @@ fn coerceExprToParamType(cg: *CodeGen, argReg: string, argType: string, paramTyp
                 emitfmt(cg, "  %s = trunc %s %s to %s\n", []string{reg, argType, argReg, paramType})
                 return reg
             }
+            // Widening an integer literal: emit the full literal text
+            // rather than sext'ing the already-emitted i32 constant — a
+            // literal wider than i32 (e.g. 2208988800 in `i64var - lit`
+            // or `var b int64 = lit`) was truncated to i32 at parse time,
+            // silently producing the wrong value (comp_error.md #133).
+            if e.kind == ast.EX_INT && str.Len(e.strVal) > 0 {
+                return intLitToI64String(e.strVal)
+            }
+            if e.kind == ast.EX_PREFIX && str.Equal(e.prefixOp, "-") && len(e.prefixRight) > 0 &&
+                e.prefixRight[0].kind == ast.EX_INT && str.Len(e.prefixRight[0].strVal) > 0 {
+                return intLitToI64String(str.Concat("-", e.prefixRight[0].strVal))
+            }
             reg := nextReg(cg)
             if argBits == 1 || exprIsUnsignedInt(cg, e) {
                 emitfmt(cg, "  %s = zext %s %s to %s\n", []string{reg, argType, argReg, paramType})
@@ -6334,7 +6391,11 @@ fn emitAddressOf(cg: *CodeGen, e: ast.Expr) -> string {
         emitIndexBoundsCheck(cg, arrExpr, arrReg, leftType, idxReg, e.indexExpr[0], false)
         idxReg = emitIndexAsI32(cg, idxReg, e.indexExpr[0])
         elemType := exprLLType(cg, e)
-        if str.Equal(leftType, "i8*") && exprIsByteSlice(cg, arrExpr) {
+        if str.Equal(leftType, "i8*") {
+            // Strings and byte slices are byte-addressed — `&s[i]` must
+            // step one byte per index to match s[i] read/write semantics;
+            // the generic path computed elemType as i32 and strode 4
+            // bytes per index (comp_error.md #132).
             elemType = "i8"
         }
         elemPtrType := str.Concat(elemType, "*")
@@ -12122,12 +12183,31 @@ fn emitSpawnStmt(cg: *CodeGen, stmt: ast.Stmt) {
             receiverExpr = recvExpr
         }
     } else {
+        // A non-ident/non-field callee — fn literals land here
+        // (`spawn fn() { ... }()`, comp_error.md #126).
+        ft := exprSkinkType(cg, fnExpr)
+        if ft.kind == checker.TK_NAMED {
+            ft = resolveAliasCG(cg, ft)
+        }
+        if ft.kind == checker.TK_FUNCTION {
+            emitSpawnClosureCall(cg, callExpr, fnExpr, ft)
+            return
+        }
         emitExpression(cg, callExpr)
         return
     }
     // Function values (closure variables, fn-typed fields) cannot be
-    // spawned through a static thunk — fall back to a synchronous call.
+    // spawned through a static thunk — spawn them through a closure
+    // thunk that invokes the handle indirectly (comp_error.md #126).
     if str.Len(fnName) == 0 || !mapStringStringSliceHasKeyCG(cg.fnRetTypes, fnName) {
+        ft := exprSkinkType(cg, fnExpr)
+        if ft.kind == checker.TK_NAMED {
+            ft = resolveAliasCG(cg, ft)
+        }
+        if ft.kind == checker.TK_FUNCTION {
+            emitSpawnClosureCall(cg, callExpr, fnExpr, ft)
+            return
+        }
         emitExpression(cg, callExpr)
         return
     }
@@ -12348,6 +12428,133 @@ fn emitSpawnStmt(cg: *CodeGen, stmt: ast.Stmt) {
         emitStore(cg, argTypes[i], argRegs[i], argTypes[i], fieldPtr)
     }
     // Call Skink_spawn
+    packedI8 := nextReg(cg)
+    emitfmt(cg, "  %s = bitcast %s* %s to i8*\n", []string{packedI8, structLLName, packedReg})
+    emitfmt(cg, "  call void @Skink_spawn(i8* bitcast (i8* (i8*)* @%s to i8*), i8* %s, i8* null)\n", []string{thunkName, packedI8})
+}
+
+// emitSpawnClosureCall handles `spawn f(args...)` where the callee is a
+// function *value* — a fn literal or a fn-typed variable/field — rather
+// than a named function (comp_error.md #126). The closure handle and the
+// evaluated call arguments are packed into a heap struct; a generated
+// thunk loads the code pointer out of the handle (field 0 of every
+// closure block) and invokes it with the handle as the hidden env
+// argument, matching emitClosureCall's calling convention.
+fn emitSpawnClosureCall(cg: *CodeGen, callExpr: ast.Expr, fnExpr: ast.Expr, ft: checker.TType) {
+    retLL, paramLLTypes := closureCallTypes(cg, ft)
+
+    handleReg := emitExpression(cg, fnExpr)
+    // The spawned thread owns a reference on the closure env so the
+    // parent cannot free the captures out from under it. Retain/release
+    // are table-guarded, so this is a safe no-op for the constant handle
+    // of a capture-free literal.
+    handleReg = emitRetain(cg, handleReg, "i8*")
+
+    // Pack { i8* handle, arg0, arg1, ... } — field 0 is the handle.
+    argTypes := []string{}
+    argRegs := []string{}
+    argTypes = append(argTypes, "i8*")
+    argRegs = append(argRegs, handleReg)
+    i := 0
+    for i < len(callExpr.callArgs) {
+        argReg := emitExpression(cg, callExpr.callArgs[i])
+        argLL := exprLLType(cg, callExpr.callArgs[i])
+        if str.Equal(argLL, "") {
+            argLL = "i32"
+        }
+        if i < len(paramLLTypes) {
+            argReg = coerceExprToParamType(cg, argReg, argLL, paramLLTypes[i], callExpr.callArgs[i])
+            argLL = paramLLTypes[i]
+        }
+        if isHeapLLType(argLL) {
+            argReg = emitRetain(cg, argReg, argLL)
+        }
+        argTypes = append(argTypes, argLL)
+        argRegs = append(argRegs, argReg)
+        i = i + 1
+    }
+    nArgs := len(argTypes)
+
+    structBody := "{ "
+    i = 0
+    for i < nArgs {
+        if i > 0 {
+            structBody = str.Concat(structBody, ", ")
+        }
+        structBody = str.Concat(structBody, argTypes[i])
+        i = i + 1
+    }
+    structBody = str.Concat(structBody, " }")
+    structLLName := str.Concat(str.Concat("%Skink_spawn_clos_", strconv.Itoa(cg.spawnThunkCounter)), "_t")
+    emitHeader(cg, str.Concat(structLLName, str.Concat(" = type ", str.Concat(structBody, "\n"))))
+
+    thunkName := str.Concat("Skink_spawn_thunk_", strconv.Itoa(cg.spawnThunkCounter))
+    cg.spawnThunkCounter = cg.spawnThunkCounter + 1
+    codeSig := closureCodeSig(retLL, paramLLTypes)
+
+    thunkParts := []string{}
+    thunkParts = append(thunkParts, "define i8* @")
+    thunkParts = append(thunkParts, thunkName)
+    thunkParts = append(thunkParts, "(i8* %arg) {\n")
+    thunkParts = append(thunkParts, str.Concat(str.Concat("  %args = bitcast i8* %arg to ", structLLName), "*\n"))
+    thunkParts = append(thunkParts, str.Concat(str.Concat(str.Concat("  %hptr = getelementptr inbounds ", structLLName), str.Concat(", ", str.Concat(structLLName, "* %args, i32 0, i32 0\n"))), ""))
+    thunkParts = append(thunkParts, "  %handle = load i8*, i8** %hptr\n")
+    thunkParts = append(thunkParts, "  %cblock = bitcast i8* %handle to i8**\n")
+    thunkParts = append(thunkParts, "  %code = load i8*, i8** %cblock\n")
+    thunkParts = append(thunkParts, str.Concat(str.Concat("  %f = bitcast i8* %code to ", codeSig), "*\n"))
+    // Extract the call arguments (fields 1..n-1).
+    i = 1
+    for i < nArgs {
+        thunkParts = append(thunkParts, str.Concat(str.Concat(str.Concat(str.Concat("  %a", strconv.Itoa(i)), str.Concat(" = getelementptr inbounds ", structLLName)), str.Concat(str.Concat(", ", str.Concat(structLLName, "* %args, i32 0, i32 ")), str.Concat(strconv.Itoa(i), "\n"))), ""))
+        thunkParts = append(thunkParts, str.Concat(str.Concat(str.Concat(str.Concat("  %v", strconv.Itoa(i)), str.Concat(" = load ", argTypes[i])), str.Concat(", ", str.Concat(argTypes[i], str.Concat("* %a", strconv.Itoa(i))))), "\n"))
+        i = i + 1
+    }
+    // Invoke the code pointer with the handle as env arg.
+    callParts := "  "
+    if !str.Equal(retLL, "void") {
+        callParts = str.Concat(callParts, "%r = ")
+    }
+    callParts = str.Concat(callParts, str.Concat("call ", str.Concat(retLL, " %f(i8* %handle")))
+    i = 1
+    for i < nArgs {
+        callParts = str.Concat(callParts, str.Concat(", ", str.Concat(argTypes[i], str.Concat(" %v", strconv.Itoa(i)))))
+        i = i + 1
+    }
+    callParts = str.Concat(callParts, ")\n")
+    thunkParts = append(thunkParts, callParts)
+    // Release the references retained into the pack (handle + heap args)
+    // then the pack itself, mirroring the named-function spawn thunk.
+    thunkParts = append(thunkParts, "  call void @Skink_rc_release(i8* %handle)\n")
+    i = 1
+    for i < nArgs {
+        if isHeapLLType(argTypes[i]) && !str.Equal(argTypes[i], "i8*") {
+            thunkParts = append(thunkParts, str.Concat(str.Concat(str.Concat("  %rc", strconv.Itoa(i)), str.Concat(" = bitcast ", argTypes[i])), str.Concat(str.Concat(" %v", strconv.Itoa(i)), " to i8*\n")))
+            thunkParts = append(thunkParts, str.Concat("  call void @Skink_rc_release(i8* %rc", str.Concat(strconv.Itoa(i), ")\n")))
+        } else if str.Equal(argTypes[i], "i8*") {
+            thunkParts = append(thunkParts, str.Concat("  call void @Skink_rc_release(i8* %v", str.Concat(strconv.Itoa(i), ")\n")))
+        }
+        i = i + 1
+    }
+    thunkParts = append(thunkParts, "  call void @Skink_rc_release(i8* %arg)\n")
+    thunkParts = append(thunkParts, "  ret i8* null\n}\n\n")
+    emitSpawnThunk(cg, concatMany(thunkParts))
+
+    // Pack handle + arguments into the heap struct.
+    sizeGep := nextReg(cg)
+    emitfmt(cg, "  %s = getelementptr %s, %s* null, i32 1\n", []string{sizeGep, structLLName, structLLName})
+    sizeReg := nextReg(cg)
+    emitfmt(cg, "  %s = ptrtoint %s* %s to i64\n", []string{sizeReg, structLLName, sizeGep})
+    rawReg := nextReg(cg)
+    emitfmt(cg, "  %s = call i8* @Skink_rc_alloc(i64 %s)\n", []string{rawReg, sizeReg})
+    packedReg := nextReg(cg)
+    emitfmt(cg, "  %s = bitcast i8* %s to %s*\n", []string{packedReg, rawReg, structLLName})
+    i = 0
+    for i < nArgs {
+        fieldPtr := nextReg(cg)
+        emitfmt(cg, "  %s = getelementptr inbounds %s, %s* %s, i32 0, i32 %s\n", []string{fieldPtr, structLLName, structLLName, packedReg, strconv.Itoa(i)})
+        emitStore(cg, argTypes[i], argRegs[i], argTypes[i], fieldPtr)
+        i = i + 1
+    }
     packedI8 := nextReg(cg)
     emitfmt(cg, "  %s = bitcast %s* %s to i8*\n", []string{packedI8, structLLName, packedReg})
     emitfmt(cg, "  call void @Skink_spawn(i8* bitcast (i8* (i8*)* @%s to i8*), i8* %s, i8* null)\n", []string{thunkName, packedI8})
@@ -12969,6 +13176,22 @@ fn emitTupleAssignStmt(cg: *CodeGen, stmt: ast.Stmt) {
                         reg = emitRetain(cg, reg, et)
                     }
                     emitStore(cg, et, reg, et, varValuePtr(cg, sv))
+                } else {
+                    // Package-level var targets (comp_error.md #134).
+                    gptr, gvt := tupleGlobalPtr(cg, target)
+                    if str.Len(gptr) > 0 {
+                        et := types[j]
+                        reg := coerceExprToParamType(cg, regs[j], et, gvt, stmt.assignValue[j])
+                        if isHeapLLType(gvt) {
+                            reg = emitRetain(cg, reg, gvt)
+                            oldReg := emitLoad(cg, gvt, gvt, gptr)
+                            emitRelease(cg, oldReg, gvt)
+                        } else if isCompositeType(gvt) && !str.EndsWith(gvt, "*") {
+                            reg = emitRetainStructHeapFields(cg, reg, gvt)
+                            emitReleaseStructHeapFields(cg, gptr, gvt)
+                        }
+                        emitStore(cg, gvt, reg, gvt, gptr)
+                    }
                 }
             }
             j = j + 1
@@ -13008,10 +13231,49 @@ fn emitTupleAssignStmt(cg: *CodeGen, stmt: ast.Stmt) {
                     }
                 }
                 emitStore(cg, elemType, reg, elemType, varValuePtr(cg, sv))
+            } else {
+                // Package-level var targets (comp_error.md #134): without
+                // this the multi-assign statement was silently skipped and
+                // the global kept its zero value.
+                gptr, gvt := tupleGlobalPtr(cg, target)
+                if str.Len(gptr) > 0 {
+                    reg = coerceExprToParamType(cg, reg, elemType, gvt, stmt.assignValue[0])
+                    if isHeapLLType(gvt) {
+                        if !exprProducesOwned(cg, stmt.assignValue[0]) {
+                            reg = emitRetain(cg, reg, gvt)
+                        }
+                        oldReg := emitLoad(cg, gvt, gvt, gptr)
+                        emitRelease(cg, oldReg, gvt)
+                    } else if isCompositeType(gvt) && !str.EndsWith(gvt, "*") {
+                        if !exprProducesOwned(cg, stmt.assignValue[0]) {
+                            reg = emitRetainStructHeapFields(cg, reg, gvt)
+                        }
+                        emitReleaseStructHeapFields(cg, gptr, gvt)
+                    }
+                    emitStore(cg, gvt, reg, gvt, gptr)
+                }
             }
         }
         i = i + 1
     }
+}
+
+// tupleGlobalPtr resolves a tuple-assignment identifier target to a
+// package-level variable, returning ("@qualified", llType) or ("", "")
+// when no global of that name exists. Mirrors the global lookup in
+// emitAssignStmt: unqualified first, then module-qualified
+// (comp_error.md #134).
+fn tupleGlobalPtr(cg: *CodeGen, target: ast.Expr) -> (string, string) {
+    if mapStringStringHasKeyCG(cg.globalVarTypes, target.ident) {
+        return str.Concat("@", target.ident), cg.globalVarTypes[target.ident]
+    }
+    if str.Len(cg.currentModule) > 0 {
+        qn := str.Concat(str.Concat(cg.currentModule, "."), target.ident)
+        if mapStringStringHasKeyCG(cg.globalVarTypes, qn) {
+            return str.Concat("@", qn), cg.globalVarTypes[qn]
+        }
+    }
+    return "", ""
 }
 
 // emitFieldAssignment handles obj.field = val assignments.
@@ -15749,18 +16011,12 @@ pub fn emitProgram(cg: *CodeGen, decls: []ast.Stmt) -> string {
             }
         }
         if d.kind == ast.ST_STRUCT {
-            cg.structLayouts[d.structName] = computeStructLayout(cg, d.structName, d)
-            cg.structDecls[d.structName] = d
-            markBorrowed(cg, "d")
-            idx := str.LastIndexOf(d.structName, ".")
-            if idx >= 0 {
-                shortName := str.Substr(d.structName, idx + 1, str.Len(d.structName) - idx - 1)
-                cg.structLayouts[shortName] = cg.structLayouts[d.structName]
-                cg.structDecls[shortName] = d
+            // Lazily-computed layouts (declaration-order independence,
+            // comp_error.md #131) are already registered — do not recompute.
+            if str.Len(cg.structLayouts[d.structName].llType) == 0 {
+                registerStructLayout(cg, d.structName, computeStructLayout(cg, d.structName, d), d)
             }
-            sanitizedName := sanitizeName(d.structName)
-            cg.structLayouts[sanitizedName] = cg.structLayouts[d.structName]
-            cg.structDecls[sanitizedName] = d
+            markBorrowed(cg, "d")
             // Register struct methods as StructName.methodName
             // Set checker module context for type resolution
             savedMod := cg.checker.currentModule

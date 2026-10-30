@@ -3035,6 +3035,13 @@ fn parseType(p: *Parser) -> ast.Type {
         if str.Len(name) == 0 {
             name = lexer.KindName(tok.kind)
         }
+        // `byte` lexes to T_UINT8 but keeps the literal "byte", which the
+        // checker then treated as a distinct named type that rejected the
+        // usual uint8 coercions (comp_error.md #129). Normalize to the
+        // canonical name so byte and uint8 are interchangeable.
+        if tok.kind == lexer.T_UINT8 {
+            name = "uint8"
+        }
         advance(p)
         t := ast.newType(ast.TY_NAMED)
         t.name = name

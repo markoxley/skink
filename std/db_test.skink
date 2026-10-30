@@ -177,3 +177,21 @@ pub fn TestResultClose() {
     res.Close()
     conn.Close()
 }
+
+// TestScanStringOutlivesClose guards comp_error.md #130: Scan returned a
+// borrowed pointer into the sqlite row buffer, invalidated by Close/Next —
+// callers observed corrupted bytes. Scan now returns an owned copy.
+pub fn TestScanStringOutlivesClose() {
+    conn, err := db.Open("sqlite3", ":memory:")
+    testing.AssertNoError(err.Error(), "open")
+    conn.Exec("create table t (v text)")
+    conn.Exec("insert into t values ('hello')")
+    res, _ := conn.Query("select v from t")
+    var s string
+    for res.Next() {
+        s, _ = res.Scan(0)
+    }
+    res.Close()
+    testing.AssertEqualString("hello", s, "scanned string survives Close")
+    conn.Close()
+}

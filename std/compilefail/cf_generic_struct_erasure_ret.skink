@@ -1,0 +1,19 @@
+// expect: instantiated with non-pointer-sized type
+module main
+
+// comp_error.md #127 — a generic struct instantiation reached only
+// through a generic function's return type (no literal, no annotation)
+// still embeds type params in erased composite fields; the concrete
+// []int backing store and the erased i8* slot disagree on stride.
+struct Box<T> {
+    buf: []T
+}
+
+fn NewBox<T>(n: int) -> Box<T> {
+    return Box<T>{buf: make([]T, n)}
+}
+
+fn main() -> int {
+    b := NewBox<int>(4)
+    return b.buf[0]
+}

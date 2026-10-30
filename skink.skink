@@ -49,6 +49,10 @@ extern fn Skink_fs_mktemp_fopen(prefix: string, suffix: string, pathBuf: string)
 // usage prints the command-line usage message for the compiler.
 fn usage() {
     println("usage: skink [-v | -version] [-t <target>] [-b <target>] [-o <output>] [-cov] [-c <dir>] [-check | -emit-ll] <file.skink>")
+    println("       skink js <args...>      — run the skinkjs backend")
+    println("       skink scales <args...>  — run the scales package manager")
+    println("       skink fmt <args...>     — run the skinkfmt formatter")
+    println("       skink cover <args...>   — run the skinkcov coverage reporter")
 }
 
 // projectEntry resolves a -c project directory to (entryFile, outName,
@@ -160,6 +164,35 @@ fn main() -> int {
     if argc == 2 && (argv[1] == "-v" || argv[1] == "-version") {
         println(version.Version)
         return 0
+    }
+
+    // Subcommand dispatch: `skink js`→skinkjs, `skink scales`→scales,
+    // `skink fmt`→skinkfmt, `skink cover`→skinkcov — binaries are
+    // resolved beside argv[0] or on PATH via findHarnessScript.
+    if argc >= 2 && (argv[1] == "js" || argv[1] == "scales" ||
+                     argv[1] == "fmt" || argv[1] == "cover" || argv[1] == "cov") {
+        binName := "skinkjs"
+        if argv[1] == "scales" {
+            binName = "scales"
+        }
+        if argv[1] == "fmt" {
+            binName = "skinkfmt"
+        }
+        if argv[1] == "cover" || argv[1] == "cov" {
+            binName = "skinkcov"
+        }
+        sub := findHarnessScript(argv[0], binName)
+        if !fs.Exists(sub) {
+            println("skink: cannot find " + binName + " (expected beside " +
+                argv[0] + " or on PATH)")
+            return 1
+        }
+        var subArgs []string
+        subArgs = append(subArgs, sub)
+        for i := 2; i < argc; i = i + 1 {
+            subArgs = append(subArgs, argv[i])
+        }
+        return os.Exec(subArgs)
     }
 
     // Determine the Skink standard library root from SKINK_HOME,

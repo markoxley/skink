@@ -169,3 +169,63 @@ New issues discovered since the archive at `artifacts/comp_error.md` (#1–#138)
 ## #160 — deferred-closure writes to captured locals do not propagate on panic unwinds — RESOLVED (not a bug)
 
 - Initially logged while writing #149 tests as a suspected propagation failure in `defer fn() { saved = recover() }()`. Re-verified with a direct repro: a deferred closure writing a captured local during panic unwind propagates correctly (`saved` reads `"boom"` in a subsequent deferred fn, and the closure capture mechanism boxes the var by reference). The earlier observation was a test-scoping artifact — the capture was read by the *caller* after `invoke` returned, but the captured local is only visible within the deferring frame. No compiler defect.
+
+## #161 — stdlib gaps found porting a real project (skink-nexus) — DOCUMENTED (worked around, not fixed)
+
+Not compiler bugs — missing stdlib surface and sharp edges hit while porting
+the Go Nexus pub/sub server to Skink (`~/Projects/test/skink-nexus`). All
+worked around in-project; candidates for future stdlib additions.
+
+**std/encrypt — no RSA-PSS.** `RSACipher.Sign`/`Verify` is
+PKCS1-v1_5/SHA-256 only; Go used `rsa.SignPSS`/`VerifyPSS`. Workaround: call
+libcrypto directly via externs — `RSA_padding_add_PKCS1_PSS_mgf1` +
+`RSA_private_encrypt(RSA_NO_PADDING)` to sign, `RSA_public_decrypt` +
+`RSA_verify_PKCS1_PSS_mgf1` to verify (sLen=-2 = max-salt sign / auto verify,
+matching Go's nil PSSOptions). Would fit naturally in std/encrypt as
+`SignPSS`/`VerifyPSS` or a padding-mode parameter.
+
+**std/yaml — gaps for real-world config files.** `Unmarshal` handles nested
+maps and block sequences, but:
+- `- key: val` array-of-maps items lose the inline first key
+  (`parseArrayLines` strips `- ` then only parses the *following*
+  deeper-indented lines — `itemStr` is discarded).
+- `#` comments are not stripped (full-line `#` survives as content since it
+  has no colon it is silently skipped, but trailing `  # note` corrupts the
+  scalar).
+- Quoted scalars keep their quotes: `cert: "/a.pem"` yields `"/a.pem"`.
+- Flow lists `[a, b]` parse as a literal string, not an array.
+- Workaround: a ~60-line `normalizeYAML` preprocessor in the project that
+  rewrites `- key:` into a bare `-` + deeper-indented map, expands `[a,b]`
+  into block items, unquotes scalars, strips comments — then `Unmarshal`.
+
+**Binary data vs string ops.** `str.Len`/`str.Substr`/`s[i]` are NUL-based —
+binary buffers (RSA ciphertext, AES-GCM, WS frames) silently truncate, and
+`buf[i]` on `libc.malloc`'d memory bounds-checks against `strlen` and panics
+on embedded NULs. Mitigation: `Skink_mem_byte`/`Skink_mem_write_byte` raw
+helpers + explicit-length APIs everywhere. A real `[]byte`/`bytes` module or
+length-carrying string ops would remove a whole class of port bugs.
+
+**Integer literal width.** Literals >2^31 (e.g. `1000000000000000` for
+nanosecond timestamps) silently overflow `int` at compile time — wrong
+magnitude branches, no diagnostic. Also `int64 * int` demotes to i32
+(`v * 10` in an int64 accumulator truncates; must write `v * int64(10)`).
+
+**std/time wall clock.** `time.NowUnixNano()` is CLOCK_MONOTONIC (seconds
+since boot), not epoch — auth/timestamp code needs
+`clock_gettime(CLOCK_REALTIME)` or `time.Now().Unix()`.
+
+**std/json precision.** `FromNumber`/`GetInt` round-trip through float64 —
+int64 nanosecond timestamps serialize as `-.------`. Workaround: emit large
+ints as raw digit strings and parse digits out of the raw JSON.
+
+**std/web test surface.** `types.NewRequest` computes
+`bodyLen = str.Len(body)` — binary bodies cannot be constructed in unit
+tests; only the live server path populates `BodyBytes`/`BodyLen` correctly.
+
+**std/testing.** `testing.Assert*` failures do not abort the test — a failed
+assert that yields nil still dereferences it later and segfaults; tests must
+guard manually.
+
+**API naming.** `str.HasPrefix` does not exist (use `s[0] == 35` /
+`str.IndexOf == 0`); `fs.WriteFile` does not exist (it's `io.WriteFile` /
+`fs.WriteAll`).

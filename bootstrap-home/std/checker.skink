@@ -454,6 +454,69 @@ fn tupleTypeEquals(a: []TType, b: []TType) -> bool {
     return true
 }
 
+// aliasedTypeEquals compares two types for equality with alias resolution
+// applied recursively to composite element types — unlike typeEquals,
+// which treats a named alias as nominal at every level and so never
+// unifies fn(types.Handler) -> types.Handler with the expanded signature
+// (comp_error.md #125).
+fn aliasedTypeEquals(c: *Checker, a: TType, b: TType) -> bool {
+    a = resolveAlias(c, a)
+    b = resolveAlias(c, b)
+    if typeEquals(a, b) {
+        return true
+    }
+    if a.kind == TK_FUNCTION && b.kind == TK_FUNCTION {
+        return fnTypesEqualAliased(c, a, b)
+    }
+    if a.kind == b.kind {
+        if a.kind == TK_POINTER || a.kind == TK_ARRAY || a.kind == TK_SET ||
+           a.kind == TK_CHAN || a.kind == TK_TENSOR {
+            return aliasedTypeEquals(c, typeOptT(a.elem), typeOptT(b.elem))
+        }
+        if a.kind == TK_MAP {
+            return aliasedTypeEquals(c, typeOptT(a.keyType), typeOptT(b.keyType)) &&
+                aliasedTypeEquals(c, typeOptT(a.elem), typeOptT(b.elem))
+        }
+        if a.kind == TK_TUPLE {
+            if len(a.tupleTypes) != len(b.tupleTypes) {
+                return false
+            }
+            i := 0
+            for i < len(a.tupleTypes) {
+                if !aliasedTypeEquals(c, a.tupleTypes[i], b.tupleTypes[i]) {
+                    return false
+                }
+                i = i + 1
+            }
+            return true
+        }
+    }
+    return false
+}
+
+// fnTypesEqualAliased compares two function types with per-element alias
+// resolution (comp_error.md #125).
+fn fnTypesEqualAliased(c: *Checker, a: TType, b: TType) -> bool {
+    if len(a.params) != len(b.params) || len(a.retTypes) != len(b.retTypes) {
+        return false
+    }
+    i := 0
+    for i < len(a.params) {
+        if !aliasedTypeEquals(c, a.params[i], b.params[i]) {
+            return false
+        }
+        i = i + 1
+    }
+    i = 0
+    for i < len(a.retTypes) {
+        if !aliasedTypeEquals(c, a.retTypes[i], b.retTypes[i]) {
+            return false
+        }
+        i = i + 1
+    }
+    return a.variadic == b.variadic
+}
+
 // normalizeName replaces dots with underscores in a qualified type name.
 fn normalizeName(s: string) -> string {
     return str.Replace(s, ".", "_")
@@ -1249,6 +1312,29 @@ pub fn hasTemplate(c: *Checker, name: string) -> bool {
     return c.templates.Get(name).kind != 0
 }
 
+// structDeclKey returns the canonical (module-qualified) name of a declared
+// struct, accepting either the qualified or the short name, or "" when no
+// such struct exists. The emitter uses this to name a struct's LLVM type
+// before the struct's declaration is reached, making codegen independent
+// of declaration order (comp_error.md #131).
+pub fn structDeclKey(c: *Checker, name: string) -> string {
+    d := c.structs.Get(name)
+    if d.kind == 0 && str.Contains(name, ".") {
+        dot := str.LastIndexOf(name, ".")
+        d = c.structs.Get(str.Substr(name, dot + 1, str.Len(name) - dot - 1))
+    }
+    if d.kind == 0 {
+        return ""
+    }
+    return d.structName
+}
+
+// getStructDecl returns the declaration of a struct registered under the
+// given (qualified or short) name, or a zero decl when none exists.
+pub fn getStructDecl(c: *Checker, name: string) -> ast.Decl {
+    return c.structs.Get(name)
+}
+
 // report appends an error message with the current file:line:col prefix.
 fn report(c: *Checker, msg: string) {
     if str.Len(c.currentFile) > 0 {
@@ -1753,6 +1839,16 @@ fn checkerIsAssignable(c: *Checker, dst: TType, src: TType) -> bool {
     if isAssignable(dst, src) {
         return true
     }
+    // Function types may embed named aliases (e.g. types.Middleware =
+    // fn(types.Handler) -> types.Handler): the declared function's
+    // signature keeps the alias nominal while the value's signature
+    // reports the expanded form, so the plain equality fails
+    // (comp_error.md #125). Recurse with per-element alias resolution.
+    if dst.kind == TK_FUNCTION && src.kind == TK_FUNCTION {
+        if fnTypesEqualAliased(c, dst, src) {
+            return true
+        }
+    }
     // Auto-dereference: a pointer to T is assignable to T (the emitter
     // emits a load from the pointer when a by-value struct is expected).
     if src.kind == TK_POINTER {
@@ -2093,6 +2189,24 @@ pub fn checkProgram(c: *Checker, decls: []ast.Stmt) -> bool {
                 }
             } else {
                 declare(c, d.enumName, namedType(d.enumName))
+                // A payload-free enum is a namespaced set of int constants:
+                // nothing can produce a value of the nominal enum type, so
+                // `var k Kind = KindA`, `f(KindA)`, and `case KindA:` all
+                // failed (comp_error.md #128). Register the name as an int
+                // alias so the nominal type is transparent — constants,
+                // annotations, and parameters interconvert freely. Both the
+                // qualified and short keys are registered: unqualified
+                // references in the declaring module resolve to the bare
+                // name, while qualified references resolve via the
+                // short-of-dot alias fallback.
+                c.aliases.Set(d.enumName, builtinType("int"))
+                enumDot := str.LastIndexOf(d.enumName, ".")
+                if enumDot > 0 {
+                    enumShort := str.Substr(d.enumName, enumDot + 1, str.Len(d.enumName) - enumDot - 1)
+                    if c.aliases.Get(enumShort).kind == 0 {
+                        c.aliases.Set(enumShort, builtinType("int"))
+                    }
+                }
             }
         } else if decl.kind == ast.ST_SERVICE {
             d := decl.decl
@@ -3221,7 +3335,10 @@ fn checkSwitchStmt(c: *Checker, stmt: ast.Stmt) {
         for j := 0; j < len(sc.cond); j = j + 1 {
             valType := checkExpr(c, sc.cond[j])
             if subjType.kind != TK_UNKNOWN && valType.kind != TK_UNKNOWN {
-                if !typeEquals(subjType, valType) {
+                // Resolve aliases (e.g. simple enums alias int) so an enum
+                // constant case value matches an enum-typed subject
+                // (comp_error.md #128).
+                if !typeEquals(resolveAlias(c, subjType), resolveAlias(c, valType)) {
                     reportAt(c, stmt.line, stmt.col, str.Concat("switch case value type ", str.Concat(typeString(valType), str.Concat(" does not match subject type ", typeString(subjType)))))
                 }
             }
@@ -3930,6 +4047,28 @@ fn checkErasureType(c: *Checker, t: TType, paramMap: map[string]TType) {
     if t.kind == TK_MAP {
         checkErasureElem(c, typeOptT(t.keyType), paramMap)
         checkErasureElem(c, typeOptT(t.elem), paramMap)
+        return
+    }
+    // A generic struct instantiation (e.g. `-> Box<T>` on NewBox<int>)
+    // hides composite fields behind the named type — substitute the
+    // current parameter map into its type arguments and validate the
+    // struct's fields, or `b := NewBox<int>(n)` compiles a []int field
+    // that erased reads/writes misalign (comp_error.md #127).
+    if t.kind == TK_POINTER {
+        checkErasureType(c, typeOptT(t.elem), paramMap)
+        return
+    }
+    if t.kind == TK_NAMED && len(t.genericArgs) > 0 {
+        var concreteArgs []TType
+        for i := 0; i < len(t.genericArgs); i = i + 1 {
+            ga := t.genericArgs[i]
+            if ga.kind == TK_NAMED && paramMap[ga.name].kind != 0 {
+                concreteArgs = append(concreteArgs, paramMap[ga.name])
+            } else {
+                concreteArgs = append(concreteArgs, ga)
+            }
+        }
+        checkStructErasureSafety(c, t, concreteArgs)
     }
 }
 
@@ -4155,6 +4294,20 @@ fn checkCallExpr(c: *Checker, e: ast.Expr) -> TType {
         return unknownType()
     }
     if fnType.kind != TK_FUNCTION {
+        // Named-type conversion: `T(v)` where T is a declared alias for a
+        // builtin type — e.g. `Kind(KindA)` on a simple enum, which aliases
+        // int (comp_error.md #128). Rewrite the callee to the underlying
+        // builtin name so both checker and emitter treat it as a cast.
+        if e.callFunc[0].kind == ast.EX_IDENT && len(e.callArgs) == 1 {
+            castTarget := resolveAlias(c, namedType(e.callFunc[0].ident))
+            if castTarget.kind != TK_BUILTIN && str.Len(c.currentModule) > 0 && !str.Contains(e.callFunc[0].ident, ".") {
+                castTarget = resolveAlias(c, namedType(str.Concat(str.Concat(c.currentModule, "."), e.callFunc[0].ident)))
+            }
+            if castTarget.kind == TK_BUILTIN {
+                e.callFunc[0].ident = castTarget.name
+                return checkTypeCast(c, e)
+            }
+        }
         reportAt(c, e.line, e.col, str.Concat("cannot call non-function ", typeString(fnType)))
         return unknownType()
     }
