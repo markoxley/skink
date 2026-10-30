@@ -29,7 +29,9 @@
 module uuid_test
 
 import "std/uuid"
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
 import "std/libc"
+extern fn Skink_mem_byte(ptr: string, idx: int64) -> int
 import "std/str"
 import "std/testing"
 import "std/time"
@@ -127,8 +129,8 @@ pub fn TestBytesRoundTrip() {
     u := uuid.MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
     b := u.Bytes()
     // First octet of the text form is 0x6b, last is 0xc8.
-    testing.AssertEqualInt(0x6b, int(b[0]) & 0xFF, "first octet")
-    testing.AssertEqualInt(0xc8, int(b[15]) & 0xFF, "last octet")
+    testing.AssertEqualInt(0x6b, Skink_mem_byte(b, int64(0)) & 0xFF, "first octet")
+    testing.AssertEqualInt(0xc8, Skink_mem_byte(b, int64(15)) & 0xFF, "last octet")
     u2, err := uuid.FromBytes(b, 16)
     testing.AssertEqualString("", err.message, "FromBytes error")
     testing.AssertTrue(u.Equal(u2), "byte round-trip preserves value")
@@ -144,20 +146,20 @@ pub fn TestGUIDBytes() {
     u := uuid.MustParse("00112233-4455-6677-8899-aabbccddeeff")
     g := u.GUIDBytes()
     // Data1 (u32) little-endian: 33 22 11 00
-    testing.AssertEqualInt(0x33, int(g[0]) & 0xFF, "guid byte 0")
-    testing.AssertEqualInt(0x22, int(g[1]) & 0xFF, "guid byte 1")
-    testing.AssertEqualInt(0x11, int(g[2]) & 0xFF, "guid byte 2")
-    testing.AssertEqualInt(0x00, int(g[3]) & 0xFF, "guid byte 3")
+    testing.AssertEqualInt(0x33, Skink_mem_byte(g, int64(0)) & 0xFF, "guid byte 0")
+    testing.AssertEqualInt(0x22, Skink_mem_byte(g, int64(1)) & 0xFF, "guid byte 1")
+    testing.AssertEqualInt(0x11, Skink_mem_byte(g, int64(2)) & 0xFF, "guid byte 2")
+    testing.AssertEqualInt(0x00, Skink_mem_byte(g, int64(3)) & 0xFF, "guid byte 3")
     // Data2 (u16) little-endian: 55 44
-    testing.AssertEqualInt(0x55, int(g[4]) & 0xFF, "guid byte 4")
-    testing.AssertEqualInt(0x44, int(g[5]) & 0xFF, "guid byte 5")
+    testing.AssertEqualInt(0x55, Skink_mem_byte(g, int64(4)) & 0xFF, "guid byte 4")
+    testing.AssertEqualInt(0x44, Skink_mem_byte(g, int64(5)) & 0xFF, "guid byte 5")
     // Data3 (u16) little-endian: 77 66
-    testing.AssertEqualInt(0x77, int(g[6]) & 0xFF, "guid byte 6")
-    testing.AssertEqualInt(0x66, int(g[7]) & 0xFF, "guid byte 7")
+    testing.AssertEqualInt(0x77, Skink_mem_byte(g, int64(6)) & 0xFF, "guid byte 6")
+    testing.AssertEqualInt(0x66, Skink_mem_byte(g, int64(7)) & 0xFF, "guid byte 7")
     // Data4 unchanged.
-    testing.AssertEqualInt(0x88, int(g[8]) & 0xFF, "guid byte 8")
-    testing.AssertEqualInt(0xee, int(g[14]) & 0xFF, "guid byte 14")
-    testing.AssertEqualInt(0xff, int(g[15]) & 0xFF, "guid byte 15")
+    testing.AssertEqualInt(0x88, Skink_mem_byte(g, int64(8)) & 0xFF, "guid byte 8")
+    testing.AssertEqualInt(0xee, Skink_mem_byte(g, int64(14)) & 0xFF, "guid byte 14")
+    testing.AssertEqualInt(0xff, Skink_mem_byte(g, int64(15)) & 0xFF, "guid byte 15")
 
     // Round-trip through the GUID byte order.
     u2, err := uuid.FromGUIDBytes(g, 16)
@@ -245,7 +247,7 @@ pub fn TestNewV1() {
     nb := b.Node()
     same := true
     for i := 0; i < 6; i = i + 1 {
-        if na[i] != nb[i] {
+        if Skink_mem_byte(na, int64(i)) != Skink_mem_byte(nb, int64(i)) {
             same = false
         }
     }
@@ -332,7 +334,7 @@ pub fn TestNewV7() {
 pub fn TestNewV8() {
     data := libc.malloc(16)
     for i := 0; i < 16; i = i + 1 {
-        data[i] = int8(i * 16 + i)
+        Skink_mem_write_byte(data, int64(i), i * 16 + i)
     }
     u, err := uuid.NewV8(data, 16)
     testing.AssertEqualString("", err.message, "v8 creation")
@@ -341,11 +343,11 @@ pub fn TestNewV8() {
 
     // Payload bytes outside the version/variant fields are verbatim.
     b := u.Bytes()
-    testing.AssertEqualInt(0x00, int(b[0]) & 0xFF, "v8 byte 0 verbatim")
-    testing.AssertEqualInt(0x55, int(b[5]) & 0xFF, "v8 byte 5 verbatim")
-    testing.AssertEqualInt(0x77, int(b[7]) & 0xFF, "v8 byte 7 verbatim")
-    testing.AssertEqualInt(0x99, int(b[9]) & 0xFF, "v8 byte 9 verbatim")
-    testing.AssertEqualInt(0xff, int(b[15]) & 0xFF, "v8 byte 15 verbatim")
+    testing.AssertEqualInt(0x00, Skink_mem_byte(b, int64(0)) & 0xFF, "v8 byte 0 verbatim")
+    testing.AssertEqualInt(0x55, Skink_mem_byte(b, int64(5)) & 0xFF, "v8 byte 5 verbatim")
+    testing.AssertEqualInt(0x77, Skink_mem_byte(b, int64(7)) & 0xFF, "v8 byte 7 verbatim")
+    testing.AssertEqualInt(0x99, Skink_mem_byte(b, int64(9)) & 0xFF, "v8 byte 9 verbatim")
+    testing.AssertEqualInt(0xff, Skink_mem_byte(b, int64(15)) & 0xFF, "v8 byte 15 verbatim")
     libc.free(b)
     libc.free(data)
 

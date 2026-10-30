@@ -46,6 +46,11 @@
 // block (heap strings, slices). Declared in rc_rt.c (VULN-17).
 extern int Skink_rc_is_registered(const void *ptr);
 
+// Skink_rc_registered_size returns the tracked allocation size of a
+// registered kind-0/kind-1 block, or -1 for untracked pointers.
+// Declared in rc_rt.c (comp_error.md #153).
+extern int64_t Skink_rc_registered_size(const void *ptr);
+
 #if defined(__unix__) || defined(__APPLE__)
 #include <pthread.h>
 #include <setjmp.h>
@@ -93,6 +98,13 @@ static int skink_is_mapped(const void *p) {
 // back only when this thread's probe flag is set — faults on other
 // threads (or outside a probe) restore the default disposition and
 // re-raise so genuine crashes still crash (VULN-17).
+#if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
+// AddressSanitizer interface: reports the first poisoned byte in a
+// region so the string heuristic stops at the true object boundary.
+extern const void *__asan_region_is_poisoned(const volatile void *beg,
+                                             size_t size);
+#endif
+
 static __thread sigjmp_buf skink_probe_jb;
 static __thread volatile sig_atomic_t skink_probe_active = 0;
 
@@ -114,8 +126,15 @@ static void skink_probe_install(void) {
   sigaction(SIGBUS, &sa, NULL);
 }
 
-// skink_byte_readable returns 1 if reading *p does not fault.
+// skink_byte_readable returns 1 if reading *p does not fault. Under
+// AddressSanitizer the probe byte is checked against the poison map
+// first — a fault-free OS read of a redzone is still a reportable
+// overread.
 static int skink_byte_readable(const void *p) {
+#if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
+  if (__asan_region_is_poisoned((const volatile void *)p, 1) != NULL)
+    return 0;
+#endif
   static pthread_once_t once = PTHREAD_ONCE_INIT;
   pthread_once(&once, skink_probe_install);
   if (sigsetjmp(skink_probe_jb, 1) == 0) {
@@ -219,22 +238,62 @@ static int skink_streq(const char *sa, const char *sb) {
 }
 
 // Heuristic: does the erased i8* value look like a readable string
-// pointer? RC-registered blocks are trusted outright; otherwise the
-// page must be resident AND verifiably readable (PROT_NONE guard pages
-// pass mincore but fault on read — VULN-17), and a NUL terminator must
-// exist within the readable span so the subsequent strcmp/hash cannot
-// run off into unverified memory.
+// pointer? RC-registered blocks are trusted outright; otherwise each
+// scanned page must be resident AND verifiably readable (PROT_NONE
+// guard pages pass mincore but fault on read — VULN-17), and a NUL
+// terminator must exist within the readable span so the subsequent
+// strcmp/hash cannot run off into unverified memory.
+//
+// comp_error.md #148: the terminator may sit just past the end of p's
+// page — scanning only page-remainder bytes misclassifies a short
+// literal straddling a page boundary as an int (its hash then becomes
+// the pointer value and lookups miss). Walk forward page by page,
+// re-verifying readability at every boundary; the cap bounds the cost
+// of probing a pointer that is mapped but not actually a string.
 static int skink_looks_like_string(const void *p) {
   if (!p)
     return 0;
-  if (Skink_rc_is_registered(p))
-    return 1;
-  if (!skink_is_mapped(p) || !skink_byte_readable(p))
+  // Registered RC blocks are trusted to be strings only when a NUL
+  // terminator exists WITHIN the block's own allocation — scanning the
+  // block's bytes is bounded, so a registered non-string (e.g. a struct
+  // or other composite boxed into a generic container) can never make
+  // the later hash/equality walk run past the allocation into unmapped
+  // memory (comp_error.md #153). Strings always carry a NUL inside their
+  // allocation (len+1 bytes).
+  int64_t regSize = Skink_rc_registered_size(p);
+  if (regSize >= 0) {
+    int64_t scan = regSize < (1 << 20) ? regSize : (1 << 20);
+    if (memchr(p, 0, (size_t)scan) != NULL)
+      return 1;
     return 0;
-  size_t span = skink_probe_span(p);
-  if (span == 0)
-    return 0;
-  return memchr(p, 0, span) != NULL;
+  }
+  const char *q = (const char *)p;
+  for (int i = 0; i < 64; i++) {
+    if (!skink_is_mapped(q) || !skink_byte_readable(q))
+      return 0;
+    size_t span = skink_probe_span(q);
+    if (span == 0)
+      return 0;
+#if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
+    // Under AddressSanitizer the OS-level probes report redzone bytes as
+    // readable, so a page-spanning memchr reads poisoned shadow. Clamp
+    // the scan to the first poisoned byte — which is also the true end
+    // of the object, making the heuristic strictly more precise.
+    {
+      void *poisoned = __asan_region_is_poisoned((const volatile void *)q,
+                                               span);
+      if (poisoned != NULL) {
+        span = (size_t)((const char *)poisoned - q);
+        if (span == 0)
+          return 0;
+      }
+    }
+#endif
+    if (memchr(q, 0, span) != NULL)
+      return 1;
+    q += span;
+  }
+  return 0;
 }
 
 // reflect_get_bool reads a boolean value at the given offset from a struct address.

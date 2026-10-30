@@ -202,7 +202,7 @@ pub fn TestOversizedContentLength() {
     resp := libc.malloc(4096)
     n := conn.Read(resp, 4095)
     if n > 0 {
-        resp[n] = 0
+        Skink_mem_write_byte(resp, int64(n), 0)
     }
     testing.AssertTrue(n > 0 && str.Contains(resp, "400"), "oversized Content-Length must get a 400")
 }

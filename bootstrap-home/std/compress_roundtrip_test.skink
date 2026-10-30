@@ -24,6 +24,7 @@
 module compress_roundtrip_test
 
 import "testing"
+extern fn Skink_mem_byte(ptr: string, idx: int64) -> int
 import "std/compress"
 import "std/str"
 
@@ -45,7 +46,7 @@ pub fn TestCompressRoundTrip() {
 // blob so the real byte length can be passed to DecompressBuf — the
 // blob contains NUL bytes so str.Len cannot report it (VULN-13).
 fn crtPackedLen(packed: string) -> int {
-    clen := int(packed[4]) | (int(packed[5]) << 8) | (int(packed[6]) << 16) | (int(packed[7]) << 24)
+    clen := Skink_mem_byte(packed, int64(4)) | (Skink_mem_byte(packed, int64(5)) << 8) | (Skink_mem_byte(packed, int64(6)) << 16) | (Skink_mem_byte(packed, int64(7)) << 24)
     return 8 + clen
 }
 

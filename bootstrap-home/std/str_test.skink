@@ -187,3 +187,31 @@ pub fn TestContainsIndexSafety() {
         Errorf("Contains of empty needle should be true")
     }
 }
+
+// stNulWriteByte writes a NUL byte into a Builder — must panic
+// (comp_error.md #151: strings are NUL-terminated, so an embedded NUL
+// silently truncates every downstream operation).
+fn stNulWriteByte() {
+    b := str.NewBuilder(8)
+    b.WriteByte(0)
+}
+
+// TestWriteByteNulPanics guards #151: Builder.WriteByte(0) must panic.
+pub fn TestWriteByteNulPanics() {
+    stExpectPanic(stNulWriteByte, "Builder.WriteByte(0)")
+}
+
+// TestSubstrHugeIndices guards #152: Substr with huge start/length values
+// must clamp (64-bit math) instead of wrapping int32 and copying past the
+// allocation.
+pub fn TestSubstrHugeIndices() {
+    s := "hello"
+    r := str.Substr(s, 1073741824, 1073741824)
+    if str.Len(r) != 0 {
+        Errorf("Substr with huge start should clamp to empty")
+    }
+    r2 := str.Substr(s, 2, 1073741824)
+    if !str.Equal(r2, "llo") {
+        Errorf("Substr with huge length should clamp to the tail")
+    }
+}

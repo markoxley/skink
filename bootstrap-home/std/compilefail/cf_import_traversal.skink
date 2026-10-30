@@ -1,0 +1,12 @@
+// expect: cannot resolve import
+// comp_error.md #156: import paths with ".." segments escape the project
+// directory and would make the compiler read arbitrary files — rejected
+// by the resolver.
+module main
+
+import "../escape_attempt"
+
+fn main() -> int {
+    println("hi")
+    return 0
+}

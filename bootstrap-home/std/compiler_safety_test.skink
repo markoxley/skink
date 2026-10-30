@@ -1,0 +1,255 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/compiler_safety_test.skink
+// Purpose: Runtime safety regression tests for emitted code:
+//            comp_error.md #149 — string element access s[i] / s[i] = c
+//              is now bounds-checked (reads previously walked past the
+//              allocation — info leak; writes corrupted the heap).
+//            comp_error.md #150 — integer division/remainder by zero,
+//              INT_MIN / -1, INT_MIN % -1, and out-of-range shift
+//              counts panic instead of emitting LLVM undefined behavior.
+//          Runs standalone (module main); panics are caught with
+//          defer/recover wrappers.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module main
+
+import "std/str"
+import "std/strconv"
+
+var safetyFailures = 0
+
+// safetyFail records a failed check and prints a diagnostic.
+fn safetyFail(msg: string) {
+    safetyFailures = safetyFailures + 1
+    println(str.Concat("FAIL: ", msg))
+}
+
+// safetyCheck asserts cond, reporting msg on failure.
+fn safetyCheck(cond: bool, msg: string) {
+    if !cond {
+        safetyFail(msg)
+    }
+}
+
+// safetyPanicMsg stores the message captured by the recover() inside
+// safetyInvoke's deferred function. A global is used (not a captured
+// local): deferred closure writes to a captured local do not propagate
+// back to the outer frame when the panic unwinds (compiler closure
+// quirk — see comp_error.md #160).
+var safetyPanicMsg: string
+
+// safetySave is the deferred closure body that captures a panic message.
+fn safetySave(s: string) {
+    safetyPanicMsg = s
+}
+
+// safetyInvoke runs f inside a panic handler; any panic raised by f is
+// recovered into safetyPanicMsg instead of terminating the process.
+fn safetyInvoke(f: fn()) {
+    defer fn() { safetySave(recover()) }()
+    f()
+}
+
+// safetyExpectPanic asserts that f panics.
+fn safetyExpectPanic(f: fn(), what: string) {
+    safetyPanicMsg = ""
+    safetyInvoke(f)
+    if str.Len(safetyPanicMsg) == 0 {
+        safetyFail(str.Concat("expected panic: ", what))
+    }
+}
+
+// === #149: string index bounds checks ===
+
+// strReadOOB indexes past the end of a string.
+fn strReadOOB() {
+    s := "abc"
+    _ := s[5]
+}
+
+// strWriteOOB writes past the end of a string.
+fn strWriteOOB() {
+    s := "abc"
+    s[5] = 88
+}
+
+// strSliceOOB slices past the end of a string.
+fn strSliceOOB() {
+    s := "abc"
+    _ := s[1:5]
+}
+
+// TestStringReadOOBPanics guards #149: s[i] with i >= len(s) must panic
+// instead of reading past the allocation (previously unchecked — info leak).
+pub fn TestStringReadOOBPanics() {
+    safetyExpectPanic(strReadOOB, "s[5] on a 3-byte string")
+}
+
+// TestStringWriteOOBPanics guards #149: s[i] = c with i >= len(s) must
+// panic instead of writing past the allocation (previously unchecked —
+// heap corruption).
+pub fn TestStringWriteOOBPanics() {
+    safetyExpectPanic(strWriteOOB, "s[5] = 88 on a 3-byte string")
+}
+
+// TestStringSliceOOBPanics guards #149 (slice path already checked):
+// s[1:5] past the end must panic.
+pub fn TestStringSliceOOBPanics() {
+    safetyExpectPanic(strSliceOOB, "s[1:5] on a 3-byte string")
+}
+
+// TestStringIndexInBounds guards #149: in-bounds reads and writes keep
+// working, including the O(1) length path for RC strings.
+pub fn TestStringIndexInBounds() {
+    s := "abc"
+    c := s[0]
+    safetyCheck(c == 97, "s[0] must read 'a' (97)")
+    s[0] = 65 // mutate in bounds
+    safetyCheck(s[0] == 65, "s[0] = 65 must write in bounds")
+    safetyCheck(str.Len(s) == 3, "in-bounds write must not change the length")
+    // last byte readable
+    safetyCheck(s[2] == 99, "s[2] must read 'c' (99)")
+}
+
+// TestStringIndexLoopPerf guards #149's perf contract: indexing an RC
+// string in a loop must not be quadratic (the O(1) payload-8 length
+// path). A 1 MiB string read once per byte must finish quickly.
+pub fn TestStringIndexLoopPerf() {
+    s := str.Repeat("x", 1000000)
+    total := 0
+    n := str.Len(s)
+    for i := 0; i < n; i = i + 1 {
+        total = total + s[i]
+    }
+    safetyCheck(total == 120000000, "loop over 1 MiB string must read every byte")
+}
+
+// === #150: division / remainder / shift guards ===
+
+// divZero divides by a runtime zero.
+fn divZero() {
+    a := 10
+    b := 0
+    _ := a / b
+}
+
+// remZero takes a runtime zero remainder.
+fn remZero() {
+    a := 10
+    b := 0
+    _ := a % b
+}
+
+// divIntMinNegOne divides INT_MIN by -1 (LLVM sdiv UB).
+fn divIntMinNegOne() {
+    a := -2147483647 - 1
+    b := -1
+    _ := a / b
+}
+
+// remIntMinNegOne takes INT_MIN % -1 (LLVM srem UB).
+fn remIntMinNegOne() {
+    a := -2147483647 - 1
+    b := -1
+    _ := a % b
+}
+
+// shiftTooFar shifts left by a count >= the operand bit width.
+// shiftNegative shifts right by a negative count.
+fn shiftNegative() {
+    a := 256
+    cnt := -1
+    _ := a >> cnt
+}
+
+// TestDivZeroPanics guards #150: runtime x/0 must panic.
+pub fn TestDivZeroPanics() {
+    safetyExpectPanic(divZero, "x/0")
+}
+
+// TestRemZeroPanics guards #150: runtime x%0 must panic.
+pub fn TestRemZeroPanics() {
+    safetyExpectPanic(remZero, "x%0")
+}
+
+// TestIntMinDivNegOnePanics guards #150: INT_MIN / -1 must panic (LLVM
+// sdiv UB otherwise).
+pub fn TestIntMinDivNegOnePanics() {
+    safetyExpectPanic(divIntMinNegOne, "INT_MIN / -1")
+}
+
+// TestIntMinRemNegOnePanics guards #150: INT_MIN % -1 must panic (LLVM
+// srem UB otherwise).
+pub fn TestIntMinRemNegOnePanics() {
+    safetyExpectPanic(remIntMinNegOne, "INT_MIN % -1")
+}
+
+// TestShiftTooFarYieldsZero guards #150: a shift count >= bit width is
+// LLVM UB — the emitter now yields the Go-defined result (0 for << and
+// logical >>) instead of emitting UB instructions.
+pub fn TestShiftTooFarYieldsZero() {
+    a := 1
+    cnt := 40
+    safetyCheck(a << cnt == 0, "i32 << 40 must yield 0")
+    b := int64(1)
+    cnt2 := 65
+    safetyCheck(int(b << cnt2) == 0, "i64 << 65 must yield 0")
+}
+
+// TestShiftNegativePanics guards #150: a negative shift count is LLVM
+// UB and must panic.
+pub fn TestShiftNegativePanics() {
+    safetyExpectPanic(shiftNegative, "a >> -1")
+}
+
+// TestArithStillWorks guards #150: normal division, remainder, and
+// shifts behave as before.
+pub fn TestArithStillWorks() {
+    safetyCheck(10 / 3 == 3, "10/3 must still be 3")
+    safetyCheck(10 % 3 == 1, "10%3 must still be 1")
+    safetyCheck(-10 / 3 == -3, "-10/3 must still be -3")
+    safetyCheck((1 << 5) == 32, "1<<5 must still be 32")
+    safetyCheck((256 >> 4) == 16, "256>>4 must still be 16")
+    safetyCheck((-2147483647 - 1) / 1 == -2147483647 - 1, "INT_MIN / 1 must still work")
+}
+
+// main runs all safety checks and exits non-zero on any failure.
+fn main() -> int {
+    TestStringReadOOBPanics()
+    TestStringWriteOOBPanics()
+    TestStringSliceOOBPanics()
+    TestStringIndexInBounds()
+    TestStringIndexLoopPerf()
+    TestDivZeroPanics()
+    TestRemZeroPanics()
+    TestIntMinDivNegOnePanics()
+    TestIntMinRemNegOnePanics()
+    TestShiftTooFarYieldsZero()
+    TestShiftNegativePanics()
+    TestArithStillWorks()
+    if safetyFailures > 0 {
+        println(strconv.Itoa(safetyFailures))
+        println(" safety failure(s)")
+        return 1
+    }
+    println("compiler_safety_test: all checks passed")
+    return 0
+}

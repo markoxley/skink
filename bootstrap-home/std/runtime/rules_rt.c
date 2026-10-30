@@ -56,6 +56,10 @@
 // usleep replaced by SKINK_USLEEP via skink_compat.h
 #else
 #include <unistd.h>
+
+// Frees this thread's panic pool before the detached ruleset
+// loop exits (panic_rt.c) — prevents a ~12.8KB per-thread leak.
+extern void Skink_panic_thread_cleanup(void);
 #endif
 
 /* Function pointer type for a rule callback that receives a self pointer. */
@@ -318,6 +322,7 @@ void *Skink_ruleset_loop(void *arg) {
   rs->thread_active = 0;
   pthread_cond_signal(&rs->stopped_cv);
   pthread_mutex_unlock(&rs->mu);
+  Skink_panic_thread_cleanup();
   return NULL;
 }
 

@@ -68,7 +68,7 @@ fn rsCheckValid(tag: string, imp: string) {
     fs.WriteAll(str.Concat(dir, "/helper.skink"), "module helper\npub fn Hi() -> int {\n    return 1\n}\n")
     _, errs := resolver.Resolve(str.Concat(dir, "/main.skink"), "/home/mark/Projects/skink-lang/skink/std")
     if len(errs) != 0 {
-        testing.Errorf(str.Concat(tag, ": valid import must resolve, got: "), errs[0])
+        testing.Errorf(str.Concat(str.Concat(tag, ": valid import must resolve, got: "), errs[0]))
     }
     fs.Remove(str.Concat(dir, "/main.skink"))
     fs.Remove(str.Concat(dir, "/helper.skink"))

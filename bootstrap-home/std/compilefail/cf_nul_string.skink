@@ -1,0 +1,12 @@
+// expect: unexpected token in expression
+// comp_error.md #151: string literals containing the \0 escape are
+// rejected — Skink strings are NUL-terminated (Len is strlen), so an
+// embedded NUL would silently truncate every stdlib operation
+// (path/command confusion, invisible trailing bytes).
+module main
+
+fn main() -> int {
+    s := "a\0b"
+    println(s)
+    return 0
+}

@@ -26,6 +26,8 @@ module crypto_test
 import "std/crypto"
 import "std/str"
 import "std/libc"
+
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
 import "testing"
 
 // TestHexEncode verifies that HexEncode produces correct hex strings.
@@ -88,10 +90,10 @@ pub fn TestHmacSha256() {
 // NUL the way a strlen-based measurement would be.
 pub fn TestSha256BytesBinary() {
     b := libc.malloc(4)
-    b[0] = 97  // 'a'
-    b[1] = 98  // 'b'
-    b[2] = 0   // interior NUL — invisible to strlen
-    b[3] = 99  // 'c'
+    Skink_mem_write_byte(b, int64(0), 97)  // 'a'
+    Skink_mem_write_byte(b, int64(1), 98)  // 'b'
+    Skink_mem_write_byte(b, int64(2), 0)   // interior NUL — invisible to strlen
+    Skink_mem_write_byte(b, int64(3), 99)  // 'c'
     full := crypto.Sha256Bytes(b, 4)
     trunc := crypto.Sha256Bytes(b, 2)
     testing.AssertTrue(!str.Equal(full, trunc), "NUL-containing input must differ from truncated")
@@ -102,15 +104,15 @@ pub fn TestSha256BytesBinary() {
 // contain NUL bytes; the explicit-length API must hash all of them.
 pub fn TestHmacSha256BytesBinary() {
     k := libc.malloc(4)
-    k[0] = 107 // 'k'
-    k[1] = 0
-    k[2] = 101 // 'e'
-    k[3] = 121 // 'y'
+    Skink_mem_write_byte(k, int64(0), 107) // 'k'
+    Skink_mem_write_byte(k, int64(1), 0)
+    Skink_mem_write_byte(k, int64(2), 101) // 'e'
+    Skink_mem_write_byte(k, int64(3), 121) // 'y'
     m := libc.malloc(4)
-    m[0] = 109 // 'm'
-    m[1] = 0
-    m[2] = 115 // 's'
-    m[3] = 103 // 'g'
+    Skink_mem_write_byte(m, int64(0), 109) // 'm'
+    Skink_mem_write_byte(m, int64(1), 0)
+    Skink_mem_write_byte(m, int64(2), 115) // 's'
+    Skink_mem_write_byte(m, int64(3), 103) // 'g'
     full := crypto.HmacSha256Bytes(k, 4, m, 4)
     trunc := crypto.HmacSha256Bytes(k, 1, m, 1)
     testing.AssertTrue(!str.Equal(full, trunc), "NUL-containing HMAC inputs must differ from truncated")

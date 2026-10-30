@@ -1,0 +1,34 @@
+module main
+import "std/testing"
+import "template_escape_test"
+
+fn main() -> int {
+    passed := true
+    testing.Reset()
+    template_escape_test.TestTemplateSliceEscape()
+    if testing.Failed() {
+        passed = false
+    }
+    testing.Reset()
+    template_escape_test.TestTemplateFieldEscape()
+    if testing.Failed() {
+        passed = false
+    }
+    testing.Reset()
+    template_escape_test.TestTemplatePassthroughReuse()
+    if testing.Failed() {
+        passed = false
+    }
+    testing.Reset()
+    template_escape_test.TestTemplateNestedSliceEscape()
+    if testing.Failed() {
+        passed = false
+    }
+    testing.Reset()
+    template_escape_test.TestTemplateMethodCallAfterLoop()
+    if testing.Failed() {
+        passed = false
+    }
+    if passed { return 0 }
+    return 1
+}

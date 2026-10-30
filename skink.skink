@@ -415,6 +415,7 @@ fn main() -> int {
     rt = append(rt, str.Concat(skinkHome, "/runtime/llm_rt.c"))
     rt = append(rt, str.Concat(skinkHome, "/runtime/mqtt_rt.c"))
     rt = append(rt, str.Concat(skinkHome, "/runtime/tls_rt.c"))
+    rt = append(rt, str.Concat(skinkHome, "/runtime/sys_rt.c"))
     rt = append(rt, str.Concat(skinkHome, "/runtime/template_bridge.ll"))
 
     // Detect whether the program imports the UI library — its runtime

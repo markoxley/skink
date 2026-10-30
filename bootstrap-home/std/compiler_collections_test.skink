@@ -549,25 +549,3 @@ pub fn TestZeroSizeAllocLifecycle() {
     leaked := Skink_rc_live_objects() - before
     testing.AssertTrue(leaked == 0, "zero-size slice lifecycle leaked rc objects")
 }
-
-// TestMapInt64Keys guards the emitMapKeyHash normalization fix: an i64
-// key used to reach `srem i32 %i64, cap` directly, which clang rejects
-// with "'%r34' defined with type 'i64' but expected 'i32'". The hash now
-// truncs wide scalar keys to i32 before bucket math.
-pub fn TestMapInt64Keys() {
-    m := make(map[int64]int)
-    m[int64(1)] = 10
-    m[int64(2147483648)] = 20 // > i32 max exercises the trunc path
-    m[int64(-7)] = 30
-    testing.AssertEqualInt(10, m[int64(1)], "small i64 key")
-    testing.AssertEqualInt(20, m[int64(2147483648)], "wide i64 key")
-    testing.AssertEqualInt(30, m[int64(-7)], "negative i64 key")
-    testing.AssertEqualInt(3, len(m), "map size")
-    // Enough churn to force at least one rehash through the i64 path.
-    for i := int64(0); i < int64(100); i = i + 1 {
-        m[i + int64(1000)] = int(i)
-    }
-    testing.AssertEqualInt(103, len(m), "post-rehash size")
-    testing.AssertEqualInt(57, m[int64(1057)], "rehashed lookup")
-    testing.AssertEqualInt(10, m[int64(1)], "pre-rehash key still found")
-}

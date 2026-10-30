@@ -672,3 +672,31 @@ pub fn TestRendezvousChanTwoSenders() {
         testing.AssertTrue(sum == 3, "rendezvous two-sender sum")
     }
 }
+
+// === comp_error.md #126 — spawn fn literal / fn value ===
+
+// TestSpawnFnLit guards comp_error.md #126: `spawn fn() { ... }()`
+// previously emitted a synchronous call of the literal, so a blocking
+// body (channel recv) deadlocked the caller. It must spawn a real thread.
+pub fn TestSpawnFnLit() {
+    hand := make(chan<int>, 0)
+    done := make(chan<int>, 1)
+    spawn fn() {
+        v := <-hand
+        done <- v
+    }()
+    hand <- 42
+    got := <-done
+    testing.AssertEqualInt(42, got, "spawned fn literal received channel value")
+}
+
+// TestSpawnFnVar guards the same fix for a fn-typed variable callee.
+pub fn TestSpawnFnVar() {
+    done := make(chan<int>, 1)
+    f := fn(x: int) {
+        done <- x + 1
+    }
+    spawn f(41)
+    got := <-done
+    testing.AssertEqualInt(42, got, "spawned fn var ran with argument")
+}

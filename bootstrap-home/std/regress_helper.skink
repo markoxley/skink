@@ -81,3 +81,27 @@ const origin_x = 3
 const origin_y = 4
 
 pub const PubOrigin = Point{x: origin_x, y: origin_y}
+
+// --- comp_error.md #125 fixtures: cross-module fn-type aliases ---
+// A Middleware-shaped alias pair used to verify that named fn-type aliases
+// unify with structurally identical signatures across module boundaries.
+
+pub struct RHReq {
+    val: int
+}
+
+pub struct RHResp {
+    ok: bool
+}
+
+// RHHandler matches the shape of std/web's types.Handler.
+pub type RHHandler = fn(RHReq, *RHResp) -> void
+
+// RHMiddleware matches types.Middleware = fn(Handler) -> Handler.
+pub type RHMiddleware = fn(RHHandler) -> RHHandler
+
+// ApplyMiddleware accepts a middleware value — the call site in
+// compiler_fixes_test previously failed to compile.
+pub fn ApplyMiddleware(m: RHMiddleware) -> int {
+    return 0
+}

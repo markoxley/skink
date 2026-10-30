@@ -29,6 +29,8 @@
 module server_live_test
 
 import "std/fs"
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
+extern fn Skink_mem_byte(ptr: string, idx: int64) -> int
 import "std/libc"
 import "std/net"
 import "std/str"
@@ -129,7 +131,7 @@ fn liveReadN(c: *liveClient) -> (string, int) {
     // Compact leftover bytes to the front so offsets stay absolute.
     if c.head > 0 {
         for i := 0; i < c.total - c.head; i = i + 1 {
-            c.buf[i] = c.buf[c.head + i]
+            Skink_mem_write_byte(c.buf, int64(i), Skink_mem_byte(c.buf, int64(c.head + i)))
         }
         c.total = c.total - c.head
         c.head = 0
@@ -140,7 +142,7 @@ fn liveReadN(c: *liveClient) -> (string, int) {
         if headEnd < 0 {
             // The header block is pure ASCII, so the NUL-terminated view
             // is safe to scan with string functions.
-            c.buf[c.total] = 0
+            Skink_mem_write_byte(c.buf, int64(c.total), 0)
             headEnd = str.IndexOf(c.buf, "\r\n\r\n")
             if headEnd >= 0 {
                 clIdx := str.IndexOf(c.buf, "Content-Length: ")
@@ -157,7 +159,7 @@ fn liveReadN(c: *liveClient) -> (string, int) {
             end := headEnd + 4 + bodyLen
             out := libc.malloc(end + 1)
             libc.memcpy(out, c.buf, end)
-            out[end] = 0
+            Skink_mem_write_byte(out, int64(end), 0)
             c.head = end
             return out, end
         }
@@ -168,7 +170,7 @@ fn liveReadN(c: *liveClient) -> (string, int) {
                 // arrived.
                 out := libc.malloc(c.total + 1)
                 libc.memcpy(out, c.buf, c.total)
-                out[c.total] = 0
+                Skink_mem_write_byte(out, int64(c.total), 0)
                 c.head = c.total
                 return out, c.total
             }
@@ -550,12 +552,12 @@ pub fn TestLiveStaticBinary() {
         testing.FailNow()
     }
     raw := libc.malloc(6)
-    raw[0] = 0
-    raw[1] = 1
-    raw[2] = 2
-    raw[3] = 3
-    raw[4] = 65
-    raw[5] = 66
+    Skink_mem_write_byte(raw, int64(0), 0)
+    Skink_mem_write_byte(raw, int64(1), 1)
+    Skink_mem_write_byte(raw, int64(2), 2)
+    Skink_mem_write_byte(raw, int64(3), 3)
+    Skink_mem_write_byte(raw, int64(4), 65)
+    Skink_mem_write_byte(raw, int64(5), 66)
     f.Write(raw, 6)
     f.Close()
     libc.free(raw)
@@ -576,7 +578,7 @@ pub fn TestLiveStaticBinary() {
     testing.AssertContains(raw, "Content-Length: 6", "binary content-length")
     headEnd := str.IndexOf(raw, "\r\n\r\n")
     bodyStart := headEnd + 4
-    intact := total >= bodyStart + 6 && raw[bodyStart] == 0 && raw[bodyStart + 1] == 1 && raw[bodyStart + 3] == 3 && raw[bodyStart + 4] == 65 && raw[bodyStart + 5] == 66
+    intact := total >= bodyStart + 6 && Skink_mem_byte(raw, int64(bodyStart)) == 0 && Skink_mem_byte(raw, int64(bodyStart + 1)) == 1 && Skink_mem_byte(raw, int64(bodyStart + 3)) == 3 && Skink_mem_byte(raw, int64(bodyStart + 4)) == 65 && Skink_mem_byte(raw, int64(bodyStart + 5)) == 66
     testing.AssertTrue(intact, "binary body preserved including NULs")
     conn.Close()
     fs.Remove("/tmp/skink_live_static/bin.dat")
@@ -821,7 +823,7 @@ fn liveHijackCB(conn: net.Connection, ssl: int64, buffered: string, bufferedLen:
     buf := libc.malloc(4096)
     n := conn.Read(buf, 4095)
     if n > 0 {
-        buf[n] = 0
+        Skink_mem_write_byte(buf, int64(n), 0)
         echo := str.Concat("ECHO:", buf)
         conn.SendAll(echo, str.Len(echo))
     }
@@ -860,7 +862,7 @@ pub fn TestLiveHijack() {
         if n <= 0 {
             break
         }
-        buf[n] = 0
+        Skink_mem_write_byte(buf, int64(n), 0)
         got = str.Concat(got, buf)
     }
     testing.AssertContains(got, "101 Switching Protocols", "callback wrote the 101")
@@ -873,7 +875,7 @@ pub fn TestLiveHijack() {
         if n <= 0 {
             break
         }
-        buf[n] = 0
+        Skink_mem_write_byte(buf, int64(n), 0)
         got = str.Concat(got, buf)
     }
     testing.AssertContains(got, "ECHO:hello", "callback echoes over hijacked conn")

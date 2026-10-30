@@ -37,6 +37,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 #include <time.h>
 #include <sys/stat.h>  // MinGW provides sys/stat.h
 #include <io.h>        // _access, _close, _read, _write, _dup2
@@ -57,6 +58,14 @@
 #include <unistd.h>
 
 #endif
+
+// SKINK_EXEC_OUT_MAX caps the bytes captured from a child's stdout by
+// Skink_os_exec_with_output on both platforms: an unbounded child could
+// otherwise stream gigabytes into memory (comp_error.md #153). When the
+// cap is hit the pipe is closed (the child observes EPIPE/SIGPIPE, and
+// SIGPIPE is ignored process-wide), the child is reaped, and the
+// truncated buffer plus its exit status are returned.
+#define SKINK_EXEC_OUT_MAX (64 * 1024 * 1024)
 
 // realpath — resolve a path to its absolute, canonical form.
 // On Windows, this wraps _fullpath from the C runtime.
@@ -152,6 +161,8 @@ void *Skink_fs_opendir(const char *path) { return opendir(path); }
 // Returns 1 on success, 0 on end, -1 on error.
 // Also sets *is_dir to 1 if the entry is a directory.
 int Skink_fs_readdir(void *dir, char *buf, int buf_size, int *is_dir) {
+  if (!dir || !buf || buf_size <= 0)
+    return -1;
   struct dirent *entry = readdir((DIR *)dir);
   if (entry == NULL) {
     return 0;
@@ -373,7 +384,8 @@ char *Skink_os_exec_with_output(const char **argv, int argc, int *status_out) {
     return NULL;
   }
 
-  // Read child stdout from the pipe.
+  // Read child stdout from the pipe (capped at SKINK_EXEC_OUT_MAX so an
+// unbounded child cannot exhaust memory — comp_error.md #153).
   size_t cap = 4096;
   size_t len = 0;
   char *buf = (char *)malloc(cap);
@@ -387,9 +399,13 @@ char *Skink_os_exec_with_output(const char **argv, int argc, int *status_out) {
     return NULL;
   }
   for (;;) {
+    if (len >= SKINK_EXEC_OUT_MAX)
+      break;
     if (len == cap) {
-      cap *= 2;
-      char *tmp = (char *)realloc(buf, cap);
+      size_t newcap = cap * 2;
+      if (newcap > SKINK_EXEC_OUT_MAX)
+        newcap = SKINK_EXEC_OUT_MAX;
+      char *tmp = (char *)realloc(buf, newcap);
       if (!tmp) {
         free(buf);
         CloseHandle(read_h);
@@ -401,6 +417,7 @@ char *Skink_os_exec_with_output(const char **argv, int argc, int *status_out) {
         return NULL;
       }
       buf = tmp;
+      cap = newcap;
     }
     DWORD n = 0;
     if (!ReadFile(read_h, buf + len, (DWORD)(cap - len), &n, NULL) ||
@@ -411,7 +428,7 @@ char *Skink_os_exec_with_output(const char **argv, int argc, int *status_out) {
   CloseHandle(read_h);
 
   // Null-terminate.
-  if (len == cap) {
+  if (len == cap && cap < SKINK_EXEC_OUT_MAX) {
     char *tmp = (char *)realloc(buf, cap + 1);
     if (!tmp) {
       free(buf);
@@ -442,6 +459,35 @@ char *Skink_os_exec_with_output(const char **argv, int argc, int *status_out) {
 
 #include <fcntl.h>
 #include <sys/wait.h>
+
+// skink_mark_inherited_cloexec marks every open fd above 2 (except
+// except_fd — the pipe write end the child dup2s onto stdout) as
+// close-on-exec so a spawned child never inherits the parent's
+// descriptors — inherited fds leak into children and can be confused
+// with the child's own streams (comp_error.md #153). Linux iterates
+// /proc/self/fd; other POSIX platforms fall back to no-op (documented).
+static void skink_mark_inherited_cloexec(int except_fd) {
+#if defined(__linux__)
+  DIR *d = opendir("/proc/self/fd");
+  if (!d)
+    return;
+  int dfd = dirfd(d);
+  struct dirent *ent;
+  while ((ent = readdir(d)) != NULL) {
+    if (ent->d_name[0] == '.')
+      continue;
+    int fd = atoi(ent->d_name);
+    if (fd <= 2 || fd == dfd || fd == except_fd)
+      continue;
+    int flags = fcntl(fd, F_GETFD);
+    if (flags >= 0)
+      fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+  }
+  closedir(d);
+#else
+  (void)except_fd;
+#endif
+}
 
 // Skink_os_exec — execute a program with an argument array, without
 // invoking a shell. argv is a NULL-terminated array of C strings.
@@ -474,9 +520,9 @@ int Skink_os_exec(const char **argv, int argc) {
 }
 
 // Skink_os_exec_with_output — execute a program with an argument array,
-// capturing stdout. Returns the child exit status via *status_out and
-// the captured stdout as a malloc'd buffer (caller must free).
-// On error returns NULL.
+// capturing stdout (capped at SKINK_EXEC_OUT_MAX). Returns the child
+// exit status via *status_out and the captured stdout as an RC-managed
+// string ("" if the child produced no output). On error returns NULL.
 char *Skink_os_exec_with_output(const char **argv, int argc, int *status_out) {
   (void)argc;
   if (!argv || !argv[0] || !status_out) {
@@ -489,6 +535,13 @@ char *Skink_os_exec_with_output(const char **argv, int argc, int *status_out) {
     *status_out = -1;
     return NULL;
   }
+  // The read end must not leak into the child; the write end is dup2'd
+  // onto stdout there, and the rest of the parent's descriptors are
+  // marked close-on-exec so the child inherits nothing else.
+  int pflags = fcntl(pipefd[0], F_GETFD);
+  if (pflags >= 0)
+    fcntl(pipefd[0], F_SETFD, pflags | FD_CLOEXEC);
+  skink_mark_inherited_cloexec(pipefd[1]);
   pid_t pid = fork();
   if (pid < 0) {
     close(pipefd[0]);
@@ -516,9 +569,13 @@ char *Skink_os_exec_with_output(const char **argv, int argc, int *status_out) {
     return NULL;
   }
   for (;;) {
+    if (len >= SKINK_EXEC_OUT_MAX)
+      break;
     if (len == cap) {
-      cap *= 2;
-      char *tmp = (char *)realloc(buf, cap);
+      size_t newcap = cap * 2;
+      if (newcap > SKINK_EXEC_OUT_MAX)
+        newcap = SKINK_EXEC_OUT_MAX;
+      char *tmp = (char *)realloc(buf, newcap);
       if (!tmp) {
         free(buf);
         close(pipefd[0]);
@@ -527,6 +584,7 @@ char *Skink_os_exec_with_output(const char **argv, int argc, int *status_out) {
         return NULL;
       }
       buf = tmp;
+      cap = newcap;
     }
     ssize_t n = read(pipefd[0], buf + len, cap - len);
     if (n <= 0)
@@ -535,7 +593,7 @@ char *Skink_os_exec_with_output(const char **argv, int argc, int *status_out) {
   }
   close(pipefd[0]);
   // Null-terminate.
-  if (len == cap) {
+  if (len == cap && cap < SKINK_EXEC_OUT_MAX) {
     char *tmp = (char *)realloc(buf, cap + 1);
     if (!tmp) {
       free(buf);
@@ -607,6 +665,108 @@ char *Skink_fs_mktemp(const char *prefix, const char *suffix) {
     if (!path)
       return NULL;
     snprintf(path, plen, "%s/%s%llx%s", tmpdir, prefix,
+             skink_mktemp_random(attempt), suffix);
+#ifdef _WIN32
+    int fd = _open(path, _O_CREAT | _O_EXCL | _O_RDWR | _O_BINARY,
+                   _S_IREAD | _S_IWRITE);
+#else
+    int fd = open(path, O_CREAT | O_EXCL | O_RDWR, 0600);
+#endif
+    if (fd >= 0) {
+#ifdef _WIN32
+      _close(fd);
+#else
+      close(fd);
+#endif
+      return skink_rc_copy_out(path, strlen(path));
+    }
+    free(path);
+    if (errno != EEXIST)
+      return NULL;
+  }
+  return NULL;
+}
+
+// Skink_fs_mktemp_fopen creates a uniquely-named file in the system
+// temp directory (O_CREAT|O_EXCL|0600) and immediately returns a FILE*
+// opened for writing on that same descriptor — there is no close-and-
+// reopen window for another process (same user) to swap the path for a
+// symlink (comp_error.md #153). The created path is written into
+// pathBuf (caller supplies at least 4096 bytes) so the caller can
+// remove the file afterwards. Returns NULL on failure.
+void *Skink_fs_mktemp_fopen(const char *prefix, const char *suffix,
+                            char *pathBuf) {
+  if (!prefix)
+    prefix = "skink";
+  if (!suffix)
+    suffix = "";
+#ifdef _WIN32
+  const char *tmpdir = getenv("TEMP");
+  if (!tmpdir || !*tmpdir)
+    tmpdir = getenv("TMP");
+  if (!tmpdir || !*tmpdir)
+    tmpdir = ".";
+#else
+  const char *tmpdir = getenv("TMPDIR");
+  if (!tmpdir || !*tmpdir)
+    tmpdir = "/tmp";
+#endif
+  size_t plen = strlen(tmpdir) + strlen(prefix) + 20 + strlen(suffix) + 3;
+  for (int attempt = 0; attempt < 1000; attempt++) {
+    char *path = (char *)malloc(plen);
+    if (!path)
+      return NULL;
+    snprintf(path, plen, "%s/%s%llx%s", tmpdir, prefix,
+             skink_mktemp_random(attempt), suffix);
+#ifdef _WIN32
+    int fd = _open(path, _O_CREAT | _O_EXCL | _O_RDWR | _O_BINARY,
+                   _S_IREAD | _S_IWRITE);
+#else
+    int fd = open(path, O_CREAT | O_EXCL | O_RDWR, 0600);
+#endif
+    if (fd >= 0) {
+      FILE *fp = fdopen(fd, "w");
+      if (!fp) {
+#ifdef _WIN32
+        _close(fd);
+#else
+        close(fd);
+#endif
+        free(path);
+        return NULL;
+      }
+      if (pathBuf) {
+        strncpy(pathBuf, path, 4095);
+        pathBuf[4095] = '\0';
+      }
+      free(path);
+      return fp;
+    }
+    free(path);
+    if (errno != EEXIST)
+      return NULL;
+  }
+  return NULL;
+}
+
+// Skink_fs_mktemp_in is Skink_fs_mktemp with a caller-supplied
+// directory (the LSP must place its check file beside the source so
+// relative imports resolve; the system temp dir would break them).
+// Same O_CREAT|O_EXCL|0600 contract. Returns an RC-managed path string.
+char *Skink_fs_mktemp_in(const char *dir, const char *prefix,
+                         const char *suffix) {
+  if (!dir || !*dir)
+    return NULL;
+  if (!prefix)
+    prefix = "skink";
+  if (!suffix)
+    suffix = "";
+  size_t plen = strlen(dir) + strlen(prefix) + 20 + strlen(suffix) + 3;
+  for (int attempt = 0; attempt < 1000; attempt++) {
+    char *path = (char *)malloc(plen);
+    if (!path)
+      return NULL;
+    snprintf(path, plen, "%s/%s%llx%s", dir, prefix,
              skink_mktemp_random(attempt), suffix);
 #ifdef _WIN32
     int fd = _open(path, _O_CREAT | _O_EXCL | _O_RDWR | _O_BINARY,
@@ -783,4 +943,25 @@ int Skink_embed_isdir(const char *path) {
     }
   }
   return 0;
+}
+
+// Skink_fs_seek64/Skink_fs_tell64 provide 64-bit file positioning on all
+// platforms: plain fseek/ftell use `long`, which is only 32-bit on Windows,
+// so seeks and sizes past 2 GiB silently truncated (VULNERABILITIES.md
+// ">2GiB file ops" limitation). Windows uses _fseeki64/_ftelli64; POSIX
+// uses fseeko/ftello with off_t (64-bit under _FILE_OFFSET_BITS=64).
+int Skink_fs_seek64(void *fp, int64_t offset, int whence) {
+#ifdef _WIN32
+  return _fseeki64((FILE *)fp, offset, whence);
+#else
+  return fseeko((FILE *)fp, (off_t)offset, whence);
+#endif
+}
+
+int64_t Skink_fs_tell64(void *fp) {
+#ifdef _WIN32
+  return (int64_t)_ftelli64((FILE *)fp);
+#else
+  return (int64_t)ftello((FILE *)fp);
+#endif
 }

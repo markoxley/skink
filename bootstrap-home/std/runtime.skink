@@ -1,0 +1,110 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/runtime.skink
+// Purpose: Exposes runtime values describing the running program: the
+//          operating system and CPU architecture it was compiled for, the
+//          path of the current executable, and host resources (CPU count,
+//          page size). Backed by std/runtime/sys_rt.c, which is linked
+//          into every Skink binary.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module runtime
+
+import "std/libc"
+import "std/str"
+
+// Runtime support from std/runtime/sys_rt.c.
+extern fn Skink_rt_os() -> string
+extern fn Skink_rt_arch() -> string
+extern fn Skink_rt_executable_path() -> string
+extern fn Skink_rt_num_cpus() -> int64
+extern fn Skink_rt_page_size() -> int64
+
+// OS returns the operating system the program was compiled for:
+// "linux", "darwin", "windows", a BSD name, or "unknown". The value is
+// fixed at compile time, matching the release-target naming used by
+// release.sh (e.g. linux-x86_64, darwin-arm64).
+pub fn OS() -> string {
+    return Skink_rt_os()
+}
+
+// Arch returns the CPU architecture the program was compiled for:
+// "x86_64", "arm64", "arm", "x86", or "unknown".
+pub fn Arch() -> string {
+    return Skink_rt_arch()
+}
+
+// Executable returns the absolute path of the running executable, or an
+// empty string if the platform cannot supply it.
+pub fn Executable() -> string {
+    return Skink_rt_executable_path()
+}
+
+// exeSepIndex returns the index of the last path separator in p, or -1.
+// Both '/' and '\\' are accepted so the helpers behave identically on
+// Windows paths (which use '\\') and POSIX paths.
+fn exeSepIndex(p: string) -> int {
+    i := int(libc.strlen(p)) - 1
+    for i >= 0 {
+        c := p[i]
+        if c == 47 || c == 92 {
+            return i
+        }
+        i = i - 1
+    }
+    return -1
+}
+
+// ExecutableName returns the final path component of Executable() (the
+// program file name without its directory), or "" if no path is available.
+pub fn ExecutableName() -> string {
+    p := Executable()
+    sep := exeSepIndex(p)
+    if sep < 0 {
+        return p
+    }
+    return str.Substr(p, sep + 1, int(libc.strlen(p)) - sep - 1)
+}
+
+// ExecutableDir returns the directory portion of Executable() (everything
+// before the final path separator), or "" if no path is available.
+pub fn ExecutableDir() -> string {
+    p := Executable()
+    sep := exeSepIndex(p)
+    if sep <= 0 {
+        // sep == 0 keeps "/" rather than collapsing to "".
+        if sep == 0 {
+            return str.Substr(p, 0, 1)
+        }
+        return ""
+    }
+    return str.Substr(p, 0, sep)
+}
+
+// NumCPU returns the number of logical CPUs online on the host. It is
+// always >= 1.
+pub fn NumCPU() -> int {
+    return int(Skink_rt_num_cpus())
+}
+
+// PageSize returns the host memory page size in bytes (typically 4096).
+pub fn PageSize() -> int {
+    return int(Skink_rt_page_size())
+}

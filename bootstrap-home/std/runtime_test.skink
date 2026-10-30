@@ -1,0 +1,91 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/runtime_test.skink
+// Purpose: Regression tests for the std/runtime module (sys_rt.c backing):
+//          verifies OS/Arch identification, the executable-path helpers,
+//          and the host-resource queries (NumCPU, PageSize).
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module runtime_test
+
+import "std/fs"
+import "std/runtime"
+import "std/str"
+import "testing"
+
+// TestOS guards the runtime.OS regression: the OS name must be non-empty
+// and, on the platforms the toolchain supports, one of the known values.
+pub fn TestOS() {
+    os := runtime.OS()
+    AssertTrue(len(os) > 0, "runtime.OS should not be empty")
+    AssertFalse(str.Equal(os, "unknown"), "runtime.OS should identify the host OS")
+    known := str.Equal(os, "linux") || str.Equal(os, "darwin") || str.Equal(os, "windows")
+    AssertTrue(known, "runtime.OS should be linux, darwin, or windows")
+}
+
+// TestArch guards the runtime.Arch regression: the architecture name must
+// be non-empty and identify the build target.
+pub fn TestArch() {
+    arch := runtime.Arch()
+    AssertTrue(len(arch) > 0, "runtime.Arch should not be empty")
+    AssertFalse(str.Equal(arch, "unknown"), "runtime.Arch should identify the host CPU")
+    known := str.Equal(arch, "x86_64") || str.Equal(arch, "arm64") || str.Equal(arch, "x86") || str.Equal(arch, "arm")
+    AssertTrue(known, "runtime.Arch should be a supported architecture name")
+}
+
+// TestExecutable guards the runtime.Executable regression: the running
+// test binary's path must be absolute and point at a file that exists.
+pub fn TestExecutable() {
+    exe := runtime.Executable()
+    AssertTrue(len(exe) > 0, "runtime.Executable should not be empty")
+    // Absolute on POSIX ("/...") or Windows ("C:\..." / "C:/...").
+    c0 := exe[0]
+    isAbs := c0 == 47 || c0 == 92 || (len(exe) > 2 && exe[1] == 58)
+    AssertTrue(isAbs, "runtime.Executable should return an absolute path")
+    AssertTrue(fs.Exists(exe), "runtime.Executable should name an existing file")
+}
+
+// TestExecutableNameDir guards the ExecutableName/ExecutableDir split:
+// joining dir + separator + name must reproduce the full executable path.
+pub fn TestExecutableNameDir() {
+    exe := runtime.Executable()
+    AssertTrue(len(exe) > 0, "runtime.Executable should not be empty")
+    dir := runtime.ExecutableDir()
+    name := runtime.ExecutableName()
+    AssertTrue(len(name) > 0, "runtime.ExecutableName should not be empty")
+    AssertTrue(len(dir) > 0, "runtime.ExecutableDir should not be empty")
+    // The name must be the exact tail of the full path.
+    tail := str.Substr(exe, len(exe) - len(name), len(name))
+    AssertEqualString(name, tail, "ExecutableName should be the final path component")
+}
+
+// TestNumCPU guards the runtime.NumCPU regression: every running process
+// executes on at least one processor.
+pub fn TestNumCPU() {
+    AssertTrue(runtime.NumCPU() >= 1, "runtime.NumCPU should be >= 1")
+}
+
+// TestPageSize guards the runtime.PageSize regression: page sizes are
+// positive powers of two at least 512 bytes.
+pub fn TestPageSize() {
+    ps := runtime.PageSize()
+    AssertTrue(ps >= 512, "runtime.PageSize should be >= 512")
+    AssertTrue((ps & (ps - 1)) == 0, "runtime.PageSize should be a power of two")
+}
