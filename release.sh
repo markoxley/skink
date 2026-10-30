@@ -25,8 +25,8 @@
 #
 # release.sh — Build and package a Skink release archive for GitHub
 #
-# This script builds the skink compiler, skink-lsp, skinkfmt, scales, and
-# skinkjs, then packages them with the standard library and C runtime into a
+# This script builds the skink compiler, skink-lsp, skinkfmt, scales,
+# skinkjs, and skinkcov, then packages them with the standard library and C runtime into a
 # tarball ready for upload to GitHub releases.
 #
 # Usage:
@@ -46,6 +46,7 @@ SKINK_HOME_DIR="${SCRIPT_DIR}/std"
 LSP_DIR="${SCRIPT_DIR}/../tools/skink-lsp"
 SCALES_DIR="${SCRIPT_DIR}/../tools/scales"
 SKINKJS_DIR="${SCRIPT_DIR}/../tools/skinkjs"
+SKINKCOV_DIR="${SCRIPT_DIR}/../tools/skinkcov"
 
 # Version
 VERSION=""
@@ -216,6 +217,29 @@ else
 fi
 
 # ============================================================================
+# Build skinkcov
+# ============================================================================
+
+SKINKCOV_BIN=""
+if [[ -d "$SKINKCOV_DIR" ]]; then
+    info "Building skinkcov..."
+    (
+        cd "$SKINKCOV_DIR"
+        make clean
+        SKINK="$COMPILER_BIN" SKINK_HOME="$SKINK_HOME_DIR" make build
+    )
+    SKINKCOV_BIN="${SKINKCOV_DIR}/skinkcov"
+    [[ -f "$SKINKCOV_BIN" ]] || fail "skinkcov build failed"
+    info "Verifying skinkcov..."
+    # skinkcov has no version flag; running it with no args prints usage
+    # and exits 1, so verify on the usage output instead.
+    _cov_out="$("$SKINKCOV_BIN" 2>&1 || true)"
+    echo "$_cov_out" | grep -q "usage:" || fail "skinkcov verification failed"
+else
+    warn "skinkcov directory not found at ${SKINKCOV_DIR}, skipping skinkcov"
+fi
+
+# ============================================================================
 # Package archive
 # ============================================================================
 
@@ -247,6 +271,11 @@ fi
 if [[ -n "$SKINKJS_BIN" ]] && [[ -f "$SKINKJS_BIN" ]]; then
     cp "$SKINKJS_BIN" "${STAGING_DIR}/skinkjs"
     chmod 755 "${STAGING_DIR}/skinkjs"
+fi
+
+if [[ -n "$SKINKCOV_BIN" ]] && [[ -f "$SKINKCOV_BIN" ]]; then
+    cp "$SKINKCOV_BIN" "${STAGING_DIR}/skinkcov"
+    chmod 755 "${STAGING_DIR}/skinkcov"
 fi
 
 # skink -t / -b resolve their harness scripts relative to argv[0], so they
