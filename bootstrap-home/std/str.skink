@@ -78,7 +78,7 @@ pub fn WriteByte(self: *Builder, b: int) {
         panic("str.Builder: NUL byte in string")
     }
     self.ensure(1)
-    self.buf[self.len] = b
+    Skink_mem_write_byte(self.buf, int64(self.len), b)
     self.len = self.len + 1
     // Terminator byte — index == the buffer's last byte (raw write).
     Skink_mem_write_byte(self.buf, int64(self.len), 0)
@@ -367,7 +367,7 @@ pub fn Replace(s: string, old: string, new: string) -> string {
 pub fn ToLower(s: string) -> string {
     n := Len(s)
     result := managedAlloc(n + 1)
-    for i := 0; i < n; i = i + 1 { result[i] = libc.tolower(s[i]) }
+    for i := 0; i < n; i = i + 1 { Skink_mem_write_byte(result, int64(i), libc.tolower(s[i])) }
     // Terminator byte (raw write — index == the allocation's last byte).
     Skink_mem_write_byte(result, int64(n), 0)
     return result
@@ -377,7 +377,7 @@ pub fn ToLower(s: string) -> string {
 pub fn ToUpper(s: string) -> string {
     n := Len(s)
     result := managedAlloc(n + 1)
-    for i := 0; i < n; i = i + 1 { result[i] = libc.toupper(s[i]) }
+    for i := 0; i < n; i = i + 1 { Skink_mem_write_byte(result, int64(i), libc.toupper(s[i])) }
     // Terminator byte (raw write — index == the allocation's last byte).
     Skink_mem_write_byte(result, int64(n), 0)
     return result
@@ -400,7 +400,7 @@ pub fn Repeat(s: string, count: int) -> string {
     // Copy s repeatedly into the result buffer.
     for i := 0; i < count; i = i + 1 {
         for j := 0; j < n; j = j + 1 {
-            result[i * n + j] = s[j]
+            Skink_mem_write_byte(result, int64(i * n + j), s[j])
         }
     }
     // Terminator byte (raw write — index == the allocation's last byte).
