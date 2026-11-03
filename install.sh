@@ -180,6 +180,24 @@ else
     info "Detected platform: ${OS}/${ARCH}"
 fi
 
+# The prebuilt release binaries are linked against glibc (the release
+# archives are built on a Debian bookworm sysroot). On musl-libc systems —
+# Alpine, some embedded/ARM boards — they install cleanly but cannot exec.
+# Warn rather than fail: the user may still want the stdlib + sources, or
+# to install deps ahead of a from-source build.
+if [[ "$OS" == "linux" ]]; then
+    IS_MUSL=0
+    if ldd --version 2>&1 | grep -qi "musl"; then
+        IS_MUSL=1
+    elif [[ -e "/lib/ld-musl-$(uname -m).so.1" ]]; then
+        IS_MUSL=1
+    fi
+    if [[ "$IS_MUSL" -eq 1 ]]; then
+        warn "This system uses musl libc, but the prebuilt binaries are linked against glibc."
+        warn "They will install but will NOT run — a from-source build is required on musl."
+    fi
+fi
+
 # ============================================================================
 # Install system dependencies
 # ============================================================================
