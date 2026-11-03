@@ -143,6 +143,16 @@ fetch() {
     fi
 }
 
+hosttools_ldpath() {
+    # Library path covering the extracted usr/lib64 plus any versioned
+    # llvm*/lib64 dirs Fedora's lld-libs/llvm-libs RPMs install into.
+    local p="${HOSTTOOLS}/root/usr/lib64" d
+    for d in "${HOSTTOOLS}/root/usr/lib64"/llvm*/lib64; do
+        [[ -d "$d" ]] && p="${p}:${d}"
+    done
+    printf '%s' "$p"
+}
+
 extract_rpm() {
     # extract_rpm <rpm-file> <dest-root> — unpack an RPM payload without a
     # package manager. Goes through a temp file rather than a pipe: cpio
@@ -393,42 +403,73 @@ info "Sysroot ready: ${SYSROOT}"
 # ============================================================================
 
 LINKER_FLAG=""
+LLD_BIN=""
+
+# Previously extracted lld — verify it still RUNS, not just exists. A host
+# OS upgrade can remove the libLLVM it was built against (e.g. an fc44
+# lld-libs needs libLLVM.so.22.1, gone after upgrading to fc45).
 if [[ -x "${HOSTTOOLS}/root/usr/bin/ld.lld" ]]; then
-    # Previously extracted lld — reuse it.
     export PATH="${HOSTTOOLS}/root/usr/bin:${PATH}"
-    export LD_LIBRARY_PATH="${HOSTTOOLS}/root/usr/lib64:${LD_LIBRARY_PATH:-}"
-    LINKER_FLAG="-fuse-ld=lld"
-    info "Using cached lld: ${HOSTTOOLS}/root/usr/bin/ld.lld"
-elif command -v ld.lld >/dev/null 2>&1; then
-    LINKER_FLAG="-fuse-ld=lld"
-    info "Using system lld"
-elif command -v aarch64-linux-gnu-ld >/dev/null 2>&1; then
-    LINKER_FLAG="-fuse-ld=aarch64-linux-gnu-ld"
+    export LD_LIBRARY_PATH="$(hosttools_ldpath):${LD_LIBRARY_PATH:-}"
+    if ld.lld --version >/dev/null 2>&1; then
+        LLD_BIN="${HOSTTOOLS}/root/usr/bin/ld.lld"
+        info "Using cached lld: ${LLD_BIN}"
+    else
+        warn "cached lld no longer runs (host LLVM changed?) — refetching"
+        rm -rf "${HOSTTOOLS}/root" "${HOSTTOOLS}/rpms"
+        # Forget stale PATH lookups — bash's hash table would otherwise
+        # still resolve ld.lld inside the just-deleted directory.
+        hash -r
+    fi
+fi
+
+if [[ -z "$LLD_BIN" ]] && command -v ld.lld >/dev/null 2>&1 \
+        && ld.lld --version >/dev/null 2>&1; then
+    LLD_BIN="$(command -v ld.lld)"
+    info "Using system lld: ${LLD_BIN}"
+fi
+
+if [[ -z "$LLD_BIN" ]] && command -v aarch64-linux-gnu-ld >/dev/null 2>&1; then
+    LINKER_FLAG="-fuse-ld=$(command -v aarch64-linux-gnu-ld)"
     info "Using aarch64-linux-gnu-ld"
-else
+fi
+
+if [[ -z "$LLD_BIN" && -z "$LINKER_FLAG" ]]; then
     warn "no aarch64 linker on PATH — fetching lld via dnf5 download (unprivileged)"
     RPM_DIR="${HOSTTOOLS}/rpms"
     mkdir -p "$RPM_DIR" "${HOSTTOOLS}/root"
     if command -v dnf5 >/dev/null 2>&1; then
-        (cd "$RPM_DIR" && dnf5 download --destdir="$RPM_DIR" lld.x86_64 lld-libs.x86_64) \
-            || fail "dnf5 download failed — install lld or binutils-aarch64-linux-gnu manually"
+        DNF="dnf5"
     elif command -v dnf >/dev/null 2>&1; then
-        (cd "$RPM_DIR" && dnf download --destdir="$RPM_DIR" lld.x86_64 lld-libs.x86_64) \
-            || fail "dnf download failed — install lld or binutils-aarch64-linux-gnu manually"
+        DNF="dnf"
     else
         fail "no ld.lld/aarch64-linux-gnu-ld and no dnf to fetch them — install lld"
     fi
+    (cd "$RPM_DIR" && "$DNF" download --destdir="$RPM_DIR" lld.x86_64 lld-libs.x86_64) \
+        || fail "$DNF download failed — install lld or binutils-aarch64-linux-gnu manually"
+    # llvm-libs carries the libLLVM.so.N that lld-libs links against —
+    # extracting it too makes the toolchain self-contained and immune to
+    # host LLVM version changes. Optional: if the package name differs on
+    # this distro, the lld we extract just binds the system libLLVM.
+    (cd "$RPM_DIR" && "$DNF" download --destdir="$RPM_DIR" llvm-libs.x86_64) \
+        || warn "llvm-libs not fetched — extracted lld will bind the host libLLVM"
     for rpm in "$RPM_DIR"/*.rpm; do
         [[ -f "$rpm" ]] || continue
         case "$rpm" in *i686.rpm) continue ;; esac
         extract_rpm "$rpm" "${HOSTTOOLS}/root"
     done
     export PATH="${HOSTTOOLS}/root/usr/bin:${PATH}"
-    export LD_LIBRARY_PATH="${HOSTTOOLS}/root/usr/lib64:${LD_LIBRARY_PATH:-}"
-    command -v ld.lld >/dev/null 2>&1 \
+    export LD_LIBRARY_PATH="$(hosttools_ldpath):${LD_LIBRARY_PATH:-}"
+    LLD_BIN="${HOSTTOOLS}/root/usr/bin/ld.lld"
+    "$LLD_BIN" --version >/dev/null 2>&1 \
         || fail "extracted lld but ld.lld still not runnable"
-    LINKER_FLAG="-fuse-ld=lld"
-    info "Using extracted lld: $(command -v ld.lld)"
+    info "Using extracted lld: ${LLD_BIN}"
+fi
+
+if [[ -z "$LINKER_FLAG" ]]; then
+    # clang 23 (Fedora 45) rejects the bare name in -fuse-ld=lld; the
+    # absolute-path form is accepted across clang versions.
+    LINKER_FLAG="-fuse-ld=${LLD_BIN}"
 fi
 
 # ============================================================================
