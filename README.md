@@ -16,9 +16,15 @@ curl -fsSL https://raw.githubusercontent.com/markoxley/skink/main/install.sh | b
 ```
 
 This downloads the `skink` compiler, `skink-lsp` language server, `skinkfmt`
-formatter, `scales` package manager, `skinkjs` JavaScript transpiler, and the
-standard library to `~/.local/skink/`, then updates your shell config
-(`.bashrc`, `.zshrc`, etc.) to add them to `PATH` and set `SKINK_HOME`.
+formatter, `scales` package manager, `skinkjs` JavaScript transpiler,
+`skinkcov` coverage reporter, and the standard library to `~/.local/skink/`,
+then updates your shell config (`.bashrc`, `.zshrc`, etc.) to add them to
+`PATH` and set `SKINK_HOME`.
+
+The installer detects your OS and CPU architecture automatically and fetches
+the matching archive — **x86-64** and **arm64** (aarch64) are both supported
+on Linux and macOS, including 64-bit Raspberry Pi OS. (32-bit ARM is not
+supported.)
 
 Install a specific version:
 
