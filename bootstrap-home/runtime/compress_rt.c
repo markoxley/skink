@@ -33,6 +33,7 @@
  * represent sizes or checksum results.
  */
 
+#include <stdint.h>
 #include <zlib.h>
 
 /*

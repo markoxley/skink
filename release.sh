@@ -23,15 +23,19 @@
 # limitations under the License.
 
 #
-# release.sh — Build and package a Skink release archive for GitHub
+# release.sh — Build, package, and publish a Skink release to GitHub
 #
 # This script builds the skink compiler, skink-lsp, skinkfmt, scales,
 # skinkjs, and skinkcov, then packages them with the standard library and C runtime into a
-# tarball ready for upload to GitHub releases.
+# tarball. On Linux hosts it also produces the linux-arm64 (Raspberry Pi)
+# archive via build_pi_dist.sh, then publishes everything to GitHub
+# releases with the gh CLI — creating the v<version> release (and its git
+# tag on the remote) or replacing the assets of an existing one.
 #
 # Usage:
 #   ./release.sh                    # uses version from version.txt
 #   ./release.sh 0.2.0              # explicit version
+#   ./release.sh --no-publish       # build archives only, no upload
 #   ./release.sh --cross linux-x86_64  # cross-compile target
 #
 
@@ -63,6 +67,14 @@ VERSION="${VERSION#v}"
 # Output directory for archives
 OUTPUT_DIR="${SCRIPT_DIR}/dist"
 
+# Whether to publish the built archives to GitHub releases via the gh CLI.
+# On by default (the "poor man's CI" flow: ./release.sh builds, packages,
+# and publishes). Disable with --no-publish or PUBLISH=0. Skipped
+# gracefully when gh is missing or not authenticated.
+PUBLISH="${PUBLISH:-1}"
+# --dry-run prints the gh commands without executing them.
+DRY_RUN=0
+
 # ============================================================================
 # Helpers
 # ============================================================================
@@ -93,6 +105,14 @@ esac
 
 TARGET="${OS}-${ARCH}"
 
+# Whether to also build the linux-arm64 (Raspberry Pi) archive via
+# build_pi_dist.sh. Only meaningful on Linux hosts; skipped automatically
+# elsewhere.
+SKIP_ARM64=0
+# Raspberry Pi OS image for the arm64 sysroot (empty = auto-find under
+# ../skink-extras); passed through to build_pi_dist.sh --image.
+PI_IMAGE=""
+
 # Parse remaining args
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -104,9 +124,37 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_DIR="$2"
             shift 2
             ;;
+        --skip-arm64)
+            SKIP_ARM64=1
+            shift
+            ;;
+        --no-publish)
+            PUBLISH=0
+            shift
+            ;;
+        --publish)
+            PUBLISH=1
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        --pi-image)
+            PI_IMAGE="$2"
+            shift 2
+            ;;
+        --pi-image=*)
+            PI_IMAGE="${1#--pi-image=}"
+            shift
+            ;;
         --help|-h)
             cat <<EOF
 Skink release packager — builds and packages the toolset for distribution.
+
+Builds the native archive plus, on Linux hosts, the linux-arm64 (Raspberry
+Pi) cross-build via build_pi_dist.sh — both land in the output dir ready
+for 'gh release create'.
 
 Usage:
   $0 [version] [options]
@@ -117,6 +165,12 @@ Arguments:
 Options:
   --cross <target>   Cross-compile target (e.g. linux-x86_64, darwin-arm64)
   --output-dir <dir> Where to write the archive (default: ./dist)
+  --skip-arm64       Build only the native archive
+  --no-publish       Build archives but do not upload to GitHub
+  --publish          Upload to GitHub releases (default; needs gh auth)
+  --dry-run          Print the gh commands instead of running them
+  --pi-image <path>  Raspberry Pi OS image for the arm64 sysroot
+                     (default: auto-find ../skink-extras/*.img[.xz])
   --help             Show this help message
 EOF
             exit 0
@@ -321,19 +375,118 @@ sha256sum "$ARCHIVE_PATH" | awk '{print $1"  '"$(basename "$ARCHIVE_PATH")"'"}' 
 info "Checksum: ${CHECKSUM_PATH}"
 
 # ============================================================================
+# Cross-build the linux-arm64 (Raspberry Pi) archive
+# ============================================================================
+# Delegates to build_pi_dist.sh, which reuses the just-built ./skink to emit
+# target-agnostic LLVM IR and cross-links it against an aarch64 sysroot
+# assembled from a Raspberry Pi OS image + Debian bookworm -dev packages.
+# Linux hosts only — the image/sysroot tooling (fdisk, debugfs, ar) is
+# Linux-specific.
+
+ARM64_ARCHIVE_PATH=""
+if [[ "$SKIP_ARM64" -eq 0 && "$OS" == "linux" && "$TARGET_OS" == "linux" ]]; then
+    if [[ -f "${SCRIPT_DIR}/build_pi_dist.sh" ]]; then
+        info "Building linux-arm64 (Raspberry Pi) archive..."
+        ARM64_ARGS=(--version "$VERSION" --output-dir "$OUTPUT_DIR")
+        [[ -n "$PI_IMAGE" ]] && ARM64_ARGS+=(--image "$PI_IMAGE")
+        bash "${SCRIPT_DIR}/build_pi_dist.sh" "${ARM64_ARGS[@]}"
+        ARM64_ARCHIVE_PATH="${OUTPUT_DIR}/skink-${VERSION}-linux-arm64.tar.gz"
+        [[ -f "$ARM64_ARCHIVE_PATH" ]] \
+            || fail "arm64 build did not produce ${ARM64_ARCHIVE_PATH}"
+    else
+        warn "build_pi_dist.sh not found — skipping linux-arm64 archive"
+    fi
+elif [[ "$SKIP_ARM64" -eq 1 ]]; then
+    info "Skipping linux-arm64 archive (--skip-arm64)"
+fi
+
+# ============================================================================
+# Publish to GitHub releases
+# ============================================================================
+# Enabled by default (--no-publish / PUBLISH=0 to opt out). Creates the
+# v<version> release — gh auto-creates the tag on the remote's default
+# branch HEAD — or, for a rebuild of an existing version, replaces the
+# assets in place with `gh release upload --clobber`.
+
+ARTIFACTS=("$ARCHIVE_PATH" "$CHECKSUM_PATH")
+if [[ -n "$ARM64_ARCHIVE_PATH" ]]; then
+    ARTIFACTS+=("$ARM64_ARCHIVE_PATH" "${ARM64_ARCHIVE_PATH}.sha256")
+fi
+
+TAG="v${VERSION}"
+GH_REPO=""
+PUBLISH_OK=0
+
+if [[ "$PUBLISH" -eq 1 ]]; then
+    if ! command -v gh >/dev/null 2>&1; then
+        warn "gh CLI not found — skipping GitHub publish (install gh to enable)"
+    elif ! gh auth status >/dev/null 2>&1; then
+        warn "gh is not authenticated — skipping publish (run 'gh auth login')"
+    else
+        # Resolve owner/repo from this repo's own remote so the release
+        # lands on the right project regardless of the invoking directory.
+        GH_REPO="$(git -C "$SCRIPT_DIR" remote get-url origin 2>/dev/null \
+            | sed -E 's#(git@github\.com:|https://github\.com/)##; s#\.git$##')"
+        [[ -n "$GH_REPO" ]] || fail "could not determine GitHub repo from ${SCRIPT_DIR}'s origin remote"
+
+        # gh creates the tag at the remote's pushed HEAD — warn loudly if
+        # local work would not be part of the tagged code.
+        if [[ -n "$(git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null)" ]]; then
+            warn "working tree has uncommitted changes — the ${TAG} tag will NOT include them"
+        fi
+        UPSTREAM="$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)"
+        if [[ -n "$UPSTREAM" ]] && \
+           [[ -n "$(git -C "$SCRIPT_DIR" log --oneline "${UPSTREAM}..HEAD" 2>/dev/null)" ]]; then
+            warn "local commits are not pushed — the ${TAG} tag will NOT include them"
+        fi
+
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+            info "[dry-run] gh release view ${TAG} -R ${GH_REPO}"
+            info "[dry-run] gh release upload ${TAG} ${ARTIFACTS[*]} -R ${GH_REPO} --clobber"
+            info "[dry-run] gh release create ${TAG} ${ARTIFACTS[*]} -R ${GH_REPO} --title \"Skink v${VERSION}\" --generate-notes"
+            PUBLISH_OK=1
+        elif gh release view "$TAG" -R "$GH_REPO" >/dev/null 2>&1; then
+            info "Release ${TAG} exists — replacing assets..."
+            gh release upload "$TAG" "${ARTIFACTS[@]}" -R "$GH_REPO" --clobber
+            PUBLISH_OK=1
+        else
+            info "Creating release ${TAG} on ${GH_REPO}..."
+            gh release create "$TAG" "${ARTIFACTS[@]}" -R "$GH_REPO" \
+                --title "Skink v${VERSION}" --generate-notes \
+            || gh release create "$TAG" "${ARTIFACTS[@]}" -R "$GH_REPO" \
+                --title "Skink v${VERSION}" --notes "Release v${VERSION}"
+            PUBLISH_OK=1
+        fi
+    fi
+else
+    info "Skipping GitHub publish (--no-publish)"
+fi
+
+# ============================================================================
 # Done
 # ============================================================================
 
 echo ""
-info "Release v${VERSION} for ${TARGET} built successfully!"
+if [[ "$PUBLISH_OK" -eq 1 && "$DRY_RUN" -eq 0 ]]; then
+    info "Release v${VERSION} built and published."
+elif [[ "$PUBLISH_OK" -eq 1 ]]; then
+    info "Release v${VERSION} built (publish dry-run only)."
+else
+    info "Release v${VERSION} built successfully!"
+fi
 echo ""
 echo "  Archive:  ${ARCHIVE_PATH}"
 echo "  Checksum: ${CHECKSUM_PATH}"
+if [[ -n "$ARM64_ARCHIVE_PATH" ]]; then
+echo "  Archive:  ${ARM64_ARCHIVE_PATH}  (linux-arm64 / Raspberry Pi)"
+echo "  Checksum: ${ARM64_ARCHIVE_PATH}.sha256"
+fi
 echo ""
-echo "Upload to GitHub with:"
-echo "  gh release create v${VERSION} \\"
-echo "    ${ARCHIVE_PATH} \\"
-echo "    ${CHECKSUM_PATH} \\"
-echo "    --title \"Skink v${VERSION}\" \\"
-echo "    --notes \"Release v${VERSION}\""
+if [[ "$PUBLISH_OK" -eq 1 && "$DRY_RUN" -eq 0 ]]; then
+    gh release view "$TAG" -R "$GH_REPO" --json url -q .url 2>/dev/null || true
+elif [[ "$PUBLISH_OK" -ne 1 ]]; then
+    echo "Publish manually with:"
+    echo "  gh release create ${TAG} ${ARTIFACTS[*]} \\"
+    echo "    --title \"Skink v${VERSION}\" --generate-notes"
+fi
 echo ""

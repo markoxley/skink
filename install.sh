@@ -48,6 +48,11 @@ SKINK_PREFIX="${SKINK_PREFIX:-$HOME/.local/skink}"
 # Override with --version or SKINK_VERSION env var.
 SKINK_VERSION="${SKINK_VERSION:-latest}"
 
+# Architecture override. Empty = detect via uname. Accepts x86_64/amd64
+# and arm64/aarch64; useful for fetching the arm64 archive from an x86
+# machine (e.g. to side-load onto a Raspberry Pi).
+SKINK_ARCH="${SKINK_ARCH:-}"
+
 # Whether to update shell config files. Set to 0 to skip.
 UPDATE_SHELL_RC="${UPDATE_SHELL_RC:-1}"
 
@@ -85,6 +90,10 @@ while [[ $# -gt 0 ]]; do
             SKINK_VERSION="$2"
             shift 2
             ;;
+        --arch)
+            SKINK_ARCH="$2"
+            shift 2
+            ;;
         --prefix)
             SKINK_PREFIX="$2"
             shift 2
@@ -117,6 +126,8 @@ Usage:
 
 Options:
   --version <ver>    Version to install (default: latest)
+  --arch <arch>      Override detected architecture: x86_64 or arm64
+                     (aarch64, e.g. a 64-bit Raspberry Pi)
   --prefix <path>    Install prefix (default: ~/.local/skink)
   --repo <owner/repo>  GitHub repo hosting releases (default: markoxley/skink)
   --no-shell-rc      Skip updating shell config files
@@ -128,6 +139,7 @@ Environment variables:
   SKINK_REPO         Same as --repo
   SKINK_PREFIX       Same as --prefix
   SKINK_VERSION      Same as --version
+  SKINK_ARCH         Same as --arch
   UPDATE_SHELL_RC    Set to 0 to skip shell config updates
   INSTALL_DEPS       Set to 0 to skip system dependency installation
 EOF
@@ -152,13 +164,21 @@ case "$OS" in
     *)      fail "Unsupported OS: $OS (only Linux and macOS are supported)" ;;
 esac
 
+# --arch / SKINK_ARCH wins over uname so the arm64 archive can be fetched
+# from an x86 machine.
+ARCH="${SKINK_ARCH:-$ARCH}"
+
 case "$ARCH" in
     x86_64|amd64) ARCH="x86_64" ;;
     aarch64|arm64) ARCH="arm64" ;;
     *)             fail "Unsupported architecture: $ARCH (only x86_64 and arm64 are supported)" ;;
 esac
 
-info "Detected platform: ${OS}/${ARCH}"
+if [[ -n "$SKINK_ARCH" ]]; then
+    info "Platform: ${OS}/${ARCH} (architecture overridden)"
+else
+    info "Detected platform: ${OS}/${ARCH}"
+fi
 
 # ============================================================================
 # Install system dependencies
@@ -362,6 +382,7 @@ tar -xzf "$ARCHIVE_PATH" -C "$STAGING"
 #   skinkfmt           (source formatter binary)
 #   scales             (package manager binary)
 #   skinkjs            (JavaScript transpiler binary)
+#   skinkcov           (coverage reporter invoked by `skink cover`)
 #   skink_test.sh      (test runner invoked by `skink -t`)
 #   skink_bench.sh     (benchmark runner invoked by `skink -b`)
 #   std/               (standard library .skink files)
@@ -401,6 +422,12 @@ if [[ -f "${STAGING}/skinkjs" ]]; then
     cp -f "${STAGING}/skinkjs" "${SKINK_PREFIX}/bin/"
     chmod 755 "${SKINK_PREFIX}/bin/skinkjs"
     info "  Installed: bin/skinkjs"
+fi
+
+if [[ -f "${STAGING}/skinkcov" ]]; then
+    cp -f "${STAGING}/skinkcov" "${SKINK_PREFIX}/bin/"
+    chmod 755 "${SKINK_PREFIX}/bin/skinkcov"
+    info "  Installed: bin/skinkcov"
 fi
 
 for harness in skink_test.sh skink_bench.sh; do
@@ -519,6 +546,9 @@ if [[ -f "${SKINK_BIN_DIR}/scales" ]]; then
 fi
 if [[ -f "${SKINK_BIN_DIR}/skinkjs" ]]; then
     echo "  SkinkJS:    ${SKINK_BIN_DIR}/skinkjs"
+fi
+if [[ -f "${SKINK_BIN_DIR}/skinkcov" ]]; then
+    echo "  Coverage:   ${SKINK_BIN_DIR}/skinkcov"
 fi
 echo "  Stdlib:     ${SKINK_HOME_DIR}"
 echo "  Runtime:    ${SKINK_HOME_DIR}/runtime"

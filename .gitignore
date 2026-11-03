@@ -5,6 +5,7 @@ skink_stage2
 *.o
 *.o.tmp
 dist/
+.pi-build/
 .skink-rt-*/
 # Generated version module
 version.skink
