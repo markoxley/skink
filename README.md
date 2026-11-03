@@ -4,6 +4,9 @@ The self-hosted Skink compiler, written in Skink itself. This is the canonical
 compiler toolset — no Go or other bootstrapping language is required once the
 initial binary is installed.
 
+- **Website:** <https://skink-lang.uk> — docs, StdLib reference, package index
+- **Book:** [*Programming in Skink*](https://www.amazon.co.uk/Programming-Skink-Developer-Library-Book-ebook/dp/B0HMX1GWRW/ref=sr_1_1?crid=19T1IMU1A9QCS&dib=eyJ2IjoiMSJ9.KCfcTtEJvU5yXvJ988OkKQ.61Z7KR6fvfPDhMDZMtbestlhCLjtkcWK2mC_BGOxOb8&dib_tag=se&keywords=skink+programming&qid=1793730746&sprefix=skink+programming%2Caps%2C225&sr=8-1) (Amazon UK)
+
 ## Quick Install
 
 Install the latest release from GitHub:
