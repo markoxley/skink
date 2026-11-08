@@ -30,6 +30,8 @@ import "std/sync"
 import "std/strconv"
 import "std/str"
 import "std/regress_helper"
+import "std/aliasfix_hub"
+import "std/aliasfix_two"
 
 // ==========================================================================
 // Map codegen: map ops without make() in the same function (CHRIS bug 1)
@@ -2039,4 +2041,26 @@ pub fn TestGlobalTupleAssign() {
     cfTupleGlobal, cfTupleFlag = mkTuplePair()
     testing.AssertEqualInt(42, cfTupleGlobal.v, "global tuple-assign value")
     testing.AssertTrue(cfTupleFlag, "global tuple-assign second value")
+}
+
+// ==========================================================================
+// Cross-module type alias resolving to the wrong same-named struct
+// ==========================================================================
+
+// TestCrossModuleTypeAliasStruct — regression for the type-alias
+// emission bug where `type AliasBox = aliasfix_one.AliasBox` inside
+// module aliasfix_hub emitted hub's `OpenBox` signature with the WRONG
+// struct LLVM type (%struct.aliasfix_two_AliasBox): llvmType resolved
+// the alias but still named the type after the unresolved alias name,
+// and namedLLType's short-name fallback then picked up whichever
+// same-named struct had registered its bare "AliasBox" key last.
+// Before the fix this program failed to link — the call inside OpenBox
+// produced %struct.aliasfix_one_AliasBox while the declared return was
+// %struct.aliasfix_two_AliasBox. After the fix, OpenBox returns
+// aliasfix_one's struct and its field reads back correctly.
+pub fn TestCrossModuleTypeAliasStruct() {
+    b := aliasfix_hub.OpenBox()
+    testing.AssertEqualInt(11, b.tag, "aliased struct field")
+    t := aliasfix_two.MakeTwo()
+    testing.AssertEqualInt(22, t.tag, "colliding struct field")
 }

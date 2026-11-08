@@ -2084,7 +2084,12 @@ fn llvmType(cg: *CodeGen, t: checker.TType) -> string {
         if resolved.kind != checker.TK_NAMED {
             return llvmType(cg, resolved)
         }
-        return namedLLType(cg, t.name)
+        // Use the resolved name: when t is a type alias (e.g.
+        // "pkghub.Conn" aliasing "pkgone.Conn"), naming the LLVM type
+        // after the alias falls through to namedLLType's short-name
+        // fallback and picks up whichever same-named struct registered
+        // last (e.g. pkgtwo.Conn) — wrong type, invalid IR.
+        return namedLLType(cg, resolved.name)
     }
     if t.kind == checker.TK_TEMPLATE { return templateLLTypePtr(t.name) }
     // Function values are uniform i8* closure handles: a pointer to a

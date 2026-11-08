@@ -1,0 +1,27 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/aliasfix_two.skink
+// Purpose: Helper module for the cross-module type-alias regression
+//          test (compiler_fixes_test.TestCrossModuleTypeAliasStruct).
+//          Second same-named AliasBox — its layout differs from
+//          aliasfix_one's so a mis-resolved struct name is guaranteed
+//          to produce a clang type error.
+//
+// Licensed under the Apache License, Version 2.0.
+
+module aliasfix_two
+
+// AliasBox collides with aliasfix_one.AliasBox on the short name.
+pub struct AliasBox {
+    tag:   int
+    extra: int
+}
+
+// MakeTwo returns an AliasBox by value.
+pub fn MakeTwo() -> AliasBox {
+    return AliasBox{tag: 22, extra: 7}
+}

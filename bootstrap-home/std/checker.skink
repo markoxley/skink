@@ -5160,6 +5160,11 @@ fn checkFieldAccessExpr(c: *Checker, e: ast.Expr) -> TType {
         return unknownType()
     }
 
+    // Resolve type aliases before the struct lookup — a value whose
+    // declared type is an alias name (e.g. hub.AliasBox for
+    // aliasfix_one.AliasBox) must find the target struct's decl, not
+    // report "unknown struct type" on the alias.
+    leftType = resolveAlias(c, leftType)
     var structName string
     if leftType.kind == TK_NAMED {
         structName = leftType.name
