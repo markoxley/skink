@@ -48,7 +48,7 @@ extern fn Skink_fs_mktemp_fopen(prefix: string, suffix: string, pathBuf: string)
 
 // usage prints the command-line usage message for the compiler.
 fn usage() {
-    println("usage: skink [-v | -version] [-t <target>] [-b <target>] [-o <output>] [-cov] [-c <dir>] [-check | -emit-ll] <file.skink>")
+    println("usage: skink [-v | -version] [-t <target>] [-b <target>] [-o <output>] [-cov] [-c <dir>] [-target <triple>] [-check | -emit-ll] <file.skink>")
     println("       skink js <args...>      — run the skinkjs backend")
     println("       skink scales <args...>  — run the scales package manager")
     println("       skink fmt <args...>     — run the skinkfmt formatter")
@@ -132,22 +132,58 @@ fn projectEntry(dir: string) -> (string, string, string) {
     return src, str.Concat(dir, str.Concat("/", name)), ""
 }
 
-// findHarnessScript locates a helper script (skink_test.sh / skink_bench.sh)
-// that must sit beside the compiler binary. When argv[0] is a bare name
-// (the common `skink -t` case where the binary was found via PATH), the
-// PATH entries are searched for the script directly.
+// findHarnessScript locates a helper script or tool binary
+// (skink_test.sh / skink_bench.sh / scales / skinkjs / ...) that must
+// sit beside the compiler binary. When argv[0] is a bare name (the
+// common `skink -t` case where the binary was found via PATH), the
+// PATH entries are searched for the script directly. On Windows,
+// binaries carry .exe and launchers carry .cmd (the .sh file may also
+// exist for Git-bash users), and PATH is ';'-separated — all forms are
+// tried at each location.
 fn findHarnessScript(argv0: string, name: string) -> string {
-    if str.Contains(argv0, "/") {
-        binDir := path.Dir(argv0)
-        return str.Concat(binDir, str.Concat("/", name))
+    isWin := str.Equal(getenv("OS"), "Windows_NT")
+    var names []string
+    names = append(names, name)
+    if isWin {
+        names = append(names, str.Concat(name, ".exe"))
+        names = append(names, str.Concat(name, ".cmd"))
+        if str.EndsWith(name, ".sh") {
+            base := str.Substr(name, 0, str.Len(name) - 3)
+            names = append(names, str.Concat(base, ".cmd"))
+        }
+    }
+    if str.Contains(argv0, "/") || str.Contains(argv0, "\\") {
+        // path.Dir only understands '/' — split at the last separator
+        // of either kind so Windows-style paths resolve too.
+        binDir := argv0
+        idx := str.LastIndexOf(argv0, "/")
+        bidx := str.LastIndexOf(argv0, "\\")
+        if bidx > idx {
+            idx = bidx
+        }
+        if idx > 0 {
+            binDir = str.Substr(argv0, 0, idx)
+        }
+        for n := 0; n < len(names); n = n + 1 {
+            cand := str.Concat(binDir, str.Concat("/", names[n]))
+            if fs.Exists(cand) {
+                return cand
+            }
+        }
     }
     pathEnv := getenv("PATH")
     if int64(pathEnv) != 0 && str.Len(pathEnv) > 0 {
-        dirs := str.Split(pathEnv, ":")
+        sep := ":"
+        if isWin {
+            sep = ";"
+        }
+        dirs := str.Split(pathEnv, sep)
         for i := 0; i < len(dirs); i = i + 1 {
-            candidate := str.Concat(dirs[i], str.Concat("/", name))
-            if fs.Exists(candidate) {
-                return candidate
+            for n := 0; n < len(names); n = n + 1 {
+                candidate := str.Concat(dirs[i], str.Concat("/", names[n]))
+                if fs.Exists(candidate) {
+                    return candidate
+                }
             }
         }
     }
@@ -212,7 +248,13 @@ fn main() -> int {
         script := findHarnessScript(selfBin, "skink_test.sh")
         os.Setenv("SKINK", selfBin)
         os.Setenv("SKINK_HOME", skinkHome)
-        testRc := os.Exec([]string{script, argv[2]})
+        // .cmd launchers need cmd.exe to interpret them on Windows.
+        testRc := 0
+        if str.Equal(getenv("OS"), "Windows_NT") && str.EndsWith(script, ".cmd") {
+            testRc = os.Exec([]string{"cmd", "/c", script, argv[2]})
+        } else {
+            testRc = os.Exec([]string{script, argv[2]})
+        }
         if testRc == 0 {
             return 0
         }
@@ -225,7 +267,12 @@ fn main() -> int {
         script := findHarnessScript(selfBin, "skink_bench.sh")
         os.Setenv("SKINK", selfBin)
         os.Setenv("SKINK_HOME", skinkHome)
-        benchRc := os.Exec([]string{script, argv[2]})
+        benchRc := 0
+        if str.Equal(getenv("OS"), "Windows_NT") && str.EndsWith(script, ".cmd") {
+            benchRc = os.Exec([]string{"cmd", "/c", script, argv[2]})
+        } else {
+            benchRc = os.Exec([]string{script, argv[2]})
+        }
         if benchRc == 0 {
             return 0
         }
@@ -243,6 +290,7 @@ fn main() -> int {
     debugInfo := false
     covEnabled := false
     projDir := ""
+    targetTriple := ""
 
     // Parse flags that precede the input file path.
     i := 1
@@ -295,6 +343,19 @@ fn main() -> int {
             i = i + 2
             continue
         }
+        // -target selects the compilation target triple (e.g.
+        // x86_64-w64-mingw32). Short aliases x86_64-windows,
+        // aarch64-windows, x86_64-linux, aarch64-linux expand to full
+        // triples; SKINK_TARGET is the environment fallback.
+        if arg == "-target" {
+            if i + 1 >= argc {
+                println("missing -target argument")
+                return 1
+            }
+            targetTriple = argv[i + 1]
+            i = i + 2
+            continue
+        }
         println(str.Concat("unknown flag: ", arg))
         usage()
         return 1
@@ -302,11 +363,35 @@ fn main() -> int {
 
     // The last argument is always the input source file.
     fileName := argv[argc - 1]
-    if fileName == "-o" || fileName == "-check" || fileName == "-emit-ll" || fileName == "-g" || fileName == "-cov" || fileName == "-c" {
+    if fileName == "-o" || fileName == "-check" || fileName == "-emit-ll" || fileName == "-g" || fileName == "-cov" || fileName == "-c" || fileName == "-target" {
         println("missing input file")
         usage()
         return 1
     }
+
+    // Resolve the target triple: -target wins over SKINK_TARGET; short
+    // OS/arch aliases expand to canonical LLVM triples and anything
+    // else passes through verbatim for clang.
+    if str.Len(targetTriple) == 0 {
+        envTarget := getenv("SKINK_TARGET")
+        if int64(envTarget) != 0 && str.Len(envTarget) > 0 {
+            targetTriple = envTarget
+        }
+    }
+    if str.Equal(targetTriple, "x86_64-windows") {
+        targetTriple = "x86_64-w64-mingw32"
+    }
+    if str.Equal(targetTriple, "aarch64-windows") || str.Equal(targetTriple, "arm64-windows") {
+        targetTriple = "aarch64-w64-mingw32"
+    }
+    if str.Equal(targetTriple, "x86_64-linux") {
+        targetTriple = "x86_64-unknown-linux-gnu"
+    }
+    if str.Equal(targetTriple, "aarch64-linux") || str.Equal(targetTriple, "arm64-linux") {
+        targetTriple = "aarch64-unknown-linux-gnu"
+    }
+    crossCompile := str.Len(targetTriple) > 0
+    windowsTarget := str.Contains(targetTriple, "windows") || str.Contains(targetTriple, "mingw") || str.Contains(targetTriple, "msvc")
 
     // -c <dir> compiles a whole project: resolve the entry file and
     // default output name from the directory's skink.toml (or
@@ -330,6 +415,12 @@ fn main() -> int {
         if dot >= 0 {
             outName = str.Substr(outName, 0, dot)
         }
+    }
+
+    // Windows executables carry the .exe suffix; add it when a Windows
+    // target was selected and the caller did not supply it.
+    if windowsTarget && !str.EndsWith(outName, ".exe") {
+        outName = str.Concat(outName, ".exe")
     }
 
     // Resolve all transitive imports and collect top-level declarations.
@@ -361,7 +452,7 @@ fn main() -> int {
     }
 
     // Generate LLVM IR from the type-checked program.
-    cg := emitter.newCodeGen(&c, debugInfo, covEnabled)
+    cg := emitter.newCodeGen(&c, debugInfo, covEnabled, targetTriple)
     ir := emitter.emitProgram(&cg, decls)
     emitErrs := emitter.Errors(&cg)
     if len(emitErrs) > 0 {
@@ -460,16 +551,76 @@ fn main() -> int {
     }
 
     // Detect platform at runtime to choose appropriate linker flags.
-    // Windows sets the OS environment variable to "Windows_NT".
+    // Windows sets the OS environment variable to "Windows_NT". A
+    // -target triple overrides the host OS for library/linker choice.
     osEnv := getenv("OS")
-    isWindows := str.Equal(osEnv, "Windows_NT")
+    hostWindows := str.Equal(osEnv, "Windows_NT")
+    windowsLink := hostWindows
+    if crossCompile {
+        windowsLink = windowsTarget
+    }
     // Build the clang argv array — exec without a shell so no argument
     // (file name, -o path, SKINK_HOME, SKINK_CLANG_FLAGS) can inject
     // shell syntax (VULN-01).
     var clangArgs []string
-    clangArgs = append(clangArgs, "clang")
+    // SKINK_CLANG overrides the compiler driver binary — e.g. an
+    // llvm-mingw prefixed clang for aarch64-w64-mingw32, whose host
+    // clang MinGW driver injects unavailable -lgcc libraries.
+    clangCmd := getenv("SKINK_CLANG")
+    if int64(clangCmd) == 0 || str.Len(clangCmd) == 0 {
+        clangCmd = "clang"
+    }
+    clangArgs = append(clangArgs, clangCmd)
+    if crossCompile {
+        clangArgs = append(clangArgs, str.Concat("--target=", targetTriple))
+        // lld links both PE/COFF (MinGW) and ELF, so a single linker
+        // covers every cross recipe without target binutils.
+        clangArgs = append(clangArgs, "-fuse-ld=lld")
+        // SKINK_SYSROOT supplies the target sysroot (e.g. an llvm-mingw
+        // root for aarch64-w64-mingw32, or the bundled Linux sysroot
+        // for Windows→Linux builds). When unset, sysroots shipped in the
+        // distribution live under SKINK_HOME/sysroots/<triple>/.
+        sysroot := getenv("SKINK_SYSROOT")
+        if int64(sysroot) != 0 && str.Len(sysroot) > 0 {
+            clangArgs = append(clangArgs, str.Concat("--sysroot=", sysroot))
+        } else {
+            bundled := str.Concat(skinkHome, str.Concat("/sysroots/", targetTriple))
+            if fs.IsDir(bundled) {
+                sysroot = bundled
+                clangArgs = append(clangArgs, str.Concat("--sysroot=", sysroot))
+            }
+        }
+        // A Linux-target sysroot carries the GCC runtime under
+        // usr/lib/gcc rather than compiler-rt builtins + libunwind.
+        // Windows clang packages (MSYS2, LLVM for Windows) only ship
+        // compiler-rt for their own host triple, so the recipe must
+        // force the GCC runtime and point --gcc-toolchain at the
+        // sysroot for Scrt1/crtbegin/libgcc to resolve. Guarded on the
+        // sysroot actually containing usr/lib/gcc so sysroots without a
+        // GCC runtime keep clang's defaults.
+        if str.Contains(targetTriple, "linux") && str.Len(sysroot) > 0 && fs.IsDir(str.Concat(sysroot, "/usr/lib/gcc")) {
+            clangArgs = append(clangArgs, str.Concat("--gcc-toolchain=", str.Concat(sysroot, "/usr")))
+            clangArgs = append(clangArgs, "--rtlib=libgcc")
+            clangArgs = append(clangArgs, "--unwindlib=libgcc")
+        }
+        // SKINK_TARGET_LDFLAGS supplies extra link inputs for cross
+        // builds (-L dirs, --gcc-toolchain, ...); word-split on spaces
+        // like SKINK_CLANG_FLAGS.
+        tld := getenv("SKINK_TARGET_LDFLAGS")
+        if int64(tld) != 0 && str.Len(tld) > 0 {
+            tldParts := str.Split(tld, " ")
+            ti := 0
+            for ti < len(tldParts) {
+                if str.Len(tldParts[ti]) > 0 {
+                    clangArgs = append(clangArgs, tldParts[ti])
+                }
+                ti = ti + 1
+            }
+        }
+    }
     clangArgs = append(clangArgs, "-Wno-override-module")
-    if !isWindows {
+    // -march=native targets the host CPU — meaningless for cross builds.
+    if !hostWindows && !crossCompile {
         clangArgs = append(clangArgs, "-march=native")
     }
     if debugInfo {
@@ -500,7 +651,7 @@ fn main() -> int {
         clangArgs = append(clangArgs, rt[ri])
         ri = ri + 1
     }
-    if isWindows {
+    if windowsLink {
         // Windows (MinGW): winpthreads instead of pthread, Winsock2,
         // no dl (Windows uses LoadLibrary), bcrypt for OpenSSL 3.x.
         clangArgs = append(clangArgs, "-lwinpthread")

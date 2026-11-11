@@ -244,6 +244,11 @@ pub struct CodeGen {
     covEntries:         []string
     covN:               int
 
+    // targetTriple is the LLVM target triple stamped into the module
+    // header (e.g. "x86_64-w64-mingw32" when -target is used); "" emits
+    // no triple so the backend uses the host default.
+    targetTriple:       string
+
     // Panic/recover support
     hasDefer:         bool
     needPanicLanding: bool  // the need panic landing
@@ -354,9 +359,10 @@ pub struct CodeGen {
 // === Constructor ===
 
 // newCodeGen creates and initializes a CodeGen instance for IR emission.
-pub fn newCodeGen(c: *checker.Checker, dbgEnabled: bool, covEnabled: bool) -> CodeGen {
+pub fn newCodeGen(c: *checker.Checker, dbgEnabled: bool, covEnabled: bool, targetTriple: string) -> CodeGen {
     cg := CodeGen{}
     cg.covEnabled = covEnabled
+    cg.targetTriple = targetTriple
     cg.moduleHeader = str.NewBuilder(4096)
     cg.stringGlobals = str.NewBuilder(4096)
     cg.out = str.NewBuilder(4096)
@@ -15932,7 +15938,11 @@ fn emitDebugMetadata(cg: *CodeGen) {
 pub fn emitProgram(cg: *CodeGen, decls: []ast.Stmt) -> string {
     // Emit module header
     emitHeader(cg, "; ModuleID = 'skink_program'\n")
-    emitHeader(cg, "source_filename = \"skink_program\"\n\n")
+    emitHeader(cg, "source_filename = \"skink_program\"\n")
+    if str.Len(cg.targetTriple) > 0 {
+        emitHeader(cg, str.Concat("target triple = \"", str.Concat(cg.targetTriple, "\"\n")))
+    }
+    emitHeader(cg, "\n")
 
     // Reserve !0 for DICompileUnit (defined at end after all files are known)
     if cg.dbgEnabled {

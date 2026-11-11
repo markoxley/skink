@@ -96,7 +96,8 @@ $(VERSION_SKINK): $(VERSION_FILE)
 	@echo '' >> $@
 	@echo 'pub const Version = "$(VERSION)"' >> $@
 
-# Bump the build component of the version
+# Bump the build component of the version — invoked by release.sh only.
+# Ordinary builds (stage1/stage2/install) must not advance version.txt.
 bump-version: $(VERSION_FILE)
 	@awk -F. '{print $$1"."$$2"."($$3+1)}' $(VERSION_FILE) > $(VERSION_FILE).tmp && mv $(VERSION_FILE).tmp $(VERSION_FILE)
 
@@ -146,8 +147,9 @@ $(SKINK_BIN): skink.skink $(STD_FILES) $(RUNTIME_FILES) $(VERSION_SKINK)
 	@rm -f $(SKINK_BIN).ll
 	@echo "Built: $(SKINK_BIN)"
 
-# Stage 2: Compile skink.skink using the Stage 1 binary (full self-hosting verification)
-stage2: bump-version | $(SKINK_BIN)
+# Stage 2: Compile skink.skink using the Stage 1 binary (full self-hosting
+# verification). Does NOT bump version.txt — releases own the version.
+stage2: | $(SKINK_BIN)
 	@echo "Regenerating version module..."
 	@$(MAKE) $(VERSION_SKINK)
 	@echo "Building Stage 2 self-hosted skink compiler with Stage 1 binary..."

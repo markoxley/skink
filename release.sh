@@ -28,14 +28,22 @@
 # This script builds the skink compiler, skink-lsp, skinkfmt, scales,
 # skinkjs, and skinkcov, then packages them with the standard library and C runtime into a
 # tarball. On Linux hosts it also produces the linux-arm64 (Raspberry Pi)
-# archive via build_pi_dist.sh, then publishes everything to GitHub
+# archive via build_pi_dist.sh and the windows-x86_64 / windows-aarch64
+# archives via build_windows.sh, then publishes everything to GitHub
 # releases with the gh CLI — creating the v<version> release (and its git
 # tag on the remote) or replacing the assets of an existing one.
 #
+# Version numbering lives HERE: this script bumps the patch component of
+# version.txt unless an explicit version argument or --no-bump is given.
+# The Makefile never advances version.txt — a plain `make` builds at
+# whatever version the file already records.
+#
 # Usage:
-#   ./release.sh                    # uses version from version.txt
-#   ./release.sh 0.2.0              # explicit version
+#   ./release.sh                    # bump patch version, build, publish
+#   ./release.sh 0.2.0              # explicit version (writes version.txt)
+#   ./release.sh --no-bump          # build archives at current version.txt
 #   ./release.sh --no-publish       # build archives only, no upload
+#   ./release.sh --skip-windows     # skip the Windows archives
 #   ./release.sh --cross linux-x86_64  # cross-compile target
 #
 
@@ -54,8 +62,10 @@ SKINKCOV_DIR="${SCRIPT_DIR}/../tools/skinkcov"
 
 # Version
 VERSION=""
+EXPLICIT_VERSION=0
 if [[ $# -ge 1 ]] && [[ "$1" != --* ]]; then
     VERSION="$1"
+    EXPLICIT_VERSION=1
     shift
 else
     VERSION="$(cat "${SCRIPT_DIR}/version.txt" 2>/dev/null || echo "0.0.0")"
@@ -74,6 +84,11 @@ OUTPUT_DIR="${SCRIPT_DIR}/dist"
 PUBLISH="${PUBLISH:-1}"
 # --dry-run prints the gh commands without executing them.
 DRY_RUN=0
+# --no-bump keeps version.txt as-is (rebuilds of an existing release).
+NO_BUMP="${NO_BUMP:-0}"
+# --skip-windows skips the windows-x86_64/windows-aarch64 archives
+# (e.g. on hosts without the MinGW/llvm-mingw cross toolchains).
+SKIP_WINDOWS=0
 
 # ============================================================================
 # Helpers
@@ -128,6 +143,14 @@ while [[ $# -gt 0 ]]; do
             SKIP_ARM64=1
             shift
             ;;
+        --skip-windows)
+            SKIP_WINDOWS=1
+            shift
+            ;;
+        --no-bump)
+            NO_BUMP=1
+            shift
+            ;;
         --no-publish)
             PUBLISH=0
             shift
@@ -166,6 +189,8 @@ Options:
   --cross <target>   Cross-compile target (e.g. linux-x86_64, darwin-arm64)
   --output-dir <dir> Where to write the archive (default: ./dist)
   --skip-arm64       Build only the native archive
+  --skip-windows     Skip the windows-x86_64/windows-aarch64 archives
+  --no-bump          Do not bump version.txt (rebuild current version)
   --no-publish       Build archives but do not upload to GitHub
   --publish          Upload to GitHub releases (default; needs gh auth)
   --dry-run          Print the gh commands instead of running them
@@ -184,6 +209,22 @@ done
 # Split target into OS/ARCH
 TARGET_OS="${TARGET%%-*}"
 TARGET_ARCH="${TARGET##*-}"
+
+# ============================================================================
+# Version bump — release.sh is the single place version.txt advances.
+# ============================================================================
+# An explicit version argument is written back to version.txt so the built
+# binaries report exactly the released version; otherwise the patch
+# component is bumped (opt out with --no-bump). version.skink is
+# regenerated from version.txt by `make build` below, so the compiler's
+# -v output matches this release.
+if [[ "$EXPLICIT_VERSION" -eq 1 ]]; then
+    echo "$VERSION" > "${SCRIPT_DIR}/version.txt"
+elif [[ "$NO_BUMP" -eq 0 ]]; then
+    VERSION="$(awk -F. '{print $1"."$2"."($3+1)}' "${SCRIPT_DIR}/version.txt")"
+    echo "$VERSION" > "${SCRIPT_DIR}/version.txt"
+    info "Bumped version.txt to ${VERSION} — commit this before the tag"
+fi
 
 info "Building Skink release v${VERSION} for ${TARGET}"
 
@@ -401,6 +442,36 @@ elif [[ "$SKIP_ARM64" -eq 1 ]]; then
 fi
 
 # ============================================================================
+# Cross-build the Windows archives (x86_64 + aarch64)
+# ============================================================================
+# Delegates to build_windows.sh, which cross-compiles the whole toolset
+# (skink, scales, skink-lsp, skinkfmt) with MinGW/llvm-mingw, bundles the
+# required DLLs, the .cmd/.sh test and bench launchers, the stdlib, and
+# the Linux sysroot for Windows→Linux cross builds — emitting
+# dist/windows/skink-<ver>-windows-<arch>.zip.
+
+WIN_X64_ZIP=""
+WIN_A64_ZIP=""
+if [[ "$SKIP_WINDOWS" -eq 0 && "$OS" == "linux" ]]; then
+    if [[ -f "${SCRIPT_DIR}/build_windows.sh" ]]; then
+        for warch in x86_64 aarch64; do
+            info "Building Windows ${warch} archive..."
+            SKINK="$COMPILER_BIN" bash "${SCRIPT_DIR}/build_windows.sh" "$VERSION" "$warch"
+        done
+        WIN_X64_ZIP="${SCRIPT_DIR}/dist/windows/skink-${VERSION}-windows-x86_64.zip"
+        WIN_A64_ZIP="${SCRIPT_DIR}/dist/windows/skink-${VERSION}-windows-aarch64.zip"
+        [[ -f "$WIN_X64_ZIP" ]] \
+            || fail "Windows x86_64 build did not produce ${WIN_X64_ZIP}"
+        [[ -f "$WIN_A64_ZIP" ]] \
+            || fail "Windows aarch64 build did not produce ${WIN_A64_ZIP}"
+    else
+        warn "build_windows.sh not found — skipping Windows archives"
+    fi
+elif [[ "$SKIP_WINDOWS" -eq 1 ]]; then
+    info "Skipping Windows archives (--skip-windows)"
+fi
+
+# ============================================================================
 # Publish to GitHub releases
 # ============================================================================
 # Enabled by default (--no-publish / PUBLISH=0 to opt out). Creates the
@@ -411,6 +482,12 @@ fi
 ARTIFACTS=("$ARCHIVE_PATH" "$CHECKSUM_PATH")
 if [[ -n "$ARM64_ARCHIVE_PATH" ]]; then
     ARTIFACTS+=("$ARM64_ARCHIVE_PATH" "${ARM64_ARCHIVE_PATH}.sha256")
+fi
+if [[ -n "$WIN_X64_ZIP" ]]; then
+    ARTIFACTS+=("$WIN_X64_ZIP" "${WIN_X64_ZIP}.sha256")
+fi
+if [[ -n "$WIN_A64_ZIP" ]]; then
+    ARTIFACTS+=("$WIN_A64_ZIP" "${WIN_A64_ZIP}.sha256")
 fi
 
 TAG="v${VERSION}"
@@ -480,6 +557,14 @@ echo "  Checksum: ${CHECKSUM_PATH}"
 if [[ -n "$ARM64_ARCHIVE_PATH" ]]; then
 echo "  Archive:  ${ARM64_ARCHIVE_PATH}  (linux-arm64 / Raspberry Pi)"
 echo "  Checksum: ${ARM64_ARCHIVE_PATH}.sha256"
+fi
+if [[ -n "$WIN_X64_ZIP" ]]; then
+echo "  Archive:  ${WIN_X64_ZIP}  (windows-x86_64)"
+echo "  Checksum: ${WIN_X64_ZIP}.sha256"
+fi
+if [[ -n "$WIN_A64_ZIP" ]]; then
+echo "  Archive:  ${WIN_A64_ZIP}  (windows-aarch64)"
+echo "  Checksum: ${WIN_A64_ZIP}.sha256"
 fi
 echo ""
 if [[ "$PUBLISH_OK" -eq 1 && "$DRY_RUN" -eq 0 ]]; then
