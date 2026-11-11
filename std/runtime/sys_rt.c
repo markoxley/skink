@@ -36,6 +36,8 @@
 #ifdef _WIN32
 
 // === Windows includes ===
+#include <errno.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 // windows.h comes in via skink_compat.h; GetModuleFileNameA, GetSystemInfo,
@@ -211,3 +213,47 @@ long Skink_rt_page_size(void) {
   return n > 0 ? n : 4096;
 #endif
 }
+
+#ifdef _WIN32
+// setenv/unsetenv are POSIX-only and absent from the MinGW CRT; os.Setenv
+// and os.Unsetenv emit direct externs to them, so provide equivalents via
+// the Win32 environment APIs. SetEnvironmentVariableA(NULL value)
+// deletes the variable.
+int setenv(const char *name, const char *value, int overwrite) {
+  if (!overwrite && GetEnvironmentVariableA(name, NULL, 0) != 0) {
+    return 0;
+  }
+  return SetEnvironmentVariableA(name, value) ? 0 : -1;
+}
+
+int unsetenv(const char *name) {
+  return SetEnvironmentVariableA(name, NULL) ? 0 : -1;
+}
+
+// ioctl is POSIX-only; Skink sources extern it for FIONREAD (0x541B) —
+// e.g. skink-lsp polls stdin availability in its read loop. Try
+// ioctlsocket first (fd may be a socket), then PeekNamedPipe for
+// pipe/console handles; report 0 bytes for regular files and other
+// handles. Any other request is a Linux-only ioctl (i2c/spi) and fails
+// with ENOTSUP, which callers already handle as "unsupported".
+int ioctl(int fd, long request, void *argp) {
+  if (request == 0x541B /* FIONREAD */ && argp) {
+    u_long avail = 0;
+    if (ioctlsocket((SOCKET)(intptr_t)fd, FIONREAD, &avail) == 0) {
+      *(unsigned int *)argp = (unsigned int)avail;
+      return 0;
+    }
+    HANDLE h = (HANDLE)(intptr_t)_get_osfhandle(fd);
+    DWORD navail = 0;
+    if (h != INVALID_HANDLE_VALUE &&
+        PeekNamedPipe(h, NULL, 0, NULL, &navail, NULL)) {
+      *(unsigned int *)argp = (unsigned int)navail;
+      return 0;
+    }
+    *(unsigned int *)argp = 0;
+    return 0;
+  }
+  errno = ENOTSUP;
+  return -1;
+}
+#endif // _WIN32
