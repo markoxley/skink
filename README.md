@@ -50,6 +50,42 @@ After installing, restart your shell (or `source ~/.bashrc`) and verify:
 skink -v
 ```
 
+### Windows
+
+Windows is distributed as ZIP archives rather than a curl installer. Download
+`skink-<version>-windows-x86_64.zip` (or `skink-<version>-windows-aarch64.zip`
+on ARM64) from the [releases page](https://github.com/markoxley/skink/releases),
+extract it, and run the bundled PowerShell installer:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+Or install to a custom directory:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1 -InstallDir "C:\Skink"
+```
+
+The installer copies `skink.exe`, `skink-lsp.exe`, `skinkfmt.exe`, `scales.exe`,
+`skinkjs.exe`, and the required DLLs to `%LOCALAPPDATA%\Skink\bin`, installs the
+standard library and C runtime to `%LOCALAPPDATA%\Skink\std`, sets the
+`SKINK_HOME` user environment variable, and adds the `bin` directory to your
+user `PATH`. Open a new terminal afterward and verify with `skink -v`.
+
+**Prerequisite:** LLVM/Clang must be installed and on `PATH` — Skink shells out
+to `clang` to link every program it builds:
+
+```powershell
+winget install LLVM.LLVM
+```
+
+(or download an installer from <https://releases.llvm.org/>)
+
+The `skink -t` and `skink -b` test/bench modes go through the bundled
+`skink_test.cmd` / `skink_bench.cmd` wrappers, which locate Git Bash — install
+[Git for Windows](https://git-scm.com/) if you want to run test suites.
+
 ## Building from Source
 
 If you already have a `skink` binary (from the installer or a previous build):
