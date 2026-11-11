@@ -389,8 +389,6 @@ int Skink_net_resolve_and_connect(const char *host, int port, int timeoutMs) {
   return fd;
 }
 
-#endif // _WIN32
-
 // POSIX counterparts of the Windows SOCKET-width wrappers — socket fds are
 // already int here, so these are pass-throughs (VULNERABILITIES.md).
 int Skink_socket_wrap(int domain, int ty, int protocol) {
@@ -400,3 +398,5 @@ int Skink_socket_wrap(int domain, int ty, int protocol) {
 int Skink_accept_wrap(int fd, char *addr, int *len) {
   return accept(fd, (struct sockaddr *)addr, (socklen_t *)len);
 }
+
+#endif // _WIN32

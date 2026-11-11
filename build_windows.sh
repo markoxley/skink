@@ -455,11 +455,15 @@ if (Test-Path "$ScriptDir\std") {
     Write-Host "  Installed: std\ ($moduleCount modules)"
 }
 
-# Set environment variables for the current user
+# Set environment variables for the current user. SKINK_HOME is written
+# with forward slashes: the compiler's import resolver splits paths on
+# "/" only, so a backslash-spelled root breaks std/ resolution on older
+# builds (current builds normalize either spelling).
+$StdDirFW = $StdDir -replace '\\', '/'
 $envKey = [Environment]::GetEnvironmentVariable("SKINK_HOME", "User")
-if ($envKey -ne $StdDir) {
-    [Environment]::SetEnvironmentVariable("SKINK_HOME", $StdDir, "User")
-    Write-Host "  Set SKINK_HOME = $StdDir"
+if ($envKey -ne $StdDirFW) {
+    [Environment]::SetEnvironmentVariable("SKINK_HOME", $StdDirFW, "User")
+    Write-Host "  Set SKINK_HOME = $StdDirFW"
 }
 
 # Add bin to PATH (user-level)

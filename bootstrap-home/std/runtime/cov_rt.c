@@ -22,8 +22,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <fcntl.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 /* Emitted by the compiler into the instrumented program. Declared weak
  * so cov_rt.c can also be linked into uninstrumented binaries (the
@@ -50,11 +54,19 @@ static const char *skink_cov_outpath(char *buf, size_t buflen) {
     const char *env = getenv("SKINK_COV_OUT");
     if (env && env[0]) return env;
     char exe[1024];
+#ifdef _WIN32
+    DWORD n = GetModuleFileNameA(NULL, exe, sizeof(exe) - 1);
+#else
     ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+#endif
     const char *base = "program";
     if (n > 0) {
         exe[n] = 0;
         const char *slash = strrchr(exe, '/');
+#ifdef _WIN32
+        const char *bslash = strrchr(exe, '\\');
+        if (bslash && (!slash || bslash > slash)) slash = bslash;
+#endif
         if (slash && slash[1]) base = slash + 1;
     }
     snprintf(buf, buflen, "%s.skinkcov", base);

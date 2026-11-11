@@ -112,6 +112,13 @@ fn normalizePath(p: string) -> string {
     if str.Len(p) == 0 {
         return p
     }
+    // Canonicalize Windows-style "\" separators to "/" so dirName,
+    // baseName, and the import-search joins below work on native Windows
+    // paths (SKINK_HOME, source paths on the command line). Windows APIs
+    // and clang accept "/" uniformly, so the forward-slash spelling is
+    // usable for all downstream file opens (comp_error.md — Windows
+    // SKINK_HOME "cannot resolve std/..." regression).
+    p = str.Replace(p, "\\", "/")
     absolute := str.StartsWith(p, "/")
     parts := str.Split(p, "/")
     var out []string
@@ -1031,7 +1038,10 @@ pub fn Resolve(entry: string, searchRoot: string) -> ([]ast.Stmt, []string) {
     r.states = make(map[string]int)
     r.fileModules = make(map[string]string)
     r.errors = []string{}
-    r.searchRoot = searchRoot
+    // Normalize the search root's separators too: SKINK_HOME arrives
+    // with "\" separators on Windows, and dirName(r.searchRoot) — the
+    // std/ overlay lookup — only recognizes "/".
+    r.searchRoot = str.Replace(searchRoot, "\\", "/")
     if str.Len(entry) == 0 {
         addError(&r, str.Concat(entry, " 0:0: empty entry path"))
         return []ast.Stmt{}, r.errors

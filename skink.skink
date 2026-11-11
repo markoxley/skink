@@ -237,6 +237,10 @@ fn main() -> int {
     if int64(skinkHome) == 0 || str.Len(skinkHome) == 0 {
         skinkHome = "/usr/local/lib/skink"
     }
+    // SKINK_HOME arrives with "\" separators on Windows; normalize to
+    // "/" so downstream joins (runtime/*.c, sysroots/) and the resolver's
+    // POSIX path helpers work uniformly.
+    skinkHome = str.Replace(skinkHome, "\\", "/")
 
     // Delegate to the test harness script when -t is given. The script
     // is exec'd directly with an argv array — the old code interpolated
@@ -407,6 +411,9 @@ fn main() -> int {
             outName = oname
         }
     }
+    // Source paths on the Windows command line carry "\" separators;
+    // normalize to "/" for path.Base/path.Dir and the resolver.
+    fileName = str.Replace(fileName, "\\", "/")
 
     // Derive the output binary name from the input file name if -o was not given.
     if outName == "" {

@@ -81,3 +81,43 @@ pub fn TestValidRelativeImport() {
     rsCheckValid("subdir", "helper")
     rsCheckValid("leading-dot", "./helper")
 }
+
+// TestBackslashStdlibPaths guards the Windows stdlib-resolution
+// regression: on Windows, SKINK_HOME and source paths arrive with "\"
+// separators (e.g. C:\Users\me\Skink\std) but the resolver's path helpers
+// only recognize "/". Without separator normalization dirName() of the
+// search root degenerates to ".", the std/ overlay miss is followed by a
+// final fallback that builds "<root>/std/std/<mod>.skink", and every
+// std/ import fails with "cannot resolve import". On Linux a backslash-
+// spelled path can only resolve if normalization rewrites it to "/",
+// because no literal backslash-named directory is created.
+pub fn TestBackslashStdlibPaths() {
+    root := "/tmp/skink_resolver_bstest"
+    fs.Remove(root)
+    fs.Mkdir(root)
+    fs.Mkdir(str.Concat(root, "/proj"))
+    fs.Mkdir(str.Concat(root, "/home"))
+    fs.Mkdir(str.Concat(root, "/home/std"))
+    fs.WriteAll(str.Concat(root, "/home/std/winmod.skink"), "module winmod\npub fn Hi() -> int {\n    return 1\n}\n")
+    fs.WriteAll(str.Concat(root, "/proj/main.skink"), "module main\nimport \"std/winmod\"\nfn main() -> int {\n    return 0\n}\n")
+
+    // A backslash-spelled search root must still resolve std/ imports.
+    _, errs := resolver.Resolve(str.Concat(root, "/proj/main.skink"), str.Concat(root, "\\home\\std"))
+    if len(errs) != 0 {
+        testing.Errorf(str.Concat("backslash searchRoot: ", errs[0]))
+    }
+
+    // A backslash-spelled entry path must still load, and its imports
+    // must resolve through the (also backslash-spelled) search root.
+    _, errs2 := resolver.Resolve(str.Concat(root, "\\proj\\main.skink"), str.Concat(root, "\\home\\std"))
+    if len(errs2) != 0 {
+        testing.Errorf(str.Concat("backslash entry path: ", errs2[0]))
+    }
+
+    fs.Remove(str.Concat(root, "/home/std/winmod.skink"))
+    fs.Remove(str.Concat(root, "/proj/main.skink"))
+    fs.Remove(str.Concat(root, "/home/std"))
+    fs.Remove(str.Concat(root, "/home"))
+    fs.Remove(str.Concat(root, "/proj"))
+    fs.Remove(root)
+}

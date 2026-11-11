@@ -23,6 +23,7 @@
 
 #include "skink_compat.h"
 #include <pthread.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -35,7 +36,6 @@ extern void Skink_rc_release(void *ptr);
 // Frees the calling thread's panic-handler pool before a detached
 // thread exits (panic_rt.c) — prevents a ~12.8KB per-thread leak.
 extern void Skink_panic_thread_cleanup(void);
-#include <stdint.h>
 #ifdef _WIN32
 // close() for file descriptors provided by io.h via skink_compat.h
 #else
