@@ -42,3 +42,18 @@ pub fn TestExecWithOutputOk() {
     testing.AssertEqualInt(0, status, "echo status")
     testing.AssertTrue(str.Len(out) > 0, "echo output non-empty")
 }
+
+// TestExecSpacedArgument verifies an argument containing a space is
+// delivered to the child as ONE argv element (regression: the Windows
+// _spawnvp path joined argv without quoting, so paths under directories
+// with spaces — e.g. "C:\Users\Mark Oxley\..." SKINK_HOME roots — were
+// split into bogus arguments and clang reported 'no such file'). The
+// child counts its positional parameters: sh -c 'exit $#' gets $0 plus
+// two real args, so a verbatim argv yields exit status 2 while a
+// space-split argv yields 3. Uses sh, which the test suite always has
+// (skink_test.sh itself is POSIX shell; on Windows it runs under
+// git-bash, which provides sh on PATH).
+pub fn TestExecSpacedArgument() {
+    status := os.Exec([]string{"sh", "-c", "exit $#", "sh", "a b", "c"})
+    testing.AssertEqualInt(2, status, "spaced argument must arrive as one argv element")
+}

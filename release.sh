@@ -211,6 +211,43 @@ TARGET_OS="${TARGET%%-*}"
 TARGET_ARCH="${TARGET##*-}"
 
 # ============================================================================
+# Git hygiene gate — must run BEFORE the version.txt bump (which dirties
+# the tree intentionally). gh creates the release tag on the remote's
+# pushed HEAD, so a release built from uncommitted or unpushed work
+# ships code the tag does not contain.
+#   1. Uncommitted changes           -> abort with the file list.
+#   2. Clean tree, unpushed commits  -> push to the tracked upstream
+#      first, then continue.
+# ============================================================================
+if command -v git >/dev/null 2>&1 && git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [[ -n "$(git -C "$SCRIPT_DIR" status --porcelain 2>/dev/null)" ]]; then
+        error "working tree has uncommitted changes — refusing to release"
+        git -C "$SCRIPT_DIR" status --short >&2 || true
+        fail "commit or stash these changes first"
+    fi
+
+    UPSTREAM_REF="$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)"
+    if [[ -n "$UPSTREAM_REF" ]]; then
+        UNPUSHED="$(git -C "$SCRIPT_DIR" log --oneline "${UPSTREAM_REF}..HEAD" 2>/dev/null || true)"
+        if [[ -n "$UNPUSHED" ]]; then
+            info "Local commits not on ${UPSTREAM_REF}:"
+            echo "$UNPUSHED" | sed 's/^/  /'
+            if [[ "$DRY_RUN" -eq 1 ]]; then
+                info "[dry-run] git push"
+            else
+                info "Pushing to ${UPSTREAM_REF}..."
+                git -C "$SCRIPT_DIR" push || fail "git push failed — resolve and re-run release.sh"
+            fi
+        fi
+    else
+        warn "no upstream tracking branch — 'gh release create' will tag the remote's HEAD,"
+        warn "which may not include this release's code (push and set upstream to be safe)"
+    fi
+else
+    warn "not inside a git work tree (or git unavailable) — skipping commit/push checks"
+fi
+
+# ============================================================================
 # Version bump — release.sh is the single place version.txt advances.
 # ============================================================================
 # An explicit version argument is written back to version.txt so the built
@@ -223,7 +260,29 @@ if [[ "$EXPLICIT_VERSION" -eq 1 ]]; then
 elif [[ "$NO_BUMP" -eq 0 ]]; then
     VERSION="$(awk -F. '{print $1"."$2"."($3+1)}' "${SCRIPT_DIR}/version.txt")"
     echo "$VERSION" > "${SCRIPT_DIR}/version.txt"
-    info "Bumped version.txt to ${VERSION} — commit this before the tag"
+    info "Bumped version.txt to ${VERSION}"
+fi
+
+# Commit and push the version bump so the tag gh creates on the remote's
+# pushed HEAD actually contains the released version. Only version.txt is
+# committed — the hygiene gate above already proved the tree was clean
+# before the bump, so staging the file alone is safe. --no-bump runs with
+# an untouched version.txt are skipped.
+if command -v git >/dev/null 2>&1 && git -C "$SCRIPT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    && [[ -n "$(git -C "$SCRIPT_DIR" status --porcelain -- version.txt 2>/dev/null)" ]]; then
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        info "[dry-run] git commit + push version.txt"
+    else
+        git -C "$SCRIPT_DIR" add version.txt \
+            && git -C "$SCRIPT_DIR" commit -q -m "Bump version to ${VERSION}" \
+            || fail "failed to commit version.txt bump"
+        if git -C "$SCRIPT_DIR" rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then
+            info "Pushing version bump to $(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref '@{upstream}')..."
+            git -C "$SCRIPT_DIR" push || fail "git push failed — resolve and re-run release.sh"
+        else
+            warn "version bump committed locally but no upstream to push to — tag will not include it"
+        fi
+    fi
 fi
 
 info "Building Skink release v${VERSION} for ${TARGET}"

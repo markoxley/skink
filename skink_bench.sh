@@ -106,11 +106,15 @@ if [ -f "$TARGET" ]; then
             ;;
     esac
 elif [ -d "$TARGET" ]; then
-    files=$(find "$TARGET" -maxdepth 1 -name '*_bench.skink' | sort)
+    # Linewise read keeps paths containing spaces intact; heredoc form
+    # keeps the loop in the current shell so `passed` survives.
     passed=0
-    for f in $files; do
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
         run_one "$f" || passed=1
-    done
+    done <<EOF
+$(find "$TARGET" -maxdepth 1 -name '*_bench.skink' | sort)
+EOF
     exit $passed
 else
     case "$TARGET" in
@@ -120,11 +124,13 @@ else
                 base="."
             fi
             if [ -d "$base" ]; then
-                files=$(find "$base" -name '*_bench.skink' | sort)
                 passed=0
-                for f in $files; do
+                while IFS= read -r f; do
+                    [ -n "$f" ] || continue
                     run_one "$f" || passed=1
-                done
+                done <<EOF
+$(find "$base" -name '*_bench.skink' | sort)
+EOF
                 exit $passed
             fi
             ;;

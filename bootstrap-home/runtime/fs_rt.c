@@ -252,21 +252,58 @@ static char *skink_rc_copy_out(char *buf, size_t len) {
 #include <process.h>
 #include <fcntl.h>
 
+// Defined below; Skink_os_exec needs it to quote the CreateProcess
+// command line.
+static void skink_append_cmdline_arg(char *buf, size_t *pos,
+                                     const char *arg);
+
 // Skink_os_exec — execute a program with an argument array, without
 // invoking a shell. argv is a NULL-terminated array of C strings.
 // argv[0] is the program name (conventionally the path).
 // Returns the child exit status on success, -1 on error.
+//
+// _spawnvp joins argv with spaces WITHOUT quoting, so an argument
+// containing a space (e.g. SKINK_HOME under "C:\Users\Mark Oxley")
+// reaches the child split into multiple arguments. Build a properly
+// quoted command line and call CreateProcessA directly, matching
+// Skink_os_exec_with_output.
 int Skink_os_exec(const char **argv, int argc) {
-  (void)argc;
   if (!argv || !argv[0]) {
     return -1;
   }
-  // _P_WAIT blocks until the child exits and returns its exit code.
-  int rc = _spawnvp(_P_WAIT, argv[0], (const char *const *)argv);
-  if (rc == -1) {
+  size_t needed = 0;
+  for (int i = 0; i < argc && argv[i]; i++)
+    skink_append_cmdline_arg(NULL, &needed, argv[i]);
+  char *cmdline = (char *)malloc(needed + 1);
+  if (!cmdline) {
     return -1;
   }
-  return rc;
+  size_t pos = 0;
+  for (int i = 0; i < argc && argv[i]; i++)
+    skink_append_cmdline_arg(cmdline, &pos, argv[i]);
+  cmdline[pos] = '\0';
+
+  STARTUPINFO si;
+  PROCESS_INFORMATION pi;
+  memset(&si, 0, sizeof(si));
+  si.cb = sizeof(si);
+  memset(&pi, 0, sizeof(pi));
+
+  // lpApplicationName NULL + argv[0] in cmdline resolves through the
+  // standard search order, the same PATH lookup _spawnvp performed.
+  // bInheritHandles=TRUE so the child shares our stdin/stdout/stderr.
+  BOOL ok = CreateProcessA(NULL, cmdline, NULL, NULL, TRUE, 0, NULL, NULL,
+                           &si, &pi);
+  free(cmdline);
+  if (!ok) {
+    return -1;
+  }
+  WaitForSingleObject(pi.hProcess, INFINITE);
+  DWORD code = 1;
+  GetExitCodeProcess(pi.hProcess, &code);
+  CloseHandle(pi.hThread);
+  CloseHandle(pi.hProcess);
+  return (int)code;
 }
 
 // skink_append_cmdline_arg appends one argument to a CreateProcess

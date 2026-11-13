@@ -118,11 +118,16 @@ if [ -f "$TARGET" ]; then
             ;;
     esac
 elif [ -d "$TARGET" ]; then
-    files=$(find "$TARGET" -maxdepth 1 -name '*_test.skink' | sort)
+    # Read find output linewise via a heredoc so the loop runs in the
+    # current shell (passed survives) and paths containing spaces are
+    # not word-split.
     passed=0
-    for f in $files; do
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
         run_one "$f" || passed=1
-    done
+    done <<EOF
+$(find "$TARGET" -maxdepth 1 -name '*_test.skink' | sort)
+EOF
     exit $passed
 else
     case "$TARGET" in
@@ -132,11 +137,13 @@ else
                 base="."
             fi
             if [ -d "$base" ]; then
-                files=$(find "$base" -name '*_test.skink' | sort)
                 passed=0
-                for f in $files; do
+                while IFS= read -r f; do
+                    [ -n "$f" ] || continue
                     run_one "$f" || passed=1
-                done
+                done <<EOF
+$(find "$base" -name '*_test.skink' | sort)
+EOF
                 exit $passed
             fi
             ;;
