@@ -374,11 +374,13 @@ void *Skink_tls_client_connect_ex(int fd, const char *hostname, int port,
     SSL_set_verify(ssl, SSL_VERIFY_NONE, NULL);
   }
   if (hostname && hostname[0]) {
-    // Actually send the SNI extension (#67) — the old code only set
-    // SSL_set1_host, which is verification metadata, not wire SNI.
+    // Actually send the SNI extension (#67) — hostname verification is
+    // verification metadata, not wire SNI, so both must be set.
     SSL_set_tlsext_host_name(ssl, hostname);
     if (verify != 0) {
-      SSL_set1_host(ssl, hostname);
+      // SSL_set1_host is deprecated in OpenSSL 4.0; its documented
+      // equivalent (what it wrapped since 1.0.2) is a VERIFY_PARAM call.
+      X509_VERIFY_PARAM_set1_host(SSL_get0_param(ssl), hostname, 0);
     }
   }
   // Advertise http/1.1 via ALPN (wire format: length-prefixed list).
@@ -479,9 +481,27 @@ char *Skink_tls_peer_cert_cn(void *ssl) {
     return skink_rc_strdup("");
   char buf[256];
   buf[0] = 0;
-  X509_NAME *name = X509_get_subject_name(cert);
+  // X509_get_subject_name returns const in OpenSSL 4.0; the const
+  // spelling also accepts the non-const return of OpenSSL 1.x/3.x.
+  const X509_NAME *name = X509_get_subject_name(cert);
   if (name) {
-    X509_NAME_get_text_by_NID(name, NID_commonName, buf, sizeof(buf));
+    // X509_NAME_get_text_by_NID is deprecated in OpenSSL 4.0 — extract
+    // the CN via the stable NAME_ENTRY/ASN1_STRING path instead.
+    int idx = X509_NAME_get_index_by_NID(name, NID_commonName, -1);
+    if (idx >= 0) {
+      const X509_NAME_ENTRY *entry = X509_NAME_get_entry(name, idx);
+      const ASN1_STRING *cnData = entry ? X509_NAME_ENTRY_get_data(entry) : NULL;
+      if (cnData) {
+        unsigned char *utf8 = NULL;
+        int n = ASN1_STRING_to_UTF8(&utf8, cnData);
+        if (utf8 && n >= 0) {
+          size_t ncpy = (size_t)n < sizeof(buf) - 1 ? (size_t)n : sizeof(buf) - 1;
+          memcpy(buf, utf8, ncpy);
+          buf[ncpy] = 0;
+        }
+        OPENSSL_free(utf8);
+      }
+    }
   }
   X509_free(cert);
   return skink_rc_strdup(buf);

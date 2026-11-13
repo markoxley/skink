@@ -225,6 +225,14 @@ pub fn SetPtr(structPtr: int64, f: Field, val: int64) {
     reflect_set_int64(structPtr, f.offset, val)
 }
 
+// FieldAddr returns the raw address (structPtr + f.offset) of the field
+// described by f on the struct at structPtr. Use it for field types
+// that have no typed getter/setter — e.g. a std/time DateTime copied
+// in or out with libc.memcpy.
+pub fn FieldAddr(structPtr: int64, f: Field) -> int64 {
+    return structPtr + f.offset
+}
+
 // Hash computes a hash of the given value string and its type name,
 // used for hash map keying of erased (i8*) values.
 pub fn Hash(val: string, typeName: string) -> int {

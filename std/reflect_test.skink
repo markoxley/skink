@@ -27,6 +27,36 @@ import "std/reflect"
 import "std/str"
 import "testing"
 
+extern fn Skink_mem_byte(ptr: string, idx: int64) -> int
+
+struct FieldAddrStruct {
+    a: int64
+    b: int64
+}
+
+// TestFieldAddr verifies FieldAddr returns structPtr + offset — the
+// address of the field's storage — so callers can read/write field
+// types that have no typed getter/setter (e.g. a std/time DateTime
+// copied with libc.memcpy). Guards the API the ORM relies on.
+pub fn TestFieldAddr() {
+    s := FieldAddrStruct{a: int64(0), b: int64(0x0102030405060708)}
+    t := reflect.TypeOf<FieldAddrStruct>(s)
+    fb := reflect.FieldByName(t, "b")
+    addr := reflect.FieldAddr(int64(&s), fb)
+    // The 8 bytes at addr must be the digits 1..8 in some order
+    // (endian-agnostic): a wrong address would read zero/other bytes.
+    sum := 0
+    for i := int64(0); i < int64(8); i = i + 1 {
+        v := Skink_mem_byte(string(addr), i)
+        testing.AssertTrue(v >= 1 && v <= 8, "FieldAddr bytes are the field's value bytes")
+        sum = sum + v
+    }
+    testing.AssertEqualInt(36, sum, "all eight value bytes of b present at FieldAddr")
+    // The first field's address must equal the struct's base address.
+    fa := reflect.FieldByName(t, "a")
+    testing.AssertTrue(reflect.FieldAddr(int64(&s), fa) == int64(&s), "field 0 at struct base")
+}
+
 // TestTypeOfSize verifies TypeOf returns correct size via sizeof(T).
 pub fn TestTypeOfSize() {
     t := reflect.TypeOf<int>(42)
