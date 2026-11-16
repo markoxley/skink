@@ -28,6 +28,7 @@ import "std/str"
 import "std/errors"
 import "std/strconv"
 import "std/reflect"
+import "std/base64"
 
 // Value is a dynamic JSON value that can represent any JSON type.
 // Use the kind field (0=null, 1=bool, 2=number, 3=string, 4=array, 5=object)
@@ -810,12 +811,41 @@ pub fn UnmarshalEntries(s: string) -> ([]Entry, errors.Error) {
 
 // --- Struct marshal/unmarshal via reflect + [json] field tags ---
 
-// jsonScalarType reports whether typeName is a field type MarshalStruct
-// supports: int, int64, string, float, or bool.
+// jsonIntSize maps integer type names to their byte size, or 0 when
+// typeName is not an integer type. Covers signed/unsigned widths plus
+// the byte/rune aliases used in reflected type_names.
+fn jsonIntSize(typeName: string) -> int {
+    if str.Equal(typeName, "int") || str.Equal(typeName, "uint") || str.Equal(typeName, "int32") || str.Equal(typeName, "uint32") {
+        return 4
+    }
+    if str.Equal(typeName, "int8") || str.Equal(typeName, "uint8") || str.Equal(typeName, "char") {
+        return 1
+    }
+    if str.Equal(typeName, "int16") || str.Equal(typeName, "uint16") {
+        return 2
+    }
+    if str.Equal(typeName, "int64") || str.Equal(typeName, "uint64") {
+        return 8
+    }
+    return 0
+}
+
+// jsonBytesType reports whether typeName is a byte-buffer field type
+// ([]int8/[]uint8/bytes — all lowered to a plain NUL-terminated i8* by
+// the compiler, like Go's []byte). Byte fields marshal as base64
+// strings, matching encoding/json's convention.
+fn jsonBytesType(typeName: string) -> bool {
+    return str.Equal(typeName, "[]int8") || str.Equal(typeName, "[]uint8") || str.Equal(typeName, "bytes")
+}
+
+// jsonScalarType reports whether typeName is a scalar field type the
+// struct serializers support: any integer width, float, bool, string.
 fn jsonScalarType(typeName: string) -> bool {
-    return str.Equal(typeName, "int") || str.Equal(typeName, "int64") ||
-        str.Equal(typeName, "string") || str.Equal(typeName, "float") ||
-        str.Equal(typeName, "bool")
+    if jsonIntSize(typeName) > 0 {
+        return true
+    }
+    return str.Equal(typeName, "string") || str.Equal(typeName, "float") ||
+        str.Equal(typeName, "double") || str.Equal(typeName, "bool")
 }
 
 // jsonFieldName resolves a field's JSON key: [json(name=x)] wins,
@@ -830,57 +860,162 @@ fn jsonFieldName(f: reflect.Field) -> string {
 // unsupportedFieldErr builds the field-type error shared by
 // MarshalStruct and UnmarshalInto.
 fn unsupportedFieldErr(f: reflect.Field) -> errors.Error {
-    return errors.New(str.Concat(str.Concat("json: unsupported field type \"", f.type_name), str.Concat("\" on field \"", str.Concat(f.name, "\" — only int, int64, string, float, bool are supported"))))
+    return errors.New(str.Concat(str.Concat("json: unsupported field type \"", f.type_name), str.Concat("\" on field \"", str.Concat(f.name, "\" — supported: integers, float, bool, string, byte buffers, pointers, slices, nested structs"))))
 }
 
 // isEmptyValue reports whether the field on the struct at ptr holds its
 // zero value — used by the [json(omitempty)] flag.
 fn isEmptyValue(ptr: int64, f: reflect.Field) -> bool {
-    if str.Equal(f.type_name, "int") {
-        return reflect.GetInt(ptr, f) == 0
+    addr := reflect.FieldAddr(ptr, f)
+    if str.StartsWith(f.type_name, "*") {
+        return reflect.ReadPtr(addr) == 0
     }
-    if str.Equal(f.type_name, "int64") {
-        return reflect.GetInt64(ptr, f) == int64(0)
+    if jsonBytesType(f.type_name) {
+        return str.Len(reflect.ReadString(addr)) == 0
+    }
+    if str.StartsWith(f.type_name, "[]") {
+        hdr := reflect.ReadPtr(addr)
+        return hdr == 0 || reflect.ReadInt64(hdr + 8) == int64(0)
+    }
+    isz := jsonIntSize(f.type_name)
+    if isz == 4 {
+        return reflect.ReadInt(addr) == 0
+    }
+    if isz == 8 {
+        return reflect.ReadInt64(addr) == int64(0)
+    }
+    if isz > 0 {
+        return reflect.ReadInt16(addr) == 0 && reflect.ReadInt8(addr) == 0
     }
     if str.Equal(f.type_name, "string") {
-        return str.Len(reflect.GetString(ptr, f)) == 0
+        return str.Len(reflect.ReadString(addr)) == 0
     }
-    if str.Equal(f.type_name, "float") {
-        return reflect.GetFloat(ptr, f) == 0.0
+    if str.Equal(f.type_name, "float") || str.Equal(f.type_name, "double") {
+        return reflect.ReadFloat(addr) == 0.0
     }
     if str.Equal(f.type_name, "bool") {
-        return reflect.GetBool(ptr, f) == false
+        return reflect.ReadBool(addr) == false
     }
     return false
 }
 
-// marshalField converts one scalar struct field to a JSON Value.
-fn marshalField(ptr: int64, f: reflect.Field) -> Value {
-    if str.Equal(f.type_name, "string") {
-        return FromString(reflect.GetString(ptr, f))
-    }
-    if str.Equal(f.type_name, "bool") {
-        return FromBool(reflect.GetBool(ptr, f))
-    }
-    if str.Equal(f.type_name, "int") {
-        return FromNumber(float(reflect.GetInt(ptr, f)))
-    }
-    if str.Equal(f.type_name, "int64") {
-        return FromNumber(float(reflect.GetInt64(ptr, f)))
-    }
-    return FromNumber(reflect.GetFloat(ptr, f))
+// elemField derives the element Field descriptor for pointer and slice
+// fields: same nested Type metadata and name, with the elem type_name
+// (ElemType strips one "*" or "[]" level) and offset 0. Recursive
+// marshal/unmarshal then treats the pointed-at or element storage the
+// same way as a real struct field.
+fn elemField(f: reflect.Field) -> reflect.Field {
+    return reflect.Field{name: f.name, type_name: reflect.ElemType(f), offset: 0, tag: f.tag, typ: f.typ}
 }
 
-// MarshalStruct serializes the struct at ptr (pass int64(&obj)) to a
-// JSON object string, reading fields through the reflected type t.
-// Field names map to JSON keys by name unless overridden:
-//   [json(name=x)]    rename the key to x
-//   [json(ignore)]    omit the field entirely
-//   [json(omitempty)] omit the field when it holds its zero value
-// Only scalar fields are supported (int, int64, string, float, bool);
-// a nested-struct, slice, map, or pointer field returns an error
-// naming the field.
-pub fn MarshalStruct(t: reflect.Type, ptr: int64) -> (string, errors.Error) {
+// elemSize returns the byte size of one element of a slice field,
+// resolving struct elements through the embedded nested Type size.
+fn elemSize(f: reflect.Field) -> int {
+    ef := elemField(f)
+    return valSize(ef)
+}
+
+// valSize returns the in-memory size of a value described by f — used
+// for slice element strides and pointer-element allocation.
+fn valSize(f: reflect.Field) -> int {
+    tn := f.type_name
+    isz := jsonIntSize(tn)
+    if isz > 0 {
+        return isz
+    }
+    if str.Equal(tn, "float") || str.Equal(tn, "double") || str.Equal(tn, "string") {
+        return 8
+    }
+    if str.Equal(tn, "bool") {
+        return 1
+    }
+    if str.StartsWith(tn, "*") {
+        return 8
+    }
+    if str.StartsWith(tn, "[]") {
+        return 32
+    }
+    if str.Len(f.typ.name) > 0 {
+        return f.typ.size
+    }
+    return 8
+}
+
+// marshalVal serializes the reflected value stored at addr into a JSON
+// Value, dispatching on f.type_name: scalars, byte buffers (base64),
+// pointers (null or dereferenced element), fat slices (arrays), and
+// nested structs (objects, via the embedded reflect.Type metadata).
+// Unsupported kinds (maps, sets, enums without metadata) produce an
+// error naming the field.
+fn marshalVal(addr: int64, f: reflect.Field) -> (Value, errors.Error) {
+    tn := f.type_name
+    if str.StartsWith(tn, "*") {
+        p := reflect.ReadPtr(addr)
+        if p == 0 {
+            return Null(), errors.None()
+        }
+        return marshalVal(p, elemField(f))
+    }
+    if jsonBytesType(tn) {
+        s := reflect.ReadString(addr)
+        if s == nil {
+            return FromString(""), errors.None()
+        }
+        return FromString(base64.Encode(s, str.Len(s))), errors.None()
+    }
+    if str.StartsWith(tn, "[]") {
+        hdr := reflect.ReadPtr(addr)
+        var vals []Value
+        if hdr == 0 {
+            return FromArray(vals), errors.None()
+        }
+        data := reflect.ReadInt64(hdr)
+        n := int(reflect.ReadInt64(hdr + 8))
+        ef := elemField(f)
+        esz := valSize(ef)
+        i := 0
+        for i < n {
+            ev, err := marshalVal(data + int64(i * esz), ef)
+            if err.message != "" {
+                return Null(), err
+            }
+            vals = append(vals, ev)
+            i = i + 1
+        }
+        return FromArray(vals), errors.None()
+    }
+    nt, isStruct := reflect.NestedType(f)
+    if isStruct {
+        return marshalStructValue(nt, addr)
+    }
+    isz := jsonIntSize(tn)
+    if isz == 4 {
+        return FromNumber(float(reflect.ReadInt(addr))), errors.None()
+    }
+    if isz == 8 {
+        return FromNumber(float(reflect.ReadInt64(addr))), errors.None()
+    }
+    if isz == 2 {
+        return FromNumber(float(reflect.ReadInt16(addr))), errors.None()
+    }
+    if isz == 1 {
+        return FromNumber(float(reflect.ReadInt8(addr))), errors.None()
+    }
+    if str.Equal(tn, "string") {
+        return FromString(reflect.ReadString(addr)), errors.None()
+    }
+    if str.Equal(tn, "float") || str.Equal(tn, "double") {
+        return FromNumber(reflect.ReadFloat(addr)), errors.None()
+    }
+    if str.Equal(tn, "bool") {
+        return FromBool(reflect.ReadBool(addr)), errors.None()
+    }
+    return Null(), unsupportedFieldErr(f)
+}
+
+// marshalStructValue serializes the struct at addr into a JSON object
+// Value — the recursion target shared by Marshal and nested fields.
+fn marshalStructValue(t: reflect.Type, addr: int64) -> (Value, errors.Error) {
     var keys []string
     var vals []Value
     n := reflect.FieldCount(t)
@@ -889,45 +1024,131 @@ pub fn MarshalStruct(t: reflect.Type, ptr: int64) -> (string, errors.Error) {
         if reflect.TagHasFlag(f.tag, "json", "ignore") {
             continue
         }
-        if jsonScalarType(f.type_name) == false {
-            return "", unsupportedFieldErr(f)
-        }
-        if reflect.TagHasFlag(f.tag, "json", "omitempty") && isEmptyValue(ptr, f) {
+        if reflect.TagHasFlag(f.tag, "json", "omitempty") && isEmptyValue(addr, f) {
             continue
         }
+        v, err := marshalVal(reflect.FieldAddr(addr, f), f)
+        if err.message != "" {
+            return Null(), err
+        }
         keys = append(keys, jsonFieldName(f))
-        vals = append(vals, marshalField(ptr, f))
+        vals = append(vals, v)
     }
-    return MarshalValue(FromObject(keys, vals)), errors.None()
+    return FromObject(keys, vals), errors.None()
 }
 
-// unmarshalField writes one JSON value into the field on the struct at
-// ptr, converting the JSON kind to the field's declared type.
-fn unmarshalField(ptr: int64, f: reflect.Field, v: Value) {
-    if str.Equal(f.type_name, "int") {
-        reflect.SetInt(ptr, f, int(AsNumber(v)))
-    } else if str.Equal(f.type_name, "int64") {
-        reflect.SetInt64(ptr, f, int64(AsNumber(v)))
-    } else if str.Equal(f.type_name, "string") {
-        reflect.SetString(ptr, f, AsString(v))
-    } else if str.Equal(f.type_name, "float") {
-        reflect.SetFloat(ptr, f, AsNumber(v))
-    } else if str.Equal(f.type_name, "bool") {
-        reflect.SetBool(ptr, f, AsBool(v))
-    }
-}
-
-// UnmarshalInto parses s as a JSON object and writes each matching key
-// into the struct at ptr (pass int64(&obj)) using the reflected type t.
-// Keys not present in the JSON leave their fields unchanged; JSON keys
-// with no matching field are ignored. Honours [json(name=x)] and
-// [json(ignore)]; unsupported field types return an error naming the
-// field.
-pub fn UnmarshalInto(s: string, t: reflect.Type, ptr: int64) -> errors.Error {
-    v, err := Unmarshal(s)
+// Marshal serializes the struct at ptr (pass int64(&obj)) to a JSON
+// object string, reading fields through the reflected type t:
+//
+//   s, err := json.Marshal(reflect.TypeOf<User>(u), int64(&u))
+//
+// The returned string is Skink's byte-buffer type — equivalent to
+// ([]byte, error) in other languages; Skink's checker keeps string and
+// []byte distinct, and string is the marshalling norm across std.
+//
+// Supported field types: every integer width, float/double, bool,
+// string, byte buffers ([]int8/[]uint8/bytes, base64-encoded like
+// encoding/json), pointers (*T → null or dereferenced), slices
+// ([]T including []struct), and nested structs via the reflected
+// metadata emitted by TypeOf. Map/set/enum fields produce an error
+// naming the field.
+//
+// Field names map to JSON keys by name unless overridden:
+//   [json(name=x)]    rename the key to x
+//   [json(ignore)]    omit the field entirely
+//   [json(omitempty)] omit the field when it holds its zero value
+pub fn Marshal(t: reflect.Type, ptr: int64) -> (string, errors.Error) {
+    v, err := marshalStructValue(t, ptr)
     if err.message != "" {
-        return err
+        return "", err
     }
+    return MarshalValue(v), errors.None()
+}
+
+// MarshalStruct is the pre-0.3 name for Marshal — kept for
+// compatibility, identical behavior.
+pub fn MarshalStruct(t: reflect.Type, ptr: int64) -> (string, errors.Error) {
+    return Marshal(t, ptr)
+}
+
+// unmarshalVal writes one JSON value into the reflected storage at
+// addr, dispatching on f.type_name the same way marshalVal does.
+// JSON null leaves the target unchanged.
+fn unmarshalVal(addr: int64, f: reflect.Field, v: Value) -> errors.Error {
+    tn := f.type_name
+    if str.StartsWith(tn, "*") {
+        if IsNull(v) {
+            reflect.WritePtr(addr, 0)
+            return errors.None()
+        }
+        ef := elemField(f)
+        p := reflect.Alloc(int64(valSize(ef)))
+        reflect.WritePtr(addr, p)
+        return unmarshalVal(p, ef, v)
+    }
+    if jsonBytesType(tn) {
+        if v.kind != 3 {
+            return errors.New(str.Concat(str.Concat("json: expected base64 string for field \"", f.name), "\""))
+        }
+        dec, derr := base64.Decode(AsString(v))
+        if derr.message != "" {
+            return derr
+        }
+        reflect.WriteString(addr, dec)
+        return errors.None()
+    }
+    if str.StartsWith(tn, "[]") {
+        if v.kind != 4 {
+            return errors.New(str.Concat(str.Concat("json: expected array for field \"", f.name), "\""))
+        }
+        n := ArrayLen(v)
+        ef := elemField(f)
+        esz := valSize(ef)
+        data := int64(0)
+        if n > 0 {
+            data = reflect.Alloc(int64(n * esz))
+        }
+        // The field stores a pointer to a registered fat-slice header;
+        // MakeSlice wraps the backing store so len()/indexing resolve.
+        reflect.WritePtr(addr, reflect.MakeSlice(data, n))
+        i := 0
+        for i < n {
+            err := unmarshalVal(data + int64(i * esz), ef, ArrayGet(v, i))
+            if err.message != "" {
+                return err
+            }
+            i = i + 1
+        }
+        return errors.None()
+    }
+    nt, isStruct := reflect.NestedType(f)
+    if isStruct {
+        return unmarshalStructValue(nt, addr, v)
+    }
+    isz := jsonIntSize(tn)
+    if isz == 4 {
+        reflect.WriteInt(addr, int(AsNumber(v)))
+    } else if isz == 8 {
+        reflect.WriteInt64(addr, int64(AsNumber(v)))
+    } else if isz == 2 {
+        reflect.WriteInt16(addr, int(AsNumber(v)))
+    } else if isz == 1 {
+        reflect.WriteInt8(addr, int(AsNumber(v)))
+    } else if str.Equal(tn, "string") {
+        reflect.WriteString(addr, AsString(v))
+    } else if str.Equal(tn, "float") || str.Equal(tn, "double") {
+        reflect.WriteFloat(addr, AsNumber(v))
+    } else if str.Equal(tn, "bool") {
+        reflect.WriteBool(addr, AsBool(v))
+    } else {
+        return unsupportedFieldErr(f)
+    }
+    return errors.None()
+}
+
+// unmarshalStructValue writes a JSON object Value into the struct at
+// addr — the recursion target shared by UnmarshalInto and nested fields.
+fn unmarshalStructValue(t: reflect.Type, addr: int64, v: Value) -> errors.Error {
     if v.kind != 5 {
         return errors.New("json: expected a JSON object")
     }
@@ -937,14 +1158,45 @@ pub fn UnmarshalInto(s: string, t: reflect.Type, ptr: int64) -> errors.Error {
         if reflect.TagHasFlag(f.tag, "json", "ignore") {
             continue
         }
-        if jsonScalarType(f.type_name) == false {
-            return unsupportedFieldErr(f)
-        }
         fv := ObjectGet(v, jsonFieldName(f))
         if IsNull(fv) {
+            // Pointer fields still receive the null (as nil); other
+            // field kinds keep their existing value on JSON null.
+            if str.StartsWith(f.type_name, "*") {
+                err := unmarshalVal(reflect.FieldAddr(addr, f), f, fv)
+                if err.message != "" {
+                    return err
+                }
+            }
             continue
         }
-        unmarshalField(ptr, f, fv)
+        err := unmarshalVal(reflect.FieldAddr(addr, f), f, fv)
+        if err.message != "" {
+            return err
+        }
     }
     return errors.None()
+}
+
+// UnmarshalInto parses s as a JSON object and writes each matching key
+// into the struct at ptr (pass int64(&obj)) using the reflected type t:
+//
+//   err := json.UnmarshalInto(data, reflect.TypeOf<User>(u), int64(&u))
+//
+// (UnmarshalInto rather than Unmarshal because json.Unmarshal is the
+// existing Value-tree parser; s is Skink's string byte-buffer type —
+// the equivalent of data []byte elsewhere.)
+//
+// Supports the same field-type matrix as Marshal: integers of every
+// width, float/double, bool, string, base64 byte buffers, pointers
+// (allocated on demand, null → nil), slices, and nested structs.
+// Keys not present in the JSON leave their fields unchanged; JSON keys
+// with no matching field are ignored. Honours [json(name=x)] and
+// [json(ignore)].
+pub fn UnmarshalInto(s: string, t: reflect.Type, ptr: int64) -> errors.Error {
+    v, err := Unmarshal(s)
+    if err.message != "" {
+        return err
+    }
+    return unmarshalStructValue(t, ptr, v)
 }

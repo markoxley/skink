@@ -35,6 +35,7 @@ pub struct Field {
     type_name: string  // the type name
     offset: int  // the offset
     tag: string  // the tag
+    typ: Type  // embedded metadata for struct-valued fields (name "" when absent)
 }
 
 // Type describes a runtime type, including its name, size in bytes,
@@ -102,9 +103,16 @@ pub fn FieldType(t: Type, fieldName: string) -> string {
 // The returned Field has offset -1 when index is out of range.
 pub fn FieldByIndex(t: Type, index: int) -> Field {
     if index < 0 || index >= t.numFields {
-        return Field{name: "", type_name: "", offset: -1, tag: ""}
+        return Field{name: "", type_name: "", offset: -1, tag: "", typ: EmptyType()}
     }
     return t.fields[index]
+}
+
+// EmptyType returns a zeroed Type used as the "no metadata" sentinel in
+// Field.typ for non-struct field types.
+pub fn EmptyType() -> Type {
+    var ef []Field
+    return Type{name: "", size: 0, numFields: 0, fields: ef}
 }
 
 // FieldByName returns the full Field descriptor for the field named
@@ -117,7 +125,7 @@ pub fn FieldByName(t: Type, fieldName: string) -> Field {
             return f
         }
     }
-    return Field{name: "", type_name: "", offset: -1, tag: ""}
+    return Field{name: "", type_name: "", offset: -1, tag: "", typ: EmptyType()}
 }
 
 // FieldTag returns the [attr] tag text attached to the field named
@@ -151,6 +159,32 @@ pub fn ElemType(f: Field) -> string {
         return str.Substr(f.type_name, 2, str.Len(f.type_name) - 2)
     }
     return f.type_name
+}
+
+// NestedType returns the embedded reflect.Type carried by f for
+// struct-valued fields (type_name "Inner", "[]Inner", "*Inner", or
+// "[]*Inner"), enabling recursive serializers to descend without a
+// runtime type registry. ok is false when the emitter recorded no nested
+// metadata — scalars, maps, sets, enums, or recursion past the emit
+// depth cap.
+pub fn NestedType(f: Field) -> (Type, bool) {
+    if str.Len(f.typ.name) == 0 {
+        return EmptyType(), false
+    }
+    return f.typ, true
+}
+
+// IsStruct reports whether f carries a struct value (type_name is a
+// struct name with no "*"/"[]"/"map["/"set<" prefix and nested metadata
+// is present).
+pub fn IsStruct(f: Field) -> bool {
+    if str.StartsWith(f.type_name, "*") || str.StartsWith(f.type_name, "[]") {
+        return false
+    }
+    if str.StartsWith(f.type_name, "map[") || str.StartsWith(f.type_name, "set<") {
+        return false
+    }
+    return str.Len(f.typ.name) > 0
 }
 
 // GetBool reads a bool field from the struct at structPtr using the
@@ -225,6 +259,126 @@ pub fn SetPtr(structPtr: int64, f: Field, val: int64) {
     reflect_set_int64(structPtr, f.offset, val)
 }
 
+// GetInt8 reads an int8/uint8 field from the struct at structPtr using
+// the byte offset stored in f. Use instead of GetInt for narrow fields:
+// reflect_get_int reads a full i32 and would over-read into neighbours.
+pub fn GetInt8(structPtr: int64, f: Field) -> int {
+    return reflect_get_int8(structPtr, f.offset)
+}
+
+// SetInt8 writes an int8/uint8 value to the field at f's offset.
+pub fn SetInt8(structPtr: int64, f: Field, val: int) {
+    reflect_set_int8(structPtr, f.offset, val)
+}
+
+// GetInt16 reads an int16/uint16 field from the struct at structPtr.
+pub fn GetInt16(structPtr: int64, f: Field) -> int {
+    return reflect_get_int16(structPtr, f.offset)
+}
+
+// SetInt16 writes an int16/uint16 value to the field at f's offset.
+pub fn SetInt16(structPtr: int64, f: Field, val: int) {
+    reflect_set_int16(structPtr, f.offset, val)
+}
+
+// SliceLen returns the element count of a slice field on the struct at
+// structPtr. Slice fields hold a pointer to the fat-slice header
+// {data, len, cap, dtor} — len lives at header+8. A nil header means
+// the slice was never assigned.
+pub fn SliceLen(structPtr: int64, f: Field) -> int {
+    hdr := reflect_get_int64(structPtr, f.offset)
+    if hdr == 0 {
+        return 0
+    }
+    return int(reflect_get_int64(hdr, 8))
+}
+
+// SliceData returns the backing data pointer of a slice field (0 when
+// the slice header is nil).
+pub fn SliceData(structPtr: int64, f: Field) -> int64 {
+    hdr := reflect_get_int64(structPtr, f.offset)
+    if hdr == 0 {
+        return 0
+    }
+    return reflect_get_int64(hdr, 0)
+}
+
+// MakeSlice wraps a backing allocation (from Alloc) in a properly
+// registered fat-slice header — Skink_slice_hdr makes len(), cap, and
+// element indexing work because Skink_slice_len resolves the header
+// through the RC registry. Ownership of base transfers to the header.
+pub fn MakeSlice(data: int64, n: int) -> int64 {
+    return Skink_slice_hdr(data, int64(n), int64(n), data)
+}
+
+// SetSlice installs a fat-slice header (via MakeSlice) into a slice
+// field — used when deserializing into []T fields. The header owns the
+// backing allocation, so the slice releases its elements' storage when
+// the field dies.
+pub fn SetSlice(structPtr: int64, f: Field, data: int64, n: int) {
+    reflect_set_int64(structPtr, f.offset, MakeSlice(data, n))
+}
+
+// Alloc reserves bytes of RC-managed memory and returns its address as
+// an int64 — for building slice backing stores during deserialization.
+pub fn Alloc(n: int64) -> int64 {
+    return reflect_alloc(n)
+}
+
+// ReadInt/ReadInt64/ReadBool/ReadFloat/ReadString/ReadPtr read a typed
+// value at a raw address (e.g. a slice element at data + i*elemSize).
+pub fn ReadInt(addr: int64) -> int {
+    return reflect_get_int(addr, 0)
+}
+pub fn ReadInt8(addr: int64) -> int {
+    return reflect_get_int8(addr, 0)
+}
+pub fn ReadInt16(addr: int64) -> int {
+    return reflect_get_int16(addr, 0)
+}
+pub fn ReadInt64(addr: int64) -> int64 {
+    return reflect_get_int64(addr, 0)
+}
+pub fn ReadBool(addr: int64) -> bool {
+    return reflect_get_bool(addr, 0)
+}
+pub fn ReadFloat(addr: int64) -> float {
+    return reflect_get_float(addr, 0)
+}
+pub fn ReadString(addr: int64) -> string {
+    return reflect_get_string(addr, 0)
+}
+pub fn ReadPtr(addr: int64) -> int64 {
+    return reflect_get_int64(addr, 0)
+}
+
+// WriteInt/WriteInt64/WriteBool/WriteFloat/WriteString/WritePtr write a
+// typed value at a raw address — the Set* complements of the Read* set.
+pub fn WriteInt(addr: int64, val: int) {
+    reflect_set_int(addr, 0, val)
+}
+pub fn WriteInt8(addr: int64, val: int) {
+    reflect_set_int8(addr, 0, val)
+}
+pub fn WriteInt16(addr: int64, val: int) {
+    reflect_set_int16(addr, 0, val)
+}
+pub fn WriteInt64(addr: int64, val: int64) {
+    reflect_set_int64(addr, 0, val)
+}
+pub fn WriteBool(addr: int64, val: bool) {
+    reflect_set_bool(addr, 0, val)
+}
+pub fn WriteFloat(addr: int64, val: float) {
+    reflect_set_float(addr, 0, val)
+}
+pub fn WriteString(addr: int64, val: string) {
+    reflect_set_string(addr, 0, val)
+}
+pub fn WritePtr(addr: int64, val: int64) {
+    reflect_set_int64(addr, 0, val)
+}
+
 // FieldAddr returns the raw address (structPtr + f.offset) of the field
 // described by f on the struct at structPtr. Use it for field types
 // that have no typed getter/setter — e.g. a std/time DateTime copied
@@ -250,6 +404,12 @@ extern fn reflect_get_bool(addr: int64, offset: int) -> bool
 extern fn reflect_set_bool(addr: int64, offset: int, val: bool)
 extern fn reflect_get_int(addr: int64, offset: int) -> int
 extern fn reflect_set_int(addr: int64, offset: int, val: int)
+extern fn reflect_get_int8(addr: int64, offset: int) -> int
+extern fn reflect_set_int8(addr: int64, offset: int, val: int)
+extern fn reflect_get_int16(addr: int64, offset: int) -> int
+extern fn reflect_set_int16(addr: int64, offset: int, val: int)
+extern fn reflect_alloc(n: int64) -> int64
+extern fn Skink_slice_hdr(data: int64, len: int64, cap: int64, base: int64) -> int64
 extern fn reflect_get_int64(addr: int64, offset: int) -> int64
 extern fn reflect_set_int64(addr: int64, offset: int, val: int64)
 extern fn reflect_get_string(addr: int64, offset: int) -> string

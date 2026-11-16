@@ -124,3 +124,112 @@ pub fn TestUnmarshalAttr() {
         Errorf("Unmarshal should extract one attribute")
     }
 }
+
+// --- Struct marshal/unmarshal via reflect + [xml] field tags ---
+// Guards the reflected-struct API added alongside json.Marshal —
+// elements vs [xml(attr)] attributes, nested elements, repeated
+// slice elements, pointers, and base64 byte buffers.
+import "std/reflect"
+
+// XmlAddr is a nested-struct target for recursion tests.
+pub struct XmlAddr {
+    city: string
+    zip: int
+}
+
+// XmlUser exercises attributes, elements, nested structs, slices,
+// pointers, narrow ints, and byte buffers in one shape.
+pub struct XmlUser {
+    [xml(attr)]
+    id: int
+    [xml(name=display_name)]
+    name: string
+    addr: XmlAddr
+    tags: []string
+    peers: []XmlAddr
+    deputy: *XmlAddr
+    level: int8
+}
+
+// TestXmlMarshalStruct verifies element/attribute mapping, renames,
+// nested elements, and repeated slice elements.
+pub fn TestXmlMarshalStruct() {
+    var u XmlUser
+    u.id = 7
+    u.name = "Neo"
+    u.addr.city = "Zion"
+    u.addr.zip = 101
+    u.tags = append(u.tags, "one")
+    u.tags = append(u.tags, "two")
+    u.level = int8(5)
+    s, err := xml.Marshal(reflect.TypeOf<XmlUser>(u), int64(&u))
+    if err.message != "" {
+        Errorf("xml.Marshal should succeed")
+        return
+    }
+    if str.Contains(s, "id=\"7\"") == false {
+        Errorf("[xml(attr)] should emit an attribute")
+    }
+    if str.Contains(s, "<display_name>Neo</display_name>") == false {
+        Errorf("[xml(name=display_name)] should rename the element")
+    }
+    if str.Contains(s, "<city>Zion</city>") == false {
+        Errorf("nested struct should marshal as a child element")
+    }
+    if str.Contains(s, "<tags>one</tags>") == false || str.Contains(s, "<tags>two</tags>") == false {
+        Errorf("slice field should emit one element per item")
+    }
+}
+
+// TestXmlStructRoundTrip verifies Marshal then UnmarshalInto restores
+// attributes, nested elements, slices, and pointers.
+pub fn TestXmlStructRoundTrip() {
+    var src XmlUser
+    src.id = 42
+    src.name = "Trinity"
+    src.addr.city = "Metro"
+    src.addr.zip = 5
+    src.tags = append(src.tags, "ops")
+    var p XmlAddr
+    p.city = "peer1"
+    p.zip = 3
+    src.peers = append(src.peers, p)
+    var d XmlAddr
+    d.city = "dep"
+    src.deputy = &d
+    s, err := xml.Marshal(reflect.TypeOf<XmlUser>(src), int64(&src))
+    if err.message != "" {
+        Errorf("marshal should succeed")
+        return
+    }
+    var dst XmlUser
+    err = xml.UnmarshalInto(s, reflect.TypeOf<XmlUser>(dst), int64(&dst))
+    if err.message != "" {
+        Errorf("UnmarshalInto should succeed on own output")
+        return
+    }
+    if dst.id != 42 || str.Equal(dst.name, "Trinity") == false {
+        Errorf("attribute and element fields should round-trip")
+    }
+    if str.Equal(dst.addr.city, "Metro") == false || dst.addr.zip != 5 {
+        Errorf("nested struct should round-trip")
+    }
+    if len(dst.tags) != 1 || str.Equal(dst.tags[0], "ops") == false {
+        Errorf("[]string should round-trip")
+    }
+    if len(dst.peers) != 1 || str.Equal(dst.peers[0].city, "peer1") == false || dst.peers[0].zip != 3 {
+        Errorf("[]struct should round-trip")
+    }
+    if dst.deputy == nil || str.Equal(dst.deputy.city, "dep") == false {
+        Errorf("pointer field should round-trip")
+    }
+}
+
+// TestXmlUnmarshalIntoBad verifies malformed input errors.
+pub fn TestXmlUnmarshalIntoBad() {
+    var u XmlUser
+    err := xml.UnmarshalInto("not xml <<<", reflect.TypeOf<XmlUser>(u), int64(&u))
+    if err.message == "" {
+        Errorf("malformed XML should error")
+    }
+}

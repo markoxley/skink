@@ -149,3 +149,125 @@ pub fn TestRoundtripObject() {
         Errorf("Roundtrip object should preserve string value")
     }
 }
+
+// --- Struct marshal/unmarshal via reflect + [yaml] field tags ---
+// Guards the reflected-struct API added alongside json.Marshal —
+// nested structs, slices, pointers, and base64 byte buffers must
+// round-trip through yaml.Marshal/yaml.UnmarshalInto.
+import "std/reflect"
+
+// YamlAddr is a nested-struct target for recursion tests.
+pub struct YamlAddr {
+    city: string
+    zip: int
+}
+
+// YamlConfig exercises nested structs, scalar slices, struct slices,
+// pointers, narrow ints, byte buffers, and yaml tags in one shape.
+pub struct YamlConfig {
+    [yaml(ignore)]
+    id: int64
+    [yaml(name=display_name)]
+    name: string
+    [yaml(omitempty)]
+    note: string
+    addr: YamlAddr
+    ports: []int
+    hosts: []string
+    peers: []YamlAddr
+    fallback: *YamlAddr
+    level: int8
+    blob: []byte
+}
+
+// TestYamlMarshalStruct verifies object output honours renames,
+// ignores, and produces nested mappings + sequences.
+pub fn TestYamlMarshalStruct() {
+    var c YamlConfig
+    c.name = "svc"
+    c.addr.city = "DC"
+    c.addr.zip = 42
+    c.ports = append(c.ports, 80)
+    c.ports = append(c.ports, 443)
+    c.level = int8(2)
+    s, err := yaml.Marshal(reflect.TypeOf<YamlConfig>(c), int64(&c))
+    if err.message != "" {
+        Errorf("yaml.Marshal should succeed")
+        return
+    }
+    if str.Contains(s, "display_name") == false {
+        Errorf("[yaml(name=display_name)] should rename the key")
+    }
+    if str.Contains(s, "city") == false || str.Contains(s, "DC") == false {
+        Errorf("nested struct should marshal as a mapping")
+    }
+    if str.Contains(s, "80") == false || str.Contains(s, "443") == false {
+        Errorf("[]int should marshal as a sequence")
+    }
+    if str.Contains(s, "id:") {
+        Errorf("[yaml(ignore)] field should not appear")
+    }
+    if str.Contains(s, "note") {
+        Errorf("empty omitempty field should be omitted")
+    }
+}
+
+// TestYamlStructRoundTrip verifies Marshal then UnmarshalInto restores
+// nested structs, slices, pointers, and byte buffers.
+pub fn TestYamlStructRoundTrip() {
+    var src YamlConfig
+    src.name = "gw"
+    src.note = "keep"
+    src.addr.city = "HQ"
+    src.addr.zip = 7
+    src.ports = append(src.ports, 8080)
+    src.hosts = append(src.hosts, "h1")
+    var p YamlAddr
+    p.city = "peer1"
+    src.peers = append(src.peers, p)
+    var f YamlAddr
+    f.city = "fb"
+    f.zip = 9
+    src.fallback = &f
+    s, err := yaml.Marshal(reflect.TypeOf<YamlConfig>(src), int64(&src))
+    if err.message != "" {
+        Errorf("marshal should succeed")
+        return
+    }
+    var dst YamlConfig
+    err = yaml.UnmarshalInto(s, reflect.TypeOf<YamlConfig>(dst), int64(&dst))
+    if err.message != "" {
+        Errorf("UnmarshalInto should succeed on own output")
+        return
+    }
+    if str.Equal(dst.name, "gw") == false || str.Equal(dst.note, "keep") == false {
+        Errorf("scalar fields should round-trip")
+    }
+    if str.Equal(dst.addr.city, "HQ") == false || dst.addr.zip != 7 {
+        Errorf("nested struct should round-trip")
+    }
+    if len(dst.ports) != 1 || dst.ports[0] != 8080 {
+        Errorf("[]int should round-trip")
+    }
+    if len(dst.hosts) != 1 || str.Equal(dst.hosts[0], "h1") == false {
+        Errorf("[]string should round-trip")
+    }
+    if len(dst.peers) != 1 || str.Equal(dst.peers[0].city, "peer1") == false {
+        Errorf("[]struct should round-trip")
+    }
+    if dst.fallback == nil || str.Equal(dst.fallback.city, "fb") == false || dst.fallback.zip != 9 {
+        Errorf("pointer field should round-trip")
+    }
+    if dst.id != int64(0) {
+        Errorf("[yaml(ignore)] field should not be set")
+    }
+}
+
+// TestYamlUnmarshalIntoBad verifies malformed and non-mapping input errors.
+pub fn TestYamlUnmarshalIntoBad() {
+    var c YamlConfig
+    err := yaml.UnmarshalInto("- 1\n- 2\n", reflect.TypeOf<YamlConfig>(c), int64(&c))
+    if err.message == "" {
+        Errorf("non-mapping YAML should error")
+    }
+}

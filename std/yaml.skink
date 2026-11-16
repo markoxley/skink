@@ -26,6 +26,8 @@ module yaml
 
 import "std/str"
 import "std/errors"
+import "std/reflect"
+import "std/base64"
 
 // Value is a dynamic YAML value that can represent scalar, sequence,
 // or mapping types. Use the kind field to determine the active type.
@@ -186,9 +188,17 @@ fn marshalArray(arr: []Value, indent: int) -> string {
     n := len(arr)
     for i := 0; i < n; i = i + 1 {
         res = str.Concat(res, prefix)
-        res = str.Concat(res, "- ")
-        item := marshalValueInternal(arr[i], indent + 2)
-        res = str.Concat(res, item)
+        item := arr[i]
+        if item.kind == 5 || item.kind == 4 {
+            // Nested collection in a sequence: the parser cannot read
+            // the inline "- key: v" mapping form, so break after the
+            // dash and indent the child block instead.
+            res = str.Concat(res, "-\n")
+            res = str.Concat(res, marshalValueInternal(item, indent + 2))
+        } else {
+            res = str.Concat(res, "- ")
+            res = str.Concat(res, marshalValueInternal(item, indent + 2))
+        }
         res = str.Concat(res, "\n")
     }
     return res
@@ -204,15 +214,18 @@ fn marshalObject(keys: []string, vals: []Value, indent: int) -> string {
     for i := 0; i < n; i = i + 1 {
         res = str.Concat(res, prefix)
         res = str.Concat(res, keys[i])
-        res = str.Concat(res, ": ")
         val := vals[i]
         if val.kind == 5 || val.kind == 4 {
-            // Nested collection: emit newline then indented child block
+            // Nested collection: "key:" alone (no trailing space — the
+            // parser reads "- " sequence items as mappings otherwise),
+            // newline, then the indented child block.
+            res = str.Concat(res, ":")
             res = str.Concat(res, "\n")
             item := marshalValueInternal(val, indent + 2)
             res = str.Concat(res, item)
         } else {
             // Inline scalar value
+            res = str.Concat(res, ": ")
             item := marshalValueInternal(val, 0)
             res = str.Concat(res, item)
         }
@@ -420,8 +433,11 @@ fn parseArrayLines(lines: []string, start: int, end: int, baseIndent: int) -> Va
             // Array item: strip the "- " prefix
             itemStr := str.Substr(trimmed, 1, str.Len(trimmed) - 1)
             itemStr = trimLeft(itemStr)
-            // Scan ahead for nested content belonging to this item
+            // Scan ahead for nested content belonging to this item —
+            // only NON-BLANK deeper-indented lines count (blank lines
+            // are skippable trivia, not nested content).
             j := i + 1
+            hasNested := false
             for j < end {
                 nextLine := lines[j]
                 nextIndent := countIndent(nextLine)
@@ -434,9 +450,10 @@ fn parseArrayLines(lines: []string, start: int, end: int, baseIndent: int) -> Va
                 if nextIndent <= baseIndent {
                     break
                 }
+                hasNested = true
                 j = j + 1
             }
-            if j > i + 1 {
+            if hasNested {
                 // Multi-line value: parse as nested object
                 val := parseObjectLines(lines, i + 1, j, baseIndent + 2)
                 arr = append(arr, val)
@@ -486,8 +503,10 @@ fn parseObjectLines(lines: []string, start: int, end: int, baseIndent: int) -> V
         if colonIdx >= 0 {
             key := trimLeft(str.Substr(trimmed, 0, colonIdx))
             valStr := trimLeft(str.Substr(trimmed, colonIdx + 1, str.Len(trimmed) - colonIdx - 1))
-            // Scan ahead for nested content belonging to this key
+            // Scan ahead for nested content belonging to this key —
+            // blank lines are trivia, not nested content.
             j := i + 1
+            hasNested := false
             for j < end {
                 nextLine := lines[j]
                 nextIndent := countIndent(nextLine)
@@ -499,9 +518,10 @@ fn parseObjectLines(lines: []string, start: int, end: int, baseIndent: int) -> V
                 if nextIndent <= baseIndent {
                     break
                 }
+                hasNested = true
                 j = j + 1
             }
-            if j > i + 1 || (str.Len(valStr) == 0 && j > i) {
+            if hasNested || (str.Len(valStr) == 0 && j > i) {
                 // Nested value: determine if it's an array or object
                 nextLine := ""
                 if i + 1 < end {
@@ -582,4 +602,350 @@ pub fn UnmarshalEntries(s: string) -> ([]Entry, errors.Error) {
         entries = append(entries, e)
     }
     return entries, errors.New("")
+}
+
+// --- Struct marshal/unmarshal via reflect + [yaml] field tags ---
+// Mirrors std/json's reflected struct support: the caller supplies a
+// reflect.Type plus the struct address (int64(&obj)) and the same
+// field-type matrix is supported — every integer width, float/double,
+// bool, string, byte buffers (base64, like encoding/json), pointers
+// (*T → null or dereferenced), slices (including []struct), and
+// nested structs via the embedded reflect.Type metadata.
+
+// yamlIntSize maps integer type names to their byte size, or 0 when
+// typeName is not an integer type.
+fn yamlIntSize(typeName: string) -> int {
+    if str.Equal(typeName, "int") || str.Equal(typeName, "uint") || str.Equal(typeName, "int32") || str.Equal(typeName, "uint32") {
+        return 4
+    }
+    if str.Equal(typeName, "int8") || str.Equal(typeName, "uint8") || str.Equal(typeName, "char") {
+        return 1
+    }
+    if str.Equal(typeName, "int16") || str.Equal(typeName, "uint16") {
+        return 2
+    }
+    if str.Equal(typeName, "int64") || str.Equal(typeName, "uint64") {
+        return 8
+    }
+    return 0
+}
+
+// yamlBytesType reports whether typeName is a byte-buffer field type
+// ([]int8/[]uint8/bytes), marshalled as base64 strings.
+fn yamlBytesType(typeName: string) -> bool {
+    return str.Equal(typeName, "[]int8") || str.Equal(typeName, "[]uint8") || str.Equal(typeName, "bytes")
+}
+
+// yamlFieldName resolves a field's YAML key: [yaml(name=x)] wins,
+// otherwise the field name itself.
+fn yamlFieldName(f: reflect.Field) -> string {
+    if name, ok := reflect.TagKey(f.tag, "yaml", "name"); ok {
+        return name
+    }
+    return f.name
+}
+
+// yamlUnsupportedFieldErr builds the field-type error shared by
+// Marshal and UnmarshalInto.
+fn yamlUnsupportedFieldErr(f: reflect.Field) -> errors.Error {
+    return errors.New(str.Concat(str.Concat("yaml: unsupported field type \"", f.type_name), str.Concat("\" on field \"", str.Concat(f.name, "\" — supported: integers, float, bool, string, byte buffers, pointers, slices, nested structs"))))
+}
+
+// yamlIsEmptyValue reports whether the field on the struct at ptr holds
+// its zero value — used by the [yaml(omitempty)] flag.
+fn yamlIsEmptyValue(ptr: int64, f: reflect.Field) -> bool {
+    addr := reflect.FieldAddr(ptr, f)
+    if str.StartsWith(f.type_name, "*") {
+        return reflect.ReadPtr(addr) == 0
+    }
+    if yamlBytesType(f.type_name) {
+        return str.Len(reflect.ReadString(addr)) == 0
+    }
+    if str.StartsWith(f.type_name, "[]") {
+        hdr := reflect.ReadPtr(addr)
+        return hdr == 0 || reflect.ReadInt64(hdr + 8) == int64(0)
+    }
+    isz := yamlIntSize(f.type_name)
+    if isz == 4 {
+        return reflect.ReadInt(addr) == 0
+    }
+    if isz == 8 {
+        return reflect.ReadInt64(addr) == int64(0)
+    }
+    if isz > 0 {
+        return reflect.ReadInt16(addr) == 0 && reflect.ReadInt8(addr) == 0
+    }
+    if str.Equal(f.type_name, "string") {
+        return str.Len(reflect.ReadString(addr)) == 0
+    }
+    if str.Equal(f.type_name, "float") || str.Equal(f.type_name, "double") {
+        return reflect.ReadFloat(addr) == 0.0
+    }
+    if str.Equal(f.type_name, "bool") {
+        return reflect.ReadBool(addr) == false
+    }
+    return false
+}
+
+// yamlElemField derives the element Field descriptor for pointer and
+// slice fields — see json.skink's elemField for the mechanism.
+fn yamlElemField(f: reflect.Field) -> reflect.Field {
+    return reflect.Field{name: f.name, type_name: reflect.ElemType(f), offset: 0, tag: f.tag, typ: f.typ}
+}
+
+// yamlValSize returns the in-memory size of a value described by f —
+// used for slice element strides and pointer-element allocation.
+fn yamlValSize(f: reflect.Field) -> int {
+    tn := f.type_name
+    isz := yamlIntSize(tn)
+    if isz > 0 {
+        return isz
+    }
+    if str.Equal(tn, "float") || str.Equal(tn, "double") || str.Equal(tn, "string") {
+        return 8
+    }
+    if str.Equal(tn, "bool") {
+        return 1
+    }
+    if str.StartsWith(tn, "*") {
+        return 8
+    }
+    if str.StartsWith(tn, "[]") {
+        return 32
+    }
+    if str.Len(f.typ.name) > 0 {
+        return f.typ.size
+    }
+    return 8
+}
+
+// yamlMarshalVal serializes the reflected value stored at addr into a
+// YAML Value — the yaml counterpart of json.skink's marshalVal.
+fn yamlMarshalVal(addr: int64, f: reflect.Field) -> (Value, errors.Error) {
+    tn := f.type_name
+    if str.StartsWith(tn, "*") {
+        p := reflect.ReadPtr(addr)
+        if p == 0 {
+            return Null(), errors.None()
+        }
+        return yamlMarshalVal(p, yamlElemField(f))
+    }
+    if yamlBytesType(tn) {
+        s := reflect.ReadString(addr)
+        if s == nil {
+            return FromString(""), errors.None()
+        }
+        return FromString(base64.Encode(s, str.Len(s))), errors.None()
+    }
+    if str.StartsWith(tn, "[]") {
+        var vals []Value
+        hdr := reflect.ReadPtr(addr)
+        if hdr == 0 {
+            return FromArray(vals), errors.None()
+        }
+        data := reflect.ReadInt64(hdr)
+        n := int(reflect.ReadInt64(hdr + 8))
+        ef := yamlElemField(f)
+        esz := yamlValSize(ef)
+        i := 0
+        for i < n {
+            ev, err := yamlMarshalVal(data + int64(i * esz), ef)
+            if err.message != "" {
+                return Null(), err
+            }
+            vals = append(vals, ev)
+            i = i + 1
+        }
+        return FromArray(vals), errors.None()
+    }
+    nt, isStruct := reflect.NestedType(f)
+    if isStruct {
+        return yamlMarshalStructValue(nt, addr)
+    }
+    isz := yamlIntSize(tn)
+    if isz == 4 {
+        return FromNumber(float(reflect.ReadInt(addr))), errors.None()
+    }
+    if isz == 8 {
+        return FromNumber(float(reflect.ReadInt64(addr))), errors.None()
+    }
+    if isz == 2 {
+        return FromNumber(float(reflect.ReadInt16(addr))), errors.None()
+    }
+    if isz == 1 {
+        return FromNumber(float(reflect.ReadInt8(addr))), errors.None()
+    }
+    if str.Equal(tn, "string") {
+        return FromString(reflect.ReadString(addr)), errors.None()
+    }
+    if str.Equal(tn, "float") || str.Equal(tn, "double") {
+        return FromNumber(reflect.ReadFloat(addr)), errors.None()
+    }
+    if str.Equal(tn, "bool") {
+        return FromBool(reflect.ReadBool(addr)), errors.None()
+    }
+    return Null(), yamlUnsupportedFieldErr(f)
+}
+
+// yamlMarshalStructValue serializes the struct at addr into a YAML
+// mapping Value — the recursion target shared by Marshal and nested
+// fields.
+fn yamlMarshalStructValue(t: reflect.Type, addr: int64) -> (Value, errors.Error) {
+    var keys []string
+    var vals []Value
+    n := reflect.FieldCount(t)
+    for i := 0; i < n; i = i + 1 {
+        f := reflect.FieldByIndex(t, i)
+        if reflect.TagHasFlag(f.tag, "yaml", "ignore") {
+            continue
+        }
+        if reflect.TagHasFlag(f.tag, "yaml", "omitempty") && yamlIsEmptyValue(addr, f) {
+            continue
+        }
+        v, err := yamlMarshalVal(reflect.FieldAddr(addr, f), f)
+        if err.message != "" {
+            return Null(), err
+        }
+        keys = append(keys, yamlFieldName(f))
+        vals = append(vals, v)
+    }
+    return FromObject(keys, vals), errors.None()
+}
+
+// Marshal serializes the struct at ptr (pass int64(&obj)) to a YAML
+// document string, reading fields through the reflected type t:
+//
+//   s, err := yaml.Marshal(reflect.TypeOf<Config>(c), int64(&c))
+//
+// Supports the same field matrix as json.Marshal (integers, floats,
+// bool, string, base64 byte buffers, pointers, slices, nested
+// structs). Field tags: [yaml(name=x)] renames the key, [yaml(ignore)]
+// omits the field, [yaml(omitempty)] omits zero values.
+pub fn Marshal(t: reflect.Type, ptr: int64) -> (string, errors.Error) {
+    v, err := yamlMarshalStructValue(t, ptr)
+    if err.message != "" {
+        return "", err
+    }
+    return MarshalValue(v), errors.None()
+}
+
+// yamlUnmarshalVal writes one YAML value into the reflected storage at
+// addr — the yaml counterpart of json.skink's unmarshalVal.
+fn yamlUnmarshalVal(addr: int64, f: reflect.Field, v: Value) -> errors.Error {
+    tn := f.type_name
+    if str.StartsWith(tn, "*") {
+        if IsNull(v) {
+            reflect.WritePtr(addr, 0)
+            return errors.None()
+        }
+        ef := yamlElemField(f)
+        p := reflect.Alloc(int64(yamlValSize(ef)))
+        reflect.WritePtr(addr, p)
+        return yamlUnmarshalVal(p, ef, v)
+    }
+    if yamlBytesType(tn) {
+        if v.kind != 3 {
+            return errors.New(str.Concat(str.Concat("yaml: expected base64 string for field \"", f.name), "\""))
+        }
+        dec, derr := base64.Decode(AsString(v))
+        if derr.message != "" {
+            return derr
+        }
+        reflect.WriteString(addr, dec)
+        return errors.None()
+    }
+    if str.StartsWith(tn, "[]") {
+        if v.kind != 4 {
+            return errors.New(str.Concat(str.Concat("yaml: expected sequence for field \"", f.name), "\""))
+        }
+        n := ArrayLen(v)
+        ef := yamlElemField(f)
+        esz := yamlValSize(ef)
+        data := int64(0)
+        if n > 0 {
+            data = reflect.Alloc(int64(n * esz))
+        }
+        reflect.WritePtr(addr, reflect.MakeSlice(data, n))
+        i := 0
+        for i < n {
+            err := yamlUnmarshalVal(data + int64(i * esz), ef, ArrayGet(v, i))
+            if err.message != "" {
+                return err
+            }
+            i = i + 1
+        }
+        return errors.None()
+    }
+    nt, isStruct := reflect.NestedType(f)
+    if isStruct {
+        return yamlUnmarshalStructValue(nt, addr, v)
+    }
+    isz := yamlIntSize(tn)
+    if isz == 4 {
+        reflect.WriteInt(addr, int(AsNumber(v)))
+    } else if isz == 8 {
+        reflect.WriteInt64(addr, int64(AsNumber(v)))
+    } else if isz == 2 {
+        reflect.WriteInt16(addr, int(AsNumber(v)))
+    } else if isz == 1 {
+        reflect.WriteInt8(addr, int(AsNumber(v)))
+    } else if str.Equal(tn, "string") {
+        reflect.WriteString(addr, AsString(v))
+    } else if str.Equal(tn, "float") || str.Equal(tn, "double") {
+        reflect.WriteFloat(addr, AsNumber(v))
+    } else if str.Equal(tn, "bool") {
+        reflect.WriteBool(addr, AsBool(v))
+    } else {
+        return yamlUnsupportedFieldErr(f)
+    }
+    return errors.None()
+}
+
+// yamlUnmarshalStructValue writes a YAML mapping Value into the struct
+// at addr — the recursion target shared by UnmarshalInto and nested
+// fields.
+fn yamlUnmarshalStructValue(t: reflect.Type, addr: int64, v: Value) -> errors.Error {
+    if v.kind != 5 {
+        return errors.New("yaml: expected a mapping")
+    }
+    n := reflect.FieldCount(t)
+    for i := 0; i < n; i = i + 1 {
+        f := reflect.FieldByIndex(t, i)
+        if reflect.TagHasFlag(f.tag, "yaml", "ignore") {
+            continue
+        }
+        fv := ObjectGet(v, yamlFieldName(f))
+        if IsNull(fv) {
+            if str.StartsWith(f.type_name, "*") {
+                err := yamlUnmarshalVal(reflect.FieldAddr(addr, f), f, fv)
+                if err.message != "" {
+                    return err
+                }
+            }
+            continue
+        }
+        err := yamlUnmarshalVal(reflect.FieldAddr(addr, f), f, fv)
+        if err.message != "" {
+            return err
+        }
+    }
+    return errors.None()
+}
+
+// UnmarshalInto parses s as a YAML document and writes each matching
+// mapping key into the struct at ptr (pass int64(&obj)) using the
+// reflected type t:
+//
+//   err := yaml.UnmarshalInto(data, reflect.TypeOf<Config>(c), int64(&c))
+//
+// (Named UnmarshalInto because yaml.Unmarshal is the existing Value-tree
+// parser.) Absent keys leave fields unchanged; unknown keys are
+// ignored; null values nil pointer fields and skip others. Honours
+// [yaml(name=x)] and [yaml(ignore)].
+pub fn UnmarshalInto(s: string, t: reflect.Type, ptr: int64) -> errors.Error {
+    v, err := Unmarshal(s)
+    if err.message != "" {
+        return err
+    }
+    return yamlUnmarshalStructValue(t, ptr, v)
 }

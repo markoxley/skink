@@ -51,6 +51,8 @@ extern int Skink_rc_is_registered(const void *ptr);
 // Declared in rc_rt.c (comp_error.md #153).
 extern int64_t Skink_rc_registered_size(const void *ptr);
 
+extern void *Skink_rc_alloc(int64_t payload_size);
+
 #if defined(__unix__) || defined(__APPLE__)
 #include <pthread.h>
 #include <setjmp.h>
@@ -314,6 +316,31 @@ int reflect_get_int(uintptr_t addr, int offset) {
 // reflect_set_int writes an int value at the given offset in a struct address.
 void reflect_set_int(uintptr_t addr, int offset, int val) {
   *(int *)(addr + offset) = val;
+}
+
+// reflect_get_int8 reads an int8/uint8 value at the given offset.
+int reflect_get_int8(uintptr_t addr, int offset) {
+  return *(int8_t *)(addr + offset);
+}
+
+// reflect_set_int8 writes an int8/uint8 value at the given offset.
+void reflect_set_int8(uintptr_t addr, int offset, int val) {
+  *(int8_t *)(addr + offset) = (int8_t)val;
+}
+
+// reflect_get_int16 reads an int16/uint16 value at the given offset.
+int reflect_get_int16(uintptr_t addr, int offset) {
+  return *(int16_t *)(addr + offset);
+}
+
+// reflect_set_int16 writes an int16/uint16 value at the given offset.
+void reflect_set_int16(uintptr_t addr, int offset, int val) {
+  *(int16_t *)(addr + offset) = (int16_t)val;
+}
+
+// reflect_alloc exposes Skink_rc_alloc for building reflected slices.
+uintptr_t reflect_alloc(int64_t bytes) {
+  return (uintptr_t)Skink_rc_alloc(bytes);
 }
 
 // reflect_get_int64 reads an int64 value at the given offset from a struct address.

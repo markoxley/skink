@@ -2666,6 +2666,82 @@ fn skinkTypeName(cg: *CodeGen, ft: checker.TType, fLL: string) -> string {
     return llTypeToSkinkName(fLL)
 }
 
+// reflectEmitDepthMax bounds embedded-Type recursion in
+// emitReflectTypeInto for self-referential struct types.
+const reflectEmitDepthMax = 8
+
+// reflectNestedBase strips leading "*"/"[]" prefixes from a field
+// type_name, yielding the candidate struct name for embedded metadata.
+fn reflectNestedBase(tn: string) -> string {
+    for str.StartsWith(tn, "[]") {
+        tn = str.Substr(tn, 2, str.Len(tn) - 2)
+    }
+    for str.StartsWith(tn, "*") {
+        tn = str.Substr(tn, 1, str.Len(tn) - 1)
+    }
+    return tn
+}
+
+// reflectTypeSize resolves the byte size of a Skink type name for
+// reflect.Type.size, using the struct layout table for named types.
+fn reflectTypeSize(cg: *CodeGen, typeName: string) -> int {
+    if str.Equal(typeName, "int") || str.Equal(typeName, "uint") || str.Equal(typeName, "int32") || str.Equal(typeName, "uint32") {
+        return 4
+    }
+    if str.Equal(typeName, "int8") || str.Equal(typeName, "uint8") || str.Equal(typeName, "bool") {
+        return 1
+    }
+    if str.Equal(typeName, "int16") || str.Equal(typeName, "uint16") {
+        return 2
+    }
+    if str.Equal(typeName, "int64") || str.Equal(typeName, "uint64") || str.Equal(typeName, "float") || str.Equal(typeName, "double") || str.Equal(typeName, "string") {
+        return 8
+    }
+    layout, hasLayout := reflectStructLayout(cg, typeName)
+    if hasLayout {
+        return layout.size
+    }
+    return 8
+}
+
+// reflectStructLayout looks up a possibly module-qualified struct name
+// in the layout table, trying the current module prefix as a fallback.
+fn reflectStructLayout(cg: *CodeGen, typeName: string) -> (StructLayout, bool) {
+    layout := cg.structLayouts[typeName]
+    if mapStringStructLayoutHasKeyCG(cg.structLayouts, typeName) {
+        return layout, true
+    }
+    if str.Len(cg.currentModule) > 0 {
+        qn := str.Concat(cg.currentModule, str.Concat(".", typeName))
+        qlayout := cg.structLayouts[qn]
+        if mapStringStructLayoutHasKeyCG(cg.structLayouts, qn) {
+            return qlayout, true
+        }
+    }
+    return layout, false
+}
+
+// emitEmptyReflectType writes a zeroed reflect.Type (empty name, no
+// fields) into destPtr — the sentinel reflect.NestedType reads as
+// "no metadata available".
+fn emitEmptyReflectType(cg: *CodeGen, destPtr: string) {
+    nameStr := emitStringLiteral(cg, "")
+    nameGEP := nextReg(cg)
+    emitln(cg, concatMany([]string{"  ", nameGEP, " = getelementptr inbounds %struct.reflect_Type, %struct.reflect_Type* ", destPtr, ", i32 0, i32 0"}))
+    nameRetained := nextReg(cg)
+    emitfmt(cg, "  %s = call i8* @Skink_rc_retain(i8* %s)\n", []string{nameRetained, nameStr})
+    emitfmt(cg, "  store i8* %s, i8** %s\n", []string{nameRetained, nameGEP})
+    sizeGEP := nextReg(cg)
+    emitln(cg, concatMany([]string{"  ", sizeGEP, " = getelementptr inbounds %struct.reflect_Type, %struct.reflect_Type* ", destPtr, ", i32 0, i32 1"}))
+    emitln(cg, concatMany([]string{"  store i32 0, i32* ", sizeGEP}))
+    nfGEP := nextReg(cg)
+    emitln(cg, concatMany([]string{"  ", nfGEP, " = getelementptr inbounds %struct.reflect_Type, %struct.reflect_Type* ", destPtr, ", i32 0, i32 2"}))
+    emitln(cg, concatMany([]string{"  store i32 0, i32* ", nfGEP}))
+    fpGEP := nextReg(cg)
+    emitln(cg, concatMany([]string{"  ", fpGEP, " = getelementptr inbounds %struct.reflect_Type, %struct.reflect_Type* ", destPtr, ", i32 0, i32 3"}))
+    emitln(cg, concatMany([]string{"  store %struct.reflect_Field* null, %struct.reflect_Field** ", fpGEP}))
+}
+
 // emitReflectTypeOf generates inline type info for reflect.TypeOf<T>(arg).
 // It creates a reflect.Type struct with the correct name, size, and fields
 // based on the generic type argument T.
@@ -2676,84 +2752,63 @@ fn emitReflectTypeOf(cg: *CodeGen, e: ast.Expr) -> string {
     typeArg := e.genericArgs[0]
     typeName := typeArg.name
 
-    // Determine size
-    sizeVal := 8
-    if str.Equal(typeName, "int") || str.Equal(typeName, "uint") || str.Equal(typeName, "int32") || str.Equal(typeName, "uint32") {
-        sizeVal = 4
-    } else if str.Equal(typeName, "int8") || str.Equal(typeName, "uint8") || str.Equal(typeName, "bool") {
-        sizeVal = 1
-    } else if str.Equal(typeName, "int16") || str.Equal(typeName, "uint16") {
-        sizeVal = 2
-    } else if str.Equal(typeName, "int64") || str.Equal(typeName, "uint64") {
-        sizeVal = 8
-    } else if str.Equal(typeName, "float") || str.Equal(typeName, "double") {
-        sizeVal = 8
-    } else if str.Equal(typeName, "string") {
-        sizeVal = 8
-    } else {
-        // Struct type: look up layout
-        layout := cg.structLayouts[typeName]
-        hasLayout := mapStringStructLayoutHasKeyCG(cg.structLayouts, typeName)
-        if hasLayout {
-            sizeVal = layout.size
-        }
-        if !hasLayout && str.Len(cg.currentModule) > 0 {
-            qn := str.Concat(cg.currentModule, str.Concat(".", typeName))
-            qlayout := cg.structLayouts[qn]
-            hasQLayout := mapStringStructLayoutHasKeyCG(cg.structLayouts, qn)
-            if hasQLayout {
-                layout = qlayout
-                hasLayout = true
-                sizeVal = layout.size
-            }
-        }
-    }
-
     // Allocate a reflect.Type struct on the stack
     typeAlloca := nextReg(cg)
     emitln(cg, concatMany([]string{"  ", typeAlloca, " = alloca %struct.reflect_Type"}))
 
+    emitReflectTypeInto(cg, typeName, typeAlloca, 0)
+
+    // Load the Type struct value and return it
+    resultReg := nextReg(cg)
+    emitln(cg, concatMany([]string{"  ", resultReg, " = load %struct.reflect_Type, %struct.reflect_Type* ", typeAlloca}))
+    return resultReg
+}
+
+// emitReflectTypeInto writes a reflect.Type value describing typeName
+// into the %struct.reflect_Type* destPtr. Field metadata is populated
+// recursively: each struct-valued field (T, *T, []T, []*T) gets an
+// embedded reflect.Type so serializers can descend without a runtime
+// registry. Recursion is capped at reflectEmitDepthMax to bound code
+// size for self-referential types (e.g. Node{next: *Node}).
+fn emitReflectTypeInto(cg: *CodeGen, typeName: string, destPtr: string, depth: int) {
     // Set name field (i8*)
     nameStr := emitStringLiteral(cg, typeName)
     nameGEP := nextReg(cg)
-    emitln(cg, concatMany([]string{"  ", nameGEP, " = getelementptr inbounds %struct.reflect_Type, %struct.reflect_Type* ", typeAlloca, ", i32 0, i32 0"}))
+    emitln(cg, concatMany([]string{"  ", nameGEP, " = getelementptr inbounds %struct.reflect_Type, %struct.reflect_Type* ", destPtr, ", i32 0, i32 0"}))
     nameRetained := nextReg(cg)
     emitfmt(cg, "  %s = call i8* @Skink_rc_retain(i8* %s)\n", []string{nameRetained, nameStr})
     emitfmt(cg, "  store i8* %s, i8** %s\n", []string{nameRetained, nameGEP})
 
     // Set size field (i32)
     sizeGEP := nextReg(cg)
-    emitln(cg, concatMany([]string{"  ", sizeGEP, " = getelementptr inbounds %struct.reflect_Type, %struct.reflect_Type* ", typeAlloca, ", i32 0, i32 1"}))
-    emitfmt(cg, "  store i32 %s, i32* %s\n", []string{strconv.Itoa(sizeVal), sizeGEP})
+    emitln(cg, concatMany([]string{"  ", sizeGEP, " = getelementptr inbounds %struct.reflect_Type, %struct.reflect_Type* ", destPtr, ", i32 0, i32 1"}))
+    emitfmt(cg, "  store i32 %s, i32* %s\n", []string{strconv.Itoa(reflectTypeSize(cg, typeName)), sizeGEP})
 
     // Build fields array if it's a struct
-    layout := cg.structLayouts[typeName]
-    hasLayout := mapStringStructLayoutHasKeyCG(cg.structLayouts, typeName)
-    if !hasLayout && str.Len(cg.currentModule) > 0 {
-        qn := str.Concat(cg.currentModule, str.Concat(".", typeName))
-        qlayout := cg.structLayouts[qn]
-        hasQLayout := mapStringStructLayoutHasKeyCG(cg.structLayouts, qn)
-        if hasQLayout {
-            layout = qlayout
-            hasLayout = true
-        }
-    }
+    layout, hasLayout := reflectStructLayout(cg, typeName)
 
     numFields := 0
-    if hasLayout {
+    if hasLayout && depth < reflectEmitDepthMax {
         numFields = len(layout.fields)
     }
 
     // Set numFields field (i32)
     nfGEP := nextReg(cg)
-    emitln(cg, concatMany([]string{"  ", nfGEP, " = getelementptr inbounds %struct.reflect_Type, %struct.reflect_Type* ", typeAlloca, ", i32 0, i32 2"}))
+    emitln(cg, concatMany([]string{"  ", nfGEP, " = getelementptr inbounds %struct.reflect_Type, %struct.reflect_Type* ", destPtr, ", i32 0, i32 2"}))
     emitfmt(cg, "  store i32 %s, i32* %s\n", []string{strconv.Itoa(numFields), nfGEP})
 
     // Build fields array
     if numFields > 0 {
-        fieldSize := 32
+        // sizeof(%struct.reflect_Field) via the null-GEP trick so the
+        // alloc tracks the Field layout (which gained a typ member).
+        fszGEP := nextReg(cg)
+        emitln(cg, concatMany([]string{"  ", fszGEP, " = getelementptr %struct.reflect_Field, %struct.reflect_Field* null, i32 1"}))
+        fsz64 := nextReg(cg)
+        emitln(cg, concatMany([]string{"  ", fsz64, " = ptrtoint %struct.reflect_Field* ", fszGEP, " to i64"}))
+        totalBytes := nextReg(cg)
+        emitfmt(cg, "  %s = mul i64 %s, %s\n", []string{totalBytes, fsz64, strconv.Itoa(numFields)})
         fieldsArrReg := nextReg(cg)
-        emitfmt(cg, "  %s = call i8* @Skink_rc_alloc(i64 %s)\n", []string{fieldsArrReg, strconv.Itoa(fieldSize * numFields)})
+        emitfmt(cg, "  %s = call i8* @Skink_rc_alloc(i64 %s)\n", []string{fieldsArrReg, totalBytes})
         fieldsTypedReg := nextReg(cg)
         emitln(cg, concatMany([]string{"  ", fieldsTypedReg, " = bitcast i8* ", fieldsArrReg, " to %struct.reflect_Field*"}))
 
@@ -2801,26 +2856,35 @@ fn emitReflectTypeOf(cg: *CodeGen, e: ast.Expr) -> string {
             emitfmt(cg, "  %s = call i8* @Skink_rc_retain(i8* %s)\n", []string{fTagRetained, fTagStr})
             emitfmt(cg, "  store i8* %s, i8** %s\n", []string{fTagRetained, fTagGEP})
 
+            // Set field typ (member 4): embedded reflect.Type for
+            // struct-valued fields so serializers can recurse; empty
+            // sentinel otherwise. Non-struct bases (maps, sets, enums,
+            // scalars) and recursion at the depth cap get the sentinel.
+            fTypGEP := nextReg(cg)
+            emitln(cg, concatMany([]string{"  ", fTypGEP, " = getelementptr inbounds %struct.reflect_Field, %struct.reflect_Field* ", fieldsTypedReg, ", i32 ", fiStr, ", i32 4"}))
+            nestedBase := reflectNestedBase(fieldType)
+            _, nestedIsStruct := reflectStructLayout(cg, nestedBase)
+            if nestedIsStruct {
+                emitReflectTypeInto(cg, nestedBase, fTypGEP, depth + 1)
+            } else {
+                emitEmptyReflectType(cg, fTypGEP)
+            }
+
             fi = fi + 1
         }
 
         // Set fields pointer in Type struct
         fpGEP := nextReg(cg)
-        emitln(cg, concatMany([]string{"  ", fpGEP, " = getelementptr inbounds %struct.reflect_Type, %struct.reflect_Type* ", typeAlloca, ", i32 0, i32 3"}))
+        emitln(cg, concatMany([]string{"  ", fpGEP, " = getelementptr inbounds %struct.reflect_Type, %struct.reflect_Type* ", destPtr, ", i32 0, i32 3"}))
         fpRetained := nextReg(cg)
         emitfmt(cg, "  %s = call i8* @Skink_rc_retain(i8* %s)\n", []string{fpRetained, fieldsArrReg})
         emitln(cg, concatMany([]string{"  store %struct.reflect_Field* ", fieldsTypedReg, ", %struct.reflect_Field** ", fpGEP}))
     } else {
         // Set fields pointer to null
         fpGEP := nextReg(cg)
-        emitln(cg, concatMany([]string{"  ", fpGEP, " = getelementptr inbounds %struct.reflect_Type, %struct.reflect_Type* ", typeAlloca, ", i32 0, i32 3"}))
+        emitln(cg, concatMany([]string{"  ", fpGEP, " = getelementptr inbounds %struct.reflect_Type, %struct.reflect_Type* ", destPtr, ", i32 0, i32 3"}))
         emitln(cg, concatMany([]string{"  store %struct.reflect_Field* null, %struct.reflect_Field** ", fpGEP}))
     }
-
-    // Load the Type struct value and return it
-    resultReg := nextReg(cg)
-    emitln(cg, concatMany([]string{"  ", resultReg, " = load %struct.reflect_Type, %struct.reflect_Type* ", typeAlloca}))
-    return resultReg
 }
 
 // emitRegisterRuleCall handles registerRule calls on rulesets by generating

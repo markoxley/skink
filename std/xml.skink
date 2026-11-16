@@ -27,6 +27,9 @@ module xml
 import "std/str"
 import "std/errors"
 import "std/libc"
+import "std/reflect"
+import "std/strconv"
+import "std/base64"
 
 // Node represents a single XML element with attributes, text content,
 // and a list of child nodes.
@@ -419,4 +422,463 @@ pub fn UnmarshalEntries(s: string) -> ([]Entry, errors.Error) {
         entries = append(entries, e)
     }
     return entries, errors.New("")
+}
+
+// --- Struct marshal/unmarshal via reflect + [xml] field tags ---
+// Mirrors the reflected struct APIs in std/json and std/yaml. Mapping
+// conventions (Go encoding/xml inspired):
+//   struct field       -> child element <name>text</name>
+//   [xml(name=x)]      -> rename the element/attribute to x
+//   [xml(attr=x)]      -> attribute on the parent element ([]byte base64)
+//   [xml(attr)]        -> attribute using the field name
+//   [xml(ignore)]      -> omit the field
+//   [xml(omitempty)]   -> omit zero-valued fields
+//   *T field           -> omitted when nil, else as T
+//   []T field          -> one <name> element per item
+//   []struct field     -> one nested <name> element per item
+//   nested struct      -> a child element containing its own fields
+//   byte buffers       -> base64 text (encoding/json convention)
+// The document root tag is the struct's type name.
+
+// xmlIntSize maps integer type names to their byte size, or 0 when
+// typeName is not an integer type.
+fn xmlIntSize(typeName: string) -> int {
+    if str.Equal(typeName, "int") || str.Equal(typeName, "uint") || str.Equal(typeName, "int32") || str.Equal(typeName, "uint32") {
+        return 4
+    }
+    if str.Equal(typeName, "int8") || str.Equal(typeName, "uint8") || str.Equal(typeName, "char") {
+        return 1
+    }
+    if str.Equal(typeName, "int16") || str.Equal(typeName, "uint16") {
+        return 2
+    }
+    if str.Equal(typeName, "int64") || str.Equal(typeName, "uint64") {
+        return 8
+    }
+    return 0
+}
+
+// xmlBytesType reports whether typeName is a byte-buffer field type
+// ([]int8/[]uint8/bytes), marshalled as base64 text.
+fn xmlBytesType(typeName: string) -> bool {
+    return str.Equal(typeName, "[]int8") || str.Equal(typeName, "[]uint8") || str.Equal(typeName, "bytes")
+}
+
+// xmlFieldName resolves a field's element name: [xml(name=x)] wins,
+// otherwise the field name itself.
+fn xmlFieldName(f: reflect.Field) -> string {
+    if name, ok := reflect.TagKey(f.tag, "xml", "name"); ok {
+        return name
+    }
+    return f.name
+}
+
+// xmlAttrName returns the attribute name for a field carrying
+// [xml(attr)] or [xml(attr=x)], and ok=false otherwise.
+fn xmlAttrName(f: reflect.Field) -> (string, bool) {
+    if name, ok := reflect.TagKey(f.tag, "xml", "attr"); ok {
+        if str.Len(name) == 0 {
+            return f.name, true
+        }
+        return name, true
+    }
+    if reflect.TagHasFlag(f.tag, "xml", "attr") {
+        return f.name, true
+    }
+    return "", false
+}
+
+// xmlUnsupportedFieldErr builds the field-type error shared by
+// Marshal and UnmarshalInto.
+fn xmlUnsupportedFieldErr(f: reflect.Field) -> errors.Error {
+    return errors.New(str.Concat(str.Concat("xml: unsupported field type \"", f.type_name), str.Concat("\" on field \"", str.Concat(f.name, "\" — supported: integers, float, bool, string, byte buffers, pointers, slices, nested structs"))))
+}
+
+// xmlIsEmptyValue reports whether the field on the struct at ptr holds
+// its zero value — used by the [xml(omitempty)] flag.
+fn xmlIsEmptyValue(ptr: int64, f: reflect.Field) -> bool {
+    addr := reflect.FieldAddr(ptr, f)
+    if str.StartsWith(f.type_name, "*") {
+        return reflect.ReadPtr(addr) == 0
+    }
+    if xmlBytesType(f.type_name) {
+        return str.Len(reflect.ReadString(addr)) == 0
+    }
+    if str.StartsWith(f.type_name, "[]") {
+        hdr := reflect.ReadPtr(addr)
+        return hdr == 0 || reflect.ReadInt64(hdr + 8) == int64(0)
+    }
+    isz := xmlIntSize(f.type_name)
+    if isz == 4 {
+        return reflect.ReadInt(addr) == 0
+    }
+    if isz == 8 {
+        return reflect.ReadInt64(addr) == int64(0)
+    }
+    if isz > 0 {
+        return reflect.ReadInt16(addr) == 0 && reflect.ReadInt8(addr) == 0
+    }
+    if str.Equal(f.type_name, "string") {
+        return str.Len(reflect.ReadString(addr)) == 0
+    }
+    if str.Equal(f.type_name, "float") || str.Equal(f.type_name, "double") {
+        return reflect.ReadFloat(addr) == 0.0
+    }
+    if str.Equal(f.type_name, "bool") {
+        return reflect.ReadBool(addr) == false
+    }
+    return false
+}
+
+// xmlElemField derives the element Field descriptor for pointer and
+// slice fields — see json.skink's elemField for the mechanism.
+fn xmlElemField(f: reflect.Field) -> reflect.Field {
+    return reflect.Field{name: f.name, type_name: reflect.ElemType(f), offset: 0, tag: f.tag, typ: f.typ}
+}
+
+// xmlValSize returns the in-memory size of a value described by f —
+// used for slice element strides and pointer-element allocation.
+fn xmlValSize(f: reflect.Field) -> int {
+    tn := f.type_name
+    isz := xmlIntSize(tn)
+    if isz > 0 {
+        return isz
+    }
+    if str.Equal(tn, "float") || str.Equal(tn, "double") || str.Equal(tn, "string") {
+        return 8
+    }
+    if str.Equal(tn, "bool") {
+        return 1
+    }
+    if str.StartsWith(tn, "*") {
+        return 8
+    }
+    if str.StartsWith(tn, "[]") {
+        return 32
+    }
+    if str.Len(f.typ.name) > 0 {
+        return f.typ.size
+    }
+    return 8
+}
+
+// xmlScalarText renders a scalar value at addr as XML text — the shared
+// representation for element bodies and attribute values.
+fn xmlScalarText(addr: int64, tn: string) -> string {
+    isz := xmlIntSize(tn)
+    if isz == 4 {
+        return strconv.Itoa(reflect.ReadInt(addr))
+    }
+    if isz == 8 {
+        return strconv.Itoa64(reflect.ReadInt64(addr))
+    }
+    if isz == 2 {
+        return strconv.Itoa(reflect.ReadInt16(addr))
+    }
+    if isz == 1 {
+        return strconv.Itoa(reflect.ReadInt8(addr))
+    }
+    if str.Equal(tn, "string") {
+        return reflect.ReadString(addr)
+    }
+    if str.Equal(tn, "float") || str.Equal(tn, "double") {
+        return strconv.FormatFloat(reflect.ReadFloat(addr), 17)
+    }
+    if str.Equal(tn, "bool") {
+        if reflect.ReadBool(addr) {
+            return "true"
+        }
+        return "false"
+    }
+    if xmlBytesType(tn) {
+        s := reflect.ReadString(addr)
+        if s == nil {
+            return ""
+        }
+        return base64.Encode(s, str.Len(s))
+    }
+    return ""
+}
+
+// xmlIsScalar reports whether typeName maps to XML text (scalar kinds
+// usable as element bodies or attribute values).
+fn xmlIsScalar(tn: string) -> bool {
+    if xmlIntSize(tn) > 0 || xmlBytesType(tn) {
+        return true
+    }
+    return str.Equal(tn, "string") || str.Equal(tn, "float") ||
+        str.Equal(tn, "double") || str.Equal(tn, "bool")
+}
+
+// xmlMarshalNodes serializes the reflected field value at addr into the
+// sequence of child Nodes it produces: one element for scalars/nested
+// structs, one per item for slices, zero for nil pointers.
+fn xmlMarshalNodes(addr: int64, f: reflect.Field) -> ([]Node, errors.Error) {
+    var nodes []Node
+    tn := f.type_name
+    if str.StartsWith(tn, "*") {
+        p := reflect.ReadPtr(addr)
+        if p == 0 {
+            return nodes, errors.None()
+        }
+        return xmlMarshalNodes(p, xmlElemField(f))
+    }
+    if str.StartsWith(tn, "[]") && !xmlBytesType(tn) {
+        hdr := reflect.ReadPtr(addr)
+        if hdr == 0 {
+            return nodes, errors.None()
+        }
+        data := reflect.ReadInt64(hdr)
+        n := int(reflect.ReadInt64(hdr + 8))
+        ef := xmlElemField(f)
+        esz := xmlValSize(ef)
+        i := 0
+        for i < n {
+            sub, err := xmlMarshalNodes(data + int64(i * esz), ef)
+            if err.message != "" {
+                return nodes, err
+            }
+            for j := 0; j < len(sub); j = j + 1 {
+                nodes = append(nodes, sub[j])
+            }
+            i = i + 1
+        }
+        return nodes, errors.None()
+    }
+    nt, isStruct := reflect.NestedType(f)
+    if isStruct {
+        inner, err := xmlMarshalStructValue(nt, addr, xmlFieldName(f))
+        if err.message != "" {
+            return nodes, err
+        }
+        nodes = append(nodes, inner)
+        return nodes, errors.None()
+    }
+    if xmlIsScalar(tn) {
+        e := NewNode(xmlFieldName(f))
+        e.SetText(xmlScalarText(addr, tn))
+        nodes = append(nodes, e)
+        return nodes, errors.None()
+    }
+    return nodes, xmlUnsupportedFieldErr(f)
+}
+
+// xmlMarshalStructValue serializes the struct at addr into a Node named
+// tag — the recursion target shared by Marshal and nested fields.
+fn xmlMarshalStructValue(t: reflect.Type, addr: int64, tag: string) -> (Node, errors.Error) {
+    root := NewNode(tag)
+    n := reflect.FieldCount(t)
+    for i := 0; i < n; i = i + 1 {
+        f := reflect.FieldByIndex(t, i)
+        if reflect.TagHasFlag(f.tag, "xml", "ignore") {
+            continue
+        }
+        faddr := reflect.FieldAddr(addr, f)
+        if reflect.TagHasFlag(f.tag, "xml", "omitempty") && xmlIsEmptyValue(addr, f) {
+            continue
+        }
+        an, isAttr := xmlAttrName(f)
+        if isAttr {
+            if !xmlIsScalar(f.type_name) {
+                return root, errors.New(str.Concat(str.Concat("xml: [xml(attr)] field \"", f.name), "\" must be a scalar type"))
+            }
+            root.SetAttr(an, xmlScalarText(faddr, f.type_name))
+            continue
+        }
+        kids, err := xmlMarshalNodes(faddr, f)
+        if err.message != "" {
+            return root, err
+        }
+        for k := 0; k < len(kids); k = k + 1 {
+            root.AddChild(kids[k])
+        }
+    }
+    return root, errors.None()
+}
+
+// Marshal serializes the struct at ptr (pass int64(&obj)) to an XML
+// document string, reading fields through the reflected type t:
+//
+//   s, err := xml.Marshal(reflect.TypeOf<User>(u), int64(&u))
+//
+// The root element is named after the struct type; fields map to child
+// elements (or attributes via [xml(attr)]) as documented above.
+pub fn Marshal(t: reflect.Type, ptr: int64) -> (string, errors.Error) {
+    root, err := xmlMarshalStructValue(t, ptr, t.name)
+    if err.message != "" {
+        return "", err
+    }
+    return MarshalNode(root), errors.None()
+}
+
+// xmlParseScalar parses text into the scalar storage at addr, matching
+// the type names xmlScalarText writes.
+fn xmlParseScalar(addr: int64, tn: string, text: string, fname: string) -> errors.Error {
+    s := str.Trim(text)
+    isz := xmlIntSize(tn)
+    if isz == 4 {
+        v, ok := strconv.ParseInt(s)
+        if !ok {
+            return errors.New(str.Concat(str.Concat("xml: cannot parse int for field \"", fname), "\""))
+        }
+        reflect.WriteInt(addr, v)
+        return errors.None()
+    }
+    if isz == 8 {
+        v, ok := strconv.ParseInt64(s)
+        if !ok {
+            return errors.New(str.Concat(str.Concat("xml: cannot parse int64 for field \"", fname), "\""))
+        }
+        reflect.WriteInt64(addr, v)
+        return errors.None()
+    }
+    if isz > 0 {
+        v, ok := strconv.ParseInt(s)
+        if !ok {
+            return errors.New(str.Concat(str.Concat("xml: cannot parse integer for field \"", fname), "\""))
+        }
+        if isz == 2 {
+            reflect.WriteInt16(addr, v)
+        } else {
+            reflect.WriteInt8(addr, v)
+        }
+        return errors.None()
+    }
+    if str.Equal(tn, "string") {
+        reflect.WriteString(addr, text)
+        return errors.None()
+    }
+    if str.Equal(tn, "float") || str.Equal(tn, "double") {
+        v, ok := strconv.ParseFloat(s)
+        if !ok {
+            return errors.New(str.Concat(str.Concat("xml: cannot parse float for field \"", fname), "\""))
+        }
+        reflect.WriteFloat(addr, v)
+        return errors.None()
+    }
+    if str.Equal(tn, "bool") {
+        v, ok := strconv.ParseBool(s)
+        if !ok {
+            return errors.New(str.Concat(str.Concat("xml: cannot parse bool for field \"", fname), "\""))
+        }
+        reflect.WriteBool(addr, v)
+        return errors.None()
+    }
+    if xmlBytesType(tn) {
+        dec, derr := base64.Decode(s)
+        if derr.message != "" {
+            return derr
+        }
+        reflect.WriteString(addr, dec)
+        return errors.None()
+    }
+    return xmlUnsupportedFieldErr(reflect.Field{name: fname, type_name: tn, offset: 0, tag: "", typ: reflect.EmptyType()})
+}
+
+// xmlFindChildren collects the direct children of node whose tag
+// matches name — the lookup used for both scalar and slice fields.
+fn xmlFindChildren(node: Node, name: string) -> []Node {
+    var found []Node
+    for i := 0; i < len(node.children); i = i + 1 {
+        if str.Equal(node.children[i].tag, name) {
+            found = append(found, node.children[i])
+        }
+    }
+    return found
+}
+
+// xmlUnmarshalVal writes one child element into the reflected storage
+// at addr, dispatching on f.type_name.
+fn xmlUnmarshalVal(addr: int64, f: reflect.Field, node: Node) -> errors.Error {
+    tn := f.type_name
+    nt, isStruct := reflect.NestedType(f)
+    if isStruct {
+        return xmlUnmarshalStructValue(nt, addr, node)
+    }
+    if xmlIsScalar(tn) {
+        return xmlParseScalar(addr, tn, node.text, f.name)
+    }
+    return xmlUnsupportedFieldErr(f)
+}
+
+// xmlUnmarshalStructValue writes a Node's children/attributes into the
+// struct at addr — the recursion target shared by UnmarshalInto and
+// nested fields.
+fn xmlUnmarshalStructValue(t: reflect.Type, addr: int64, node: Node) -> errors.Error {
+    n := reflect.FieldCount(t)
+    for i := 0; i < n; i = i + 1 {
+        f := reflect.FieldByIndex(t, i)
+        if reflect.TagHasFlag(f.tag, "xml", "ignore") {
+            continue
+        }
+        faddr := reflect.FieldAddr(addr, f)
+        an, isAttr := xmlAttrName(f)
+        if isAttr {
+            if !xmlIsScalar(f.type_name) {
+                return errors.New(str.Concat(str.Concat("xml: [xml(attr)] field \"", f.name), "\" must be a scalar type"))
+            }
+            av := node.Attr(an)
+            if str.Len(av) > 0 {
+                err := xmlParseScalar(faddr, f.type_name, av, f.name)
+                if err.message != "" {
+                    return err
+                }
+            }
+            continue
+        }
+        name := xmlFieldName(f)
+        kids := xmlFindChildren(node, name)
+        if len(kids) == 0 {
+            // Pointer field left nil by absent element.
+            continue
+        }
+        tn := f.type_name
+        if str.StartsWith(tn, "*") {
+            ef := xmlElemField(f)
+            p := reflect.Alloc(int64(xmlValSize(ef)))
+            reflect.WritePtr(faddr, p)
+            err := xmlUnmarshalVal(p, ef, kids[0])
+            if err.message != "" {
+                return err
+            }
+            continue
+        }
+        if str.StartsWith(tn, "[]") && !xmlBytesType(tn) {
+            m := len(kids)
+            ef := xmlElemField(f)
+            esz := xmlValSize(ef)
+            data := reflect.Alloc(int64(m * esz))
+            reflect.WritePtr(faddr, reflect.MakeSlice(data, m))
+            for k := 0; k < m; k = k + 1 {
+                err := xmlUnmarshalVal(data + int64(k * esz), ef, kids[k])
+                if err.message != "" {
+                    return err
+                }
+            }
+            continue
+        }
+        err := xmlUnmarshalVal(faddr, f, kids[0])
+        if err.message != "" {
+            return err
+        }
+    }
+    return errors.None()
+}
+
+// UnmarshalInto parses s as an XML document and writes matching
+// elements/attributes into the struct at ptr (pass int64(&obj)) using
+// the reflected type t:
+//
+//   err := xml.UnmarshalInto(data, reflect.TypeOf<User>(u), int64(&u))
+//
+// (Named UnmarshalInto because xml.Unmarshal is the existing Node-tree
+// parser.) Absent elements leave fields unchanged; unknown elements
+// are ignored; absent pointer elements stay nil. Honours [xml(name=x)],
+// [xml(attr)], [xml(ignore)], and [xml(omitempty)].
+pub fn UnmarshalInto(s: string, t: reflect.Type, ptr: int64) -> errors.Error {
+    root, err := Unmarshal(s)
+    if err.message != "" {
+        return err
+    }
+    return xmlUnmarshalStructValue(t, ptr, root)
 }

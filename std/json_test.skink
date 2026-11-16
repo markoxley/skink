@@ -205,7 +205,7 @@ pub struct TaggedUser {
 // BadJSON has an unmappable field type; MarshalStruct must reject it.
 pub struct BadJSON {
     id: int64
-    tags: []string
+    table: map[string]int
 }
 
 // TestMarshalStruct verifies object output honors renames and ignores.
@@ -256,9 +256,9 @@ pub fn TestMarshalStructUnsupported() {
     var b BadJSON
     _, err := json.MarshalStruct(reflect.TypeOf<BadJSON>(b), int64(&b))
     if err.message == "" {
-        Errorf("MarshalStruct should reject a slice field")
+        Errorf("MarshalStruct should reject a map field")
     }
-    if str.Contains(err.message, "tags") == false {
+    if str.Contains(err.message, "table") == false {
         Errorf("error should name the offending field")
     }
 }
@@ -341,4 +341,151 @@ pub fn TestValueKindAccessor() {
     e := json.ObjectGet(v, "e")
     f := json.ObjectGet(e, "f")
     AssertEqualInt(json.KIND_NULL, json.Kind(f), "null kind")
+}
+
+// --- Recursive struct marshal/unmarshal (nested, slices, pointers) ---
+// Guards the reflect.Field.typ metadata path added so json.Marshal and
+// json.UnmarshalInto recurse through struct-valued fields.
+
+// NestedAddr is a nested-struct target for recursion tests.
+pub struct NestedAddr {
+    city: string
+    zip: int
+}
+
+// RecursiveUser exercises nested structs, slices of scalars, slices of
+// structs, pointers, narrow integers, and byte buffers in one shape.
+pub struct RecursiveUser {
+    name: string
+    addr: NestedAddr
+    scores: []int
+    tags: []string
+    prev: []NestedAddr
+    manager: *NestedAddr
+    level: int8
+    code: int16
+    blob: []byte
+}
+
+// TestMarshalNested guards the nested-struct recursion regression —
+// json.Marshal must emit the inner object inline, not error.
+pub fn TestMarshalNested() {
+    var u RecursiveUser
+    u.name = "Neo"
+    u.addr.city = "Zion"
+    u.addr.zip = 10101
+    u.level = int8(3)
+    u.code = int16(7)
+    s, err := json.Marshal(reflect.TypeOf<RecursiveUser>(u), int64(&u))
+    if err.message != "" {
+        Errorf("Marshal with nested struct should succeed")
+        return
+    }
+    if str.Contains(s, "\"addr\":{\"city\":\"Zion\",\"zip\":10101}") == false {
+        Errorf("nested struct should marshal as an inline object")
+    }
+    if str.Contains(s, "\"level\":3") == false {
+        Errorf("int8 field should marshal")
+    }
+    if str.Contains(s, "\"code\":7") == false {
+        Errorf("int16 field should marshal")
+    }
+    if str.Contains(s, "\"manager\":null") == false {
+        Errorf("nil pointer field should marshal as null")
+    }
+    if str.Contains(s, "\"scores\":[]") == false {
+        Errorf("empty slice should marshal as []")
+    }
+}
+
+// TestMarshalSliceFields guards the slice-field regression — []int,
+// []string, and []struct elements all marshal as JSON arrays.
+pub fn TestMarshalSliceFields() {
+    var u RecursiveUser
+    u.scores = append(u.scores, 10)
+    u.scores = append(u.scores, 20)
+    u.tags = append(u.tags, "x")
+    var a NestedAddr
+    a.city = "c1"
+    u.prev = append(u.prev, a)
+    s, err := json.Marshal(reflect.TypeOf<RecursiveUser>(u), int64(&u))
+    if err.message != "" {
+        Errorf("Marshal with slices should succeed")
+        return
+    }
+    if str.Contains(s, "\"scores\":[10,20]") == false {
+        Errorf("[]int should marshal as a number array")
+    }
+    if str.Contains(s, "\"tags\":[\"x\"]") == false {
+        Errorf("[]string should marshal as a string array")
+    }
+    if str.Contains(s, "\"prev\":[{\"city\":\"c1\",\"zip\":0}]") == false {
+        Errorf("[]struct should marshal as an object array")
+    }
+}
+
+// TestUnmarshalNestedRoundTrip guards the full recursive round trip —
+// nested objects, slices, pointer fields, and byte buffers must come
+// back identical after Marshal + UnmarshalInto.
+pub fn TestUnmarshalNestedRoundTrip() {
+    var src RecursiveUser
+    src.name = "Trinity"
+    src.addr.city = "Metro"
+    src.addr.zip = 555
+    src.scores = append(src.scores, 3)
+    src.scores = append(src.scores, 14)
+    src.tags = append(src.tags, "ops")
+    var p NestedAddr
+    p.city = "HQ"
+    p.zip = 9
+    src.prev = append(src.prev, p)
+    var m NestedAddr
+    m.city = "Mgmt"
+    src.manager = &m
+    src.level = int8(9)
+    src.code = int16(640)
+    s, err := json.Marshal(reflect.TypeOf<RecursiveUser>(src), int64(&src))
+    if err.message != "" {
+        Errorf("marshal should succeed")
+        return
+    }
+    var dst RecursiveUser
+    err = json.UnmarshalInto(s, reflect.TypeOf<RecursiveUser>(dst), int64(&dst))
+    if err.message != "" {
+        Errorf("UnmarshalInto should succeed on nested input")
+        return
+    }
+    if str.Equal(dst.addr.city, "Metro") == false || dst.addr.zip != 555 {
+        Errorf("nested struct should round-trip")
+    }
+    if len(dst.scores) != 2 || dst.scores[1] != 14 {
+        Errorf("[]int should round-trip")
+    }
+    if len(dst.tags) != 1 || str.Equal(dst.tags[0], "ops") == false {
+        Errorf("[]string should round-trip")
+    }
+    if len(dst.prev) != 1 || str.Equal(dst.prev[0].city, "HQ") == false || dst.prev[0].zip != 9 {
+        Errorf("[]struct should round-trip")
+    }
+    if dst.manager == nil || str.Equal(dst.manager.city, "Mgmt") == false {
+        Errorf("pointer field should round-trip")
+    }
+    if dst.level != int8(9) || dst.code != int16(640) {
+        Errorf("narrow int fields should round-trip")
+    }
+}
+
+// TestUnmarshalNullPointer guards the explicit-null pointer regression:
+// JSON null must nil out a previously-set pointer field.
+pub fn TestUnmarshalNullPointer() {
+    var u RecursiveUser
+    var m NestedAddr
+    u.manager = &m
+    err := json.UnmarshalInto("{\"manager\":null}", reflect.TypeOf<RecursiveUser>(u), int64(&u))
+    if err.message != "" {
+        Errorf("unmarshal should succeed")
+    }
+    if u.manager != nil {
+        Errorf("JSON null should nil the pointer field")
+    }
 }
