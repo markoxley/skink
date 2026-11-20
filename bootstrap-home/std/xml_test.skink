@@ -162,7 +162,7 @@ pub fn TestXmlMarshalStruct() {
     u.tags = append(u.tags, "one")
     u.tags = append(u.tags, "two")
     u.level = int8(5)
-    s, err := xml.Marshal(reflect.TypeOf<XmlUser>(u), int64(&u))
+    s, err := xml.MarshalStruct(reflect.TypeOf<XmlUser>(u), int64(&u))
     if err.message != "" {
         Errorf("xml.Marshal should succeed")
         return
@@ -197,13 +197,13 @@ pub fn TestXmlStructRoundTrip() {
     var d XmlAddr
     d.city = "dep"
     src.deputy = &d
-    s, err := xml.Marshal(reflect.TypeOf<XmlUser>(src), int64(&src))
+    s, err := xml.MarshalStruct(reflect.TypeOf<XmlUser>(src), int64(&src))
     if err.message != "" {
         Errorf("marshal should succeed")
         return
     }
     var dst XmlUser
-    err = xml.UnmarshalInto(s, reflect.TypeOf<XmlUser>(dst), int64(&dst))
+    err = xml.UnmarshalStruct(s, reflect.TypeOf<XmlUser>(dst), int64(&dst))
     if err.message != "" {
         Errorf("UnmarshalInto should succeed on own output")
         return
@@ -228,8 +228,60 @@ pub fn TestXmlStructRoundTrip() {
 // TestXmlUnmarshalIntoBad verifies malformed input errors.
 pub fn TestXmlUnmarshalIntoBad() {
     var u XmlUser
-    err := xml.UnmarshalInto("not xml <<<", reflect.TypeOf<XmlUser>(u), int64(&u))
+    err := xml.UnmarshalStruct("not xml <<<", reflect.TypeOf<XmlUser>(u), int64(&u))
     if err.message == "" {
         Errorf("malformed XML should error")
+    }
+}
+
+
+// TestXmlMarshalAutoAPI covers the pointer-only xml.Marshal(&obj) call —
+// the emitter synthesizes (reflect.Type, ptr) at the call site and
+// forwards to MarshalStruct.
+pub fn TestXmlMarshalAutoAPI() {
+    var u XmlUser
+    u.name = "Ada"
+    u.level = 3
+    s, err := xml.Marshal(&u)
+    if err.message != "" {
+        Errorf("xml.Marshal(&u) should succeed")
+    }
+    if str.Contains(s, "<XmlUser") == false {
+        Errorf("xml.Marshal(&u) should emit the root element")
+    }
+    if str.Contains(s, "<display_name>Ada</display_name>") == false {
+        Errorf("xml.Marshal(&u) should emit the renamed field")
+    }
+}
+
+// TestXmlAutoAPIRoundTrip covers UnmarshalInto(data, &obj) — the
+// two-argument pointer form with auto-injected type+ptr.
+pub fn TestXmlAutoAPIRoundTrip() {
+    var u XmlUser
+    u.name = "round"
+    u.level = 7
+    var w XmlAddr
+    w.city = "srv"
+    w.zip = 99
+    u.addr = w
+    u.tags = append(u.tags, "x")
+    u.tags = append(u.tags, "y")
+    s, err := xml.Marshal(&u)
+    if err.message != "" {
+        Errorf("xml.Marshal(&u) should succeed")
+    }
+    var dst XmlUser
+    err = xml.UnmarshalInto(s, &dst)
+    if err.message != "" {
+        Errorf("xml.UnmarshalInto(s, &dst) should succeed")
+    }
+    if str.Equal(dst.name, "round") == false || dst.level != 7 {
+        Errorf("round trip should preserve scalars")
+    }
+    if str.Equal(dst.addr.city, "srv") == false || dst.addr.zip != 99 {
+        Errorf("round trip should preserve the nested struct")
+    }
+    if len(dst.tags) != 2 || str.Equal(dst.tags[1], "y") == false {
+        Errorf("round trip should preserve the repeated elements")
     }
 }

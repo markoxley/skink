@@ -1037,14 +1037,16 @@ fn marshalStructValue(t: reflect.Type, addr: int64) -> (Value, errors.Error) {
     return FromObject(keys, vals), errors.None()
 }
 
-// Marshal serializes the struct at ptr (pass int64(&obj)) to a JSON
-// object string, reading fields through the reflected type t:
+// Marshal serializes the struct pointed to by obj to a JSON object
+// string:
 //
-//   s, err := json.Marshal(reflect.TypeOf<User>(u), int64(&u))
+//   s, err := json.Marshal(&u)
 //
+// The compiler auto-injects the reflected type and object address at
+// the call site (emitAutoMarshalCall in std/emitter.skink); the `any`
+// parameter only satisfies the checker and is replaced by the injection.
 // The returned string is Skink's byte-buffer type — equivalent to
-// ([]byte, error) in other languages; Skink's checker keeps string and
-// []byte distinct, and string is the marshalling norm across std.
+// ([]byte, error) elsewhere.
 //
 // Supported field types: every integer width, float/double, bool,
 // string, byte buffers ([]int8/[]uint8/bytes, base64-encoded like
@@ -1057,18 +1059,20 @@ fn marshalStructValue(t: reflect.Type, addr: int64) -> (Value, errors.Error) {
 //   [json(name=x)]    rename the key to x
 //   [json(ignore)]    omit the field entirely
 //   [json(omitempty)] omit the field when it holds its zero value
-pub fn Marshal(t: reflect.Type, ptr: int64) -> (string, errors.Error) {
+pub fn Marshal(obj: any) -> (string, errors.Error) {
+    return "", errors.New("json.Marshal: compiler did not inject reflected arguments — report a bug")
+}
+
+// MarshalStruct serializes the struct at ptr (pass int64(&obj)) to a
+// JSON object string using the explicitly supplied reflected type t —
+// the low-level entry point Marshal auto-injects to, also useful when
+// marshalling through a reflect.Type obtained by other means.
+pub fn MarshalStruct(t: reflect.Type, ptr: int64) -> (string, errors.Error) {
     v, err := marshalStructValue(t, ptr)
     if err.message != "" {
         return "", err
     }
     return MarshalValue(v), errors.None()
-}
-
-// MarshalStruct is the pre-0.3 name for Marshal — kept for
-// compatibility, identical behavior.
-pub fn MarshalStruct(t: reflect.Type, ptr: int64) -> (string, errors.Error) {
-    return Marshal(t, ptr)
 }
 
 // unmarshalVal writes one JSON value into the reflected storage at
@@ -1178,14 +1182,15 @@ fn unmarshalStructValue(t: reflect.Type, addr: int64, v: Value) -> errors.Error 
     return errors.None()
 }
 
-// UnmarshalInto parses s as a JSON object and writes each matching key
-// into the struct at ptr (pass int64(&obj)) using the reflected type t:
+// UnmarshalInto parses data as a JSON object and writes each matching
+// key into the struct pointed to by obj:
 //
-//   err := json.UnmarshalInto(data, reflect.TypeOf<User>(u), int64(&u))
+//   err := json.UnmarshalInto(data, &u)
 //
-// (UnmarshalInto rather than Unmarshal because json.Unmarshal is the
-// existing Value-tree parser; s is Skink's string byte-buffer type —
-// the equivalent of data []byte elsewhere.)
+// Like Marshal, the compiler auto-injects (reflect.Type, ptr) at the
+// call site; this stub exists only for the checker. (UnmarshalInto
+// rather than Unmarshal because json.Unmarshal is the existing
+// Value-tree parser.)
 //
 // Supports the same field-type matrix as Marshal: integers of every
 // width, float/double, bool, string, base64 byte buffers, pointers
@@ -1193,7 +1198,15 @@ fn unmarshalStructValue(t: reflect.Type, addr: int64, v: Value) -> errors.Error 
 // Keys not present in the JSON leave their fields unchanged; JSON keys
 // with no matching field are ignored. Honours [json(name=x)] and
 // [json(ignore)].
-pub fn UnmarshalInto(s: string, t: reflect.Type, ptr: int64) -> errors.Error {
+pub fn UnmarshalInto(data: string, obj: any) -> errors.Error {
+    return errors.New("json.UnmarshalInto: compiler did not inject reflected arguments — report a bug")
+}
+
+// UnmarshalStruct parses s as a JSON object and writes each matching
+// key into the struct at ptr (pass int64(&obj)) using the explicitly
+// supplied reflected type t — the low-level entry point UnmarshalInto
+// auto-injects to.
+pub fn UnmarshalStruct(s: string, t: reflect.Type, ptr: int64) -> errors.Error {
     v, err := Unmarshal(s)
     if err.message != "" {
         return err

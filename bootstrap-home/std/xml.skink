@@ -696,14 +696,30 @@ fn xmlMarshalStructValue(t: reflect.Type, addr: int64, tag: string) -> (Node, er
     return root, errors.None()
 }
 
-// Marshal serializes the struct at ptr (pass int64(&obj)) to an XML
-// document string, reading fields through the reflected type t:
+// Marshal serializes the struct pointed to by obj to an XML document
+// string:
 //
-//   s, err := xml.Marshal(reflect.TypeOf<User>(u), int64(&u))
+//   s, err := xml.Marshal(&obj)
+//
+// The compiler auto-injects the reflected type and object address at
+// the call site (emitAutoMarshalCall in std/emitter.skink); the `any`
+// parameter only satisfies the checker and is replaced by the injection.
+// The root element is named after the struct type; fields map to child
+// elements (or attributes via [xml(attr)]) as documented for
+// MarshalStruct.
+pub fn Marshal(obj: any) -> (string, errors.Error) {
+    return "", errors.New("xml.Marshal: compiler did not inject reflected arguments — report a bug")
+}
+
+// MarshalStruct serializes the struct at ptr (pass int64(&obj)) to an
+// XML document string using the explicitly supplied reflected type t —
+// the low-level entry point Marshal auto-injects to:
+//
+//   s, err := xml.MarshalStruct(reflect.TypeOf<User>(u), int64(&u))
 //
 // The root element is named after the struct type; fields map to child
 // elements (or attributes via [xml(attr)]) as documented above.
-pub fn Marshal(t: reflect.Type, ptr: int64) -> (string, errors.Error) {
+pub fn MarshalStruct(t: reflect.Type, ptr: int64) -> (string, errors.Error) {
     root, err := xmlMarshalStructValue(t, ptr, t.name)
     if err.message != "" {
         return "", err
@@ -875,7 +891,20 @@ fn xmlUnmarshalStructValue(t: reflect.Type, addr: int64, node: Node) -> errors.E
 // parser.) Absent elements leave fields unchanged; unknown elements
 // are ignored; absent pointer elements stay nil. Honours [xml(name=x)],
 // [xml(attr)], [xml(ignore)], and [xml(omitempty)].
-pub fn UnmarshalInto(s: string, t: reflect.Type, ptr: int64) -> errors.Error {
+// UnmarshalInto parses data and writes matching fields into the
+// struct pointed to by obj:
+//
+//   err := xml.UnmarshalInto(data, &obj)
+//
+// Like Marshal, the compiler auto-injects (reflect.Type, ptr) at the
+// call site; this stub only satisfies the checker. (UnmarshalInto
+// rather than Unmarshal because xml.Unmarshal is the existing
+// tree parser.)
+pub fn UnmarshalInto(data: string, obj: any) -> errors.Error {
+    return errors.New("xml.UnmarshalInto: compiler did not inject reflected arguments — report a bug")
+}
+
+pub fn UnmarshalStruct(s: string, t: reflect.Type, ptr: int64) -> errors.Error {
     root, err := Unmarshal(s)
     if err.message != "" {
         return err

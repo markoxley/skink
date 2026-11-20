@@ -2887,6 +2887,100 @@ fn emitReflectTypeInto(cg: *CodeGen, typeName: string, destPtr: string, depth: i
     }
 }
 
+// emitAutoMarshalCall implements the auto-injected marshal calls:
+//   json.Marshal(&obj)              → json.MarshalStruct(Type, int64(&obj))
+//   json.UnmarshalInto(s, &obj)     → json.UnmarshalStruct(s, Type, int64(&obj))
+// (likewise for yaml. and xml.). Skink generics require explicit type
+// arguments, so the stdlib declares these as `any`-typed stubs; this
+// routine synthesizes the reflected arguments at the call site — the
+// same mechanism emitReflectTypeOf uses for TypeOf.
+fn emitAutoMarshalCall(cg: *CodeGen, e: ast.Expr, mod: string, isMarshal: bool) -> string {
+    argExpr := e.callArgs[0]
+    if !isMarshal {
+        argExpr = e.callArgs[1]
+    }
+
+    // Resolve the pointee type name ("*U"/"*mod.U" → "U"/"mod.U").
+    argLL := exprLLType(cg, argExpr)
+
+    // The stub takes `any`, so non-pointer arguments type-check but are
+    // meaningless here — diagnose at compile time instead of emitting
+    // invalid ptrtoint IR or silently marshalling garbage.
+    if !str.EndsWith(argLL, "*") {
+        which := "Marshal"
+        if !isMarshal {
+            which = "UnmarshalInto"
+        }
+        errorf(cg, str.Concat(mod, str.Concat(".", str.Concat(which, str.Concat(" requires a pointer argument (try ", str.Concat(which, "(&obj))"))))))
+        return "0"
+    }
+
+    // Prefer the checker's semantic name for the stored Type.name —
+    // skinkTypeName falls back to the LLVM name ("mod_T") for named
+    // types, while TypeOf reports the spelled name ("T"/"mod.T").
+    typeName := reflectNestedBase(llTypeToSkinkName(argLL))
+    argSk := exprSkinkType(cg, argExpr)
+    if argSk.kind == checker.TK_NAMED {
+        argSk = resolveAliasCG(cg, argSk)
+    }
+    for argSk.kind == checker.TK_POINTER || argSk.kind == checker.TK_ARRAY {
+        argSk = checker.typeOptT(argSk.elem)
+        if argSk.kind == checker.TK_NAMED {
+            argSk = resolveAliasCG(cg, argSk)
+        }
+    }
+    if argSk.kind == checker.TK_NAMED && str.Len(argSk.name) > 0 {
+        typeName = argSk.name
+        // Same-module types are named unqualified in TypeOf — strip the
+        // caller's own module prefix so both paths agree (e.g. the XML
+        // root element is <User>, not <mytest.User>).
+        prefix := str.Concat(cg.currentModule, ".")
+        if str.Len(cg.currentModule) > 0 && str.StartsWith(typeName, prefix) {
+            typeName = str.Substr(typeName, str.Len(prefix), str.Len(typeName) - str.Len(prefix))
+        }
+    }
+
+    // Build the reflect.Type value on the stack. Skink passes struct
+    // arguments by pointer, so the callee takes %struct.reflect_Type*
+    // and the alloca is forwarded directly (no load).
+    typeAlloca := nextReg(cg)
+    emitln(cg, concatMany([]string{"  ", typeAlloca, " = alloca %struct.reflect_Type"}))
+    emitReflectTypeInto(cg, typeName, typeAlloca, 0)
+
+    // The argument expression is already a *T pointer; convert to int64.
+    argReg := emitExpression(cg, argExpr)
+    ptrReg := nextReg(cg)
+    emitfmt(cg, "  %s = ptrtoint %s %s to i64\n", []string{ptrReg, argLL, argReg})
+
+    var args []string
+    if isMarshal {
+        args = append(args, str.Concat("%struct.reflect_Type* ", typeAlloca))
+        args = append(args, str.Concat("i64 ", ptrReg))
+    } else {
+        sReg := emitExpression(cg, e.callArgs[0])
+        sLL := exprLLType(cg, e.callArgs[0])
+        args = append(args, str.Concat(sLL, str.Concat(" ", sReg)))
+        args = append(args, str.Concat("%struct.reflect_Type* ", typeAlloca))
+        args = append(args, str.Concat("i64 ", ptrReg))
+    }
+
+    // Forward to the explicit (t, ptr) entry point.
+    target := str.Concat(mod, ".MarshalStruct")
+    if !isMarshal {
+        target = str.Concat(mod, ".UnmarshalStruct")
+    }
+    retType := "void"
+    hasFn := mapStringStringSliceHasKeyCG(cg.fnRetTypes, target)
+    if hasFn && len(cg.fnRetTypes[target]) > 0 {
+        if len(cg.fnRetTypes[target]) > 1 {
+            retType = aggregateRetType(cg.fnRetTypes[target])
+        } else {
+            retType = cg.fnRetTypes[target][0]
+        }
+    }
+    return emitCall(cg, retType, target, args)
+}
+
 // emitRegisterRuleCall handles registerRule calls on rulesets by generating
 // wrapper functions for the dynamic rule source's triggered/Action/start/stop
 // methods, then calling registerRule with the source pointer + wrappers.
@@ -8190,6 +8284,30 @@ fn emitCallExpr(cg: *CodeGen, e: ast.Expr) -> string {
             }
             if str.Equal(recvName, "reflect") {
                 return emitReflectTypeOf(cg, e)
+            }
+        }
+        // Auto-marshal interception: json/yaml/xml.Marshal(&obj) and
+        // .UnmarshalInto(data, &obj) synthesize (reflect.Type, ptr) at the
+        // call site — the `any`-typed stubs cannot recover them inside
+        // the callee — then forward to MarshalStruct/UnmarshalStruct.
+        if str.Equal(fnExpr.fieldName, "Marshal") || str.Equal(fnExpr.fieldName, "UnmarshalInto") {
+            recvName := ""
+            if fnExpr.fieldTarget[0].kind == ast.EX_IDENT {
+                recvName = fnExpr.fieldTarget[0].ident
+            }
+            // Resolve import aliases ("js" -> "json") so aliased module
+            // calls get the same auto-injection.
+            modName := resolveImportAliasCG(cg, recvName)
+            if (str.Equal(modName, "json") || str.Equal(modName, "yaml") || str.Equal(modName, "xml")) && str.Len(recvName) > 0 {
+                _, isLocal := lookupVar(cg, recvName)
+                if !isLocal {
+                    if str.Equal(fnExpr.fieldName, "Marshal") && len(e.callArgs) == 1 {
+                        return emitAutoMarshalCall(cg, e, modName, true)
+                    }
+                    if str.Equal(fnExpr.fieldName, "UnmarshalInto") && len(e.callArgs) == 2 {
+                        return emitAutoMarshalCall(cg, e, modName, false)
+                    }
+                }
             }
         }
         return emitMethodCall(cg, e)

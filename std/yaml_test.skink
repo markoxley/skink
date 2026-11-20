@@ -190,7 +190,7 @@ pub fn TestYamlMarshalStruct() {
     c.ports = append(c.ports, 80)
     c.ports = append(c.ports, 443)
     c.level = int8(2)
-    s, err := yaml.Marshal(reflect.TypeOf<YamlConfig>(c), int64(&c))
+    s, err := yaml.MarshalStruct(reflect.TypeOf<YamlConfig>(c), int64(&c))
     if err.message != "" {
         Errorf("yaml.Marshal should succeed")
         return
@@ -229,13 +229,13 @@ pub fn TestYamlStructRoundTrip() {
     f.city = "fb"
     f.zip = 9
     src.fallback = &f
-    s, err := yaml.Marshal(reflect.TypeOf<YamlConfig>(src), int64(&src))
+    s, err := yaml.MarshalStruct(reflect.TypeOf<YamlConfig>(src), int64(&src))
     if err.message != "" {
         Errorf("marshal should succeed")
         return
     }
     var dst YamlConfig
-    err = yaml.UnmarshalInto(s, reflect.TypeOf<YamlConfig>(dst), int64(&dst))
+    err = yaml.UnmarshalStruct(s, reflect.TypeOf<YamlConfig>(dst), int64(&dst))
     if err.message != "" {
         Errorf("UnmarshalInto should succeed on own output")
         return
@@ -266,8 +266,64 @@ pub fn TestYamlStructRoundTrip() {
 // TestYamlUnmarshalIntoBad verifies malformed and non-mapping input errors.
 pub fn TestYamlUnmarshalIntoBad() {
     var c YamlConfig
-    err := yaml.UnmarshalInto("- 1\n- 2\n", reflect.TypeOf<YamlConfig>(c), int64(&c))
+    err := yaml.UnmarshalStruct("- 1\n- 2\n", reflect.TypeOf<YamlConfig>(c), int64(&c))
     if err.message == "" {
         Errorf("non-mapping YAML should error")
+    }
+}
+
+
+// TestYamlMarshalAutoAPI covers the pointer-only yaml.Marshal(&obj)
+// call — the emitter synthesizes (reflect.Type, ptr) at the call site
+// and forwards to MarshalStruct.
+pub fn TestYamlMarshalAutoAPI() {
+    var c YamlConfig
+    c.name = "svc"
+    c.level = 5
+    var a YamlAddr
+    a.city = "york"
+    a.zip = 7001
+    c.addr = a
+    s, err := yaml.Marshal(&c)
+    if err.message != "" {
+        Errorf("yaml.Marshal(&c) should succeed")
+    }
+    if str.Contains(s, "display_name: svc") == false {
+        Errorf("yaml.Marshal(&c) should emit the renamed field")
+    }
+    if str.Contains(s, "addr:") == false {
+        Errorf("yaml.Marshal(&c) should emit the nested struct")
+    }
+}
+
+// TestYamlAutoAPIRoundTrip covers UnmarshalInto(data, &obj) —
+// the two-argument pointer form with auto-injected type+ptr.
+pub fn TestYamlAutoAPIRoundTrip() {
+    var c YamlConfig
+    c.name = "round"
+    c.level = 4
+    var a YamlAddr
+    a.city = "h"
+    a.zip = 42
+    c.addr = a
+    c.ports = append(c.ports, 1)
+    c.ports = append(c.ports, 2)
+    s, err := yaml.Marshal(&c)
+    if err.message != "" {
+        Errorf("yaml.Marshal(&c) should succeed")
+    }
+    var dst YamlConfig
+    err = yaml.UnmarshalInto(s, &dst)
+    if err.message != "" {
+        Errorf("yaml.UnmarshalInto(s, &dst) should succeed")
+    }
+    if str.Equal(dst.name, "round") == false || dst.level != 4 {
+        Errorf("round trip should preserve scalars")
+    }
+    if str.Equal(dst.addr.city, "h") == false || dst.addr.zip != 42 {
+        Errorf("round trip should preserve the nested struct")
+    }
+    if len(dst.ports) != 2 || dst.ports[0] != 1 || dst.ports[1] != 2 {
+        Errorf("round trip should preserve the slice")
     }
 }
