@@ -24,6 +24,7 @@
 module compiler_expr_test
 
 import "testing"
+import "std/errors"
 
 // === If Expressions ===
 
@@ -481,4 +482,62 @@ fn createPtr(val: int) -> *int {
     buf := make([]int, 1)
     buf[0] = val
     return &buf[0]
+}
+
+// === Ternary Operator (cond ? a : b) ===
+// Regression coverage for the `?:` infix, which the parser lowers to
+// EX_IF_EXPR. `?` shares its token with postfix error-prop (expr?), so
+// these tests also guard the disambiguation: a ternary is recognized
+// only when an expression follows `?` and a `:` completes it.
+
+// TestTernaryBasic verifies the two branches select correctly.
+pub fn TestTernaryBasic() {
+    testing.AssertEqualString("pos", 1 > 0 ? "pos" : "neg", "ternary true branch")
+    testing.AssertEqualString("neg", 1 < 0 ? "pos" : "neg", "ternary false branch")
+}
+
+// TestTernaryPrecedence verifies `?` binds looser than comparison and
+// arithmetic operators (C-style): `x > 0 ? a : b` must parse the whole
+// `x > 0` as the condition, not `x > (0 ? a : b)`.
+pub fn TestTernaryPrecedence() {
+    x := 5
+    testing.AssertEqualInt(10, x > 3 ? x * 2 : 0, "comparison condition")
+    testing.AssertEqualInt(15, (2 > 1 ? 10 : 20) + 5, "ternary inside binary op")
+    testing.AssertEqualBool(true, x > 0 && x < 10 ? true : false, "&& condition")
+}
+
+// TestTernaryNested verifies right-associativity and nesting in the
+// then-branch: `a ? b : c ? d : e` parses as `a ? b : (c ? d : e)`.
+pub fn TestTernaryNested() {
+    testing.AssertEqualInt(2, false ? 1 : true ? 2 : 3, "right-assoc chain")
+    testing.AssertEqualInt(5, true ? (false ? 4 : 5) : 6, "nested then-branch")
+}
+
+// TestTernaryCallArg verifies ternary inside call arguments and return.
+pub fn TestTernaryCallArg() {
+    testing.AssertEqualInt(49, mightFail(true) + (mightFail(false) == 0 ? 7 : 0), "ternary in call arg context")
+    testing.AssertEqualInt(7, ternaryReturn(true), "ternary in return")
+}
+
+fn ternaryReturn(flag: bool) -> int {
+    return flag ? 7 : 9
+}
+
+// TestErrorPropStillWorks verifies postfix `expr?` error-propagation is
+// unaffected by the ternary sharing the `?` token.
+pub fn TestErrorPropStillWorks() {
+    v, err := errorPropCaller()
+    testing.AssertEqualString("", err.message, "error prop should not fail")
+    testing.AssertEqualInt(42, v, "error prop returns value")
+}
+
+// errorPropCaller exercises `f()?` — the enclosing fn must return an
+// error for `?` to be legal.
+fn errorPropCaller() -> (int, errors.Error) {
+    v := errorPropHelper()?
+    return v, errors.None()
+}
+
+fn errorPropHelper() -> (int, errors.Error) {
+    return 42, errors.None()
 }

@@ -36,22 +36,23 @@ import "std/ast"
 const {
     PREC_LOWEST = 0
     PREC_ASSIGN = 1
-    PREC_RANGE = 2
-    PREC_OR = 3
-    PREC_AND = 4
-    PREC_BITOR = 5
-    PREC_BITXOR = 6
-    PREC_BITAND = 7
-    PREC_EQUALS = 8
-    PREC_LESSGREATER = 9
-    PREC_SHIFT = 10
-    PREC_SUM = 11
-    PREC_PRODUCT = 12
-    PREC_POWER = 13
-    PREC_PREFIX = 14
-    PREC_POSTFIX = 15
-    PREC_CALL = 16
-    PREC_INDEX = 17
+    PREC_TERNARY = 2   // `cond ? a : b` — binds looser than ||, like C
+    PREC_RANGE = 3
+    PREC_OR = 4
+    PREC_AND = 5
+    PREC_BITOR = 6
+    PREC_BITXOR = 7
+    PREC_BITAND = 8
+    PREC_EQUALS = 9
+    PREC_LESSGREATER = 10
+    PREC_SHIFT = 11
+    PREC_SUM = 12
+    PREC_PRODUCT = 13
+    PREC_POWER = 14
+    PREC_PREFIX = 15
+    PREC_POSTFIX = 16
+    PREC_CALL = 17
+    PREC_INDEX = 18
 }
 
 // === Parser ===
@@ -128,6 +129,55 @@ fn restoreState(p: *Parser, s: ParserState) {
         }
         p.errors = trimmed
     }
+}
+
+// canStartExprToken reports whether a token kind can begin an
+// expression — used to distinguish `cond ? a : b` (expression follows
+// the `?`) from postfix error-prop `expr?` (a boundary token follows).
+// Only the unambiguous boundary kinds are listed; anything else still
+// speculatively parses a ternary branch and backtracks when no `:`
+// follows.
+fn canStartExprToken(kind: int) -> bool {
+    if kind == lexer.T_EOF || kind == lexer.T_NEWLINE ||
+        kind == lexer.T_RPAREN || kind == lexer.T_RBRACE || kind == lexer.T_RBRACKET ||
+        kind == lexer.T_LBRACE ||
+        kind == lexer.T_COMMA || kind == lexer.T_SEMICOLON ||
+        kind == lexer.T_COLON || kind == lexer.T_COLONASS || kind == lexer.T_ASSIGN ||
+        kind == lexer.T_DOT || kind == lexer.T_DOTDOT || kind == lexer.T_ELLIPSIS ||
+        kind == lexer.T_ARROW || kind == lexer.T_QUESTION {
+        return false
+    }
+    // Compound assignments, comparisons, and pure-binary operators can
+    // never open an expression either (prefix-capable &, -, !, ~ are
+    // intentionally NOT listed — `x ? -1 : 1` is valid).
+    if kind == lexer.T_PLUSEQ || kind == lexer.T_MINUSEQ || kind == lexer.T_STAREQ ||
+        kind == lexer.T_SLASHEQ || kind == lexer.T_PERCEQ || kind == lexer.T_AMPEQ ||
+        kind == lexer.T_PIPEEQ || kind == lexer.T_CARETEQ || kind == lexer.T_LSHIFTEQ ||
+        kind == lexer.T_EQ || kind == lexer.T_NE || kind == lexer.T_LT ||
+        kind == lexer.T_GT || kind == lexer.T_LE || kind == lexer.T_GE ||
+        kind == lexer.T_AND || kind == lexer.T_OR || kind == lexer.T_PLUS ||
+        kind == lexer.T_STAR || kind == lexer.T_SLASH || kind == lexer.T_PERCENT ||
+        kind == lexer.T_PIPE || kind == lexer.T_CARET || kind == lexer.T_DBLSTAR ||
+        kind == lexer.T_LSHIFT || kind == lexer.T_RSHIFT || kind == lexer.T_SEND ||
+        kind == lexer.T_ELSE || kind == lexer.T_IN || kind == lexer.T_ARROW {
+        return false
+    }
+    return true
+}
+
+// wrapErrorPropTarget builds the EX_ERROR_PROP node for `expr?`,
+// descending into the right operand of binary infix chains so `a + f()?`
+// keeps its old postfix meaning (`a + (f()?)`) now that `?` binds at
+// ternary precedence and `left` may hold a whole binary expression.
+fn wrapErrorPropTarget(left: ast.Expr, tok: lexer.Token) -> ast.Expr {
+    if left.kind == ast.EX_INFIX && len(left.infixRight) > 0 {
+        e := left
+        e.infixRight = ast.singleExpr(wrapErrorPropTarget(e.infixRight[0], tok))
+        return e
+    }
+    e := ast.newExpr(ast.EX_ERROR_PROP, tok.line, tok.col)
+    e.postfixTarget = ast.singleExpr(left)
+    return e
 }
 
 // peek2 returns the token after peekTok, skipping trivia.
@@ -302,7 +352,7 @@ fn tokenPrecedence(tok: lexer.Token) -> int {
     if tok.kind == lexer.T_LPAREN { return PREC_CALL }
     if tok.kind == lexer.T_LBRACKET { return PREC_INDEX }
     if tok.kind == lexer.T_DOT { return PREC_INDEX }
-    if tok.kind == lexer.T_QUESTION { return PREC_POSTFIX }
+    if tok.kind == lexer.T_QUESTION { return PREC_TERNARY }
     if tok.kind == lexer.T_BANG { return PREC_POSTFIX }
     return PREC_LOWEST
 }
@@ -2587,8 +2637,31 @@ fn parseInfix(p: *Parser, left: ast.Expr) -> ast.Expr {
     }
 
     if tok.kind == lexer.T_QUESTION {
-        e := ast.newExpr(ast.EX_ERROR_PROP, tok.line, tok.col)
-        e.postfixTarget = ast.singleExpr(left)
+        // `cond ? a : b` ternary vs postfix error-prop `expr?`. When the
+        // token after `?` can begin an expression, speculatively parse a
+        // then-branch; a following `:` confirms the ternary (lowered to
+        // EX_IF_EXPR, reusing checkIfExpr/emitIfExpr). Otherwise restore
+        // and treat `?` as error-prop. Because `?` now binds at ternary
+        // precedence, `left` may be a whole binary expression
+        // (`a + f()?`) — error-prop binds to its rightmost operand, so
+        // wrapErrorPropTarget descends into EX_INFIX nodes to preserve
+        // the old postfix semantics (a + (f()?)).
+        if canStartExprToken(p.peekTok.kind) {
+            saved := saveState(p)
+            advance(p)
+            thenExpr := parseExpression(p, PREC_LOWEST)
+            if curIs(p, lexer.T_COLON) {
+                advance(p)
+                elseExpr := parseExpression(p, PREC_LOWEST)
+                e := ast.newExpr(ast.EX_IF_EXPR, tok.line, tok.col)
+                e.ifCond = ast.singleExpr(left)
+                e.ifThen = ast.singleExpr(thenExpr)
+                e.ifElse = ast.singleExpr(elseExpr)
+                return e
+            }
+            restoreState(p, saved)
+        }
+        e := wrapErrorPropTarget(left, tok)
         advance(p)
         return e
     }

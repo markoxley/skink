@@ -28,11 +28,11 @@
 module cov_test
 
 import "testing"
-import "os"
-import "fs"
-import "str"
-import "strconv"
-import "errors"
+import "std/os"
+import "std/fs"
+import "std/str"
+import "std/strconv"
+import "std/errors"
 
 // covSkinkBin returns the compiler binary to invoke, honouring SKINK_BIN
 // (exported by run_tests.sh) and falling back to ./skink.

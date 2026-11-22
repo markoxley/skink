@@ -24,7 +24,7 @@
 module compiler_collections_test
 
 import "testing"
-import "str"
+import "std/str"
 
 // === Slice Basics ===
 

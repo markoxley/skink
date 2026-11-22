@@ -31,8 +31,8 @@
 module compiler_semantics_test
 
 import "testing"
-import "str"
-import "strconv"
+import "std/str"
+import "std/strconv"
 
 // semPanic records the last panic message captured by a test helper.
 var semPanic: string

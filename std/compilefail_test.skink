@@ -32,10 +32,10 @@
 module compilefail_test
 
 import "testing"
-import "os"
-import "fs"
-import "io"
-import "str"
+import "std/os"
+import "std/fs"
+import "std/io"
+import "std/str"
 
 // cfExpectPrefix marks the required compiler-output substring on a
 // snippet's first line: `// expect: divide by zero`.
