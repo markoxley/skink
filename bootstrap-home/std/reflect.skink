@@ -387,16 +387,18 @@ pub fn FieldAddr(structPtr: int64, f: Field) -> int64 {
     return structPtr + f.offset
 }
 
-// Hash computes a hash of the given value string and its type name,
-// used for hash map keying of erased (i8*) values.
-pub fn Hash(val: string, typeName: string) -> int {
+// Hash computes a hash of the given value and its type name, used for
+// hash map keying of generic values. The value arrives as `any` (i8*)
+// because generic type params monomorphize to real types — ints are
+// inttoptr'd and pointers pass through, matching the C ABI.
+pub fn Hash(val: any, typeName: string) -> int {
     return reflect_hash(val, typeName)
 }
 
-// Equals compares two erased values based on their type name.
+// Equals compares two generic values based on their type name.
 // For strings, it uses strcmp; for integers, it uses pointer equality
 // (since inttoptr values are compared as pointers).
-pub fn Equals(a: string, b: string, typeName: string) -> bool {
+pub fn Equals(a: any, b: any, typeName: string) -> bool {
     return reflect_equals(a, b, typeName)
 }
 
@@ -416,8 +418,8 @@ extern fn reflect_get_string(addr: int64, offset: int) -> string
 extern fn reflect_set_string(addr: int64, offset: int, val: string)
 extern fn reflect_get_float(addr: int64, offset: int) -> float
 extern fn reflect_set_float(addr: int64, offset: int, val: float)
-extern fn reflect_hash(val: string, typeName: string) -> int
-extern fn reflect_equals(a: string, b: string, typeName: string) -> bool
+extern fn reflect_hash(val: any, typeName: string) -> int
+extern fn reflect_equals(a: any, b: any, typeName: string) -> bool
 
 // TagArgs returns the space-joined contents of every `name(...)` group
 // in a space-joined field-tag string such as "column(name=x) db(pk auto)".

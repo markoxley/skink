@@ -267,6 +267,13 @@ struct Decl {
     serviceForType: string // the service for type
     serviceMethods: []Decl // the service methods
     serviceIsPub:   bool   // the service is pub
+
+    // Monomorphization: non-empty on instantiated (cloned) decls and
+    // holds the emitted symbol name — e.g. "main.Stack__int" or
+    // "main.Stack__int.push". The checker and emitter namespace
+    // expression-type records under it so instantiations of the same
+    // generic decl do not collide on shared file:line:col positions.
+    monoKey: string
 }
 
 // RuleDecl represents a single rule within a ruleset declaration.
@@ -750,4 +757,354 @@ pub fn typeString(t: Type) -> string {
         return s
     }
     return "?"
+}
+
+// === Deep Cloning and Type-Parameter Substitution (Monomorphization) ===
+
+// cloneStrings returns a fresh copy of a string slice.
+fn cloneStrings(xs: []string) -> []string {
+    var out []string
+    for i := 0; i < len(xs); i = i + 1 {
+        out = append(out, xs[i])
+    }
+    return out
+}
+
+// SubstTypeSlice deep-clones a slice of AST types, replacing any type
+// parameter names present in `subst` with their concrete AST types.
+pub fn SubstTypeSlice(ts: []Type, subst: map[string]Type) -> []Type {
+    var out []Type
+    for i := 0; i < len(ts); i = i + 1 {
+        out = append(out, SubstType(ts[i], subst))
+    }
+    return out
+}
+
+// SubstType deep-clones an AST Type node while substituting type parameters
+// recorded in `subst`.
+pub fn SubstType(t: Type, subst: map[string]Type) -> Type {
+    if t.kind == TY_NAMED {
+        if len(subst) > 0 && len(t.genericArgs) == 0 {
+            repl := subst[t.name]
+            if repl.kind != 0 {
+                empty := make(map[string]Type)
+                return SubstType(repl, empty)
+            }
+        }
+        out := t
+        out.genericArgs = SubstTypeSlice(t.genericArgs, subst)
+        return out
+    }
+    out := t
+    out.genericArgs = SubstTypeSlice(t.genericArgs, subst)
+    out.elem = SubstTypeSlice(t.elem, subst)
+    out.keyType = SubstTypeSlice(t.keyType, subst)
+    out.paramTypes = SubstTypeSlice(t.paramTypes, subst)
+    out.retTypes = SubstTypeSlice(t.retTypes, subst)
+    out.tupleTypes = SubstTypeSlice(t.tupleTypes, subst)
+    return out
+}
+
+// CloneType returns a deep copy of `t` with no substitutions.
+pub fn CloneType(t: Type) -> Type {
+    empty := make(map[string]Type)
+    return SubstType(t, empty)
+}
+
+// SubstParamSlice deep-clones a parameter list with `subst` applied.
+pub fn SubstParamSlice(ps: []Param, subst: map[string]Type) -> []Param {
+    var out []Param
+    for i := 0; i < len(ps); i = i + 1 {
+        p := ps[i]
+        p.typ = SubstTypeSlice(ps[i].typ, subst)
+        out = append(out, p)
+    }
+    return out
+}
+
+// SubstTypeParamSlice deep-clones generic type parameters (and bounds).
+pub fn SubstTypeParamSlice(tps: []TypeParam, subst: map[string]Type) -> []TypeParam {
+    var out []TypeParam
+    for i := 0; i < len(tps); i = i + 1 {
+        tp := tps[i]
+        tp.bound = SubstTypeSlice(tps[i].bound, subst)
+        out = append(out, tp)
+    }
+    return out
+}
+
+// SubstExprSlice deep-clones a slice of expressions with `subst` applied.
+pub fn SubstExprSlice(es: []Expr, subst: map[string]Type) -> []Expr {
+    var out []Expr
+    for i := 0; i < len(es); i = i + 1 {
+        out = append(out, SubstExpr(es[i], subst))
+    }
+    return out
+}
+
+// SubstMatchArmSlice deep-clones match arms with `subst` applied.
+fn SubstMatchArmSlice(arms: []MatchArm, subst: map[string]Type) -> []MatchArm {
+    var out []MatchArm
+    for i := 0; i < len(arms); i = i + 1 {
+        a := arms[i]
+        a.pattern.bindings = cloneStrings(arms[i].pattern.bindings)
+        a.guard = SubstExprSlice(arms[i].guard, subst)
+        a.body = SubstStmtSlice(arms[i].body, subst)
+        out = append(out, a)
+    }
+    return out
+}
+
+// SubstExpr deep-clones an expression tree and substitutes generic type
+// parameters across type arguments, `make(...)`, `sizeof(...)`, typed slice
+// literals `[]T{...}`, struct literals `T{...}`, and scalar casts `T(x)`.
+pub fn SubstExpr(e: Expr, subst: map[string]Type) -> Expr {
+    out := e
+    out.genericArgs = SubstTypeSlice(e.genericArgs, subst)
+
+    if e.kind == EX_STRUCT_LIT && len(subst) > 0 && len(e.genericArgs) == 0 {
+        repl := subst[e.structLitName]
+        if repl.kind == TY_NAMED {
+            empty := make(map[string]Type)
+            out.structLitName = repl.name
+            out.genericArgs = SubstTypeSlice(repl.genericArgs, empty)
+        }
+    }
+
+    out.prefixRight = SubstExprSlice(e.prefixRight, subst)
+    out.infixLeft = SubstExprSlice(e.infixLeft, subst)
+    out.infixRight = SubstExprSlice(e.infixRight, subst)
+    out.callFunc = SubstExprSlice(e.callFunc, subst)
+    if e.kind == EX_CALL && len(out.callFunc) > 0 && out.callFunc[0].kind == EX_IDENT &&
+       len(out.callFunc[0].genericArgs) == 0 && len(subst) > 0 {
+        repl := subst[out.callFunc[0].ident]
+        if repl.kind == TY_NAMED && len(repl.genericArgs) == 0 {
+            cf := out.callFunc[0]
+            cf.ident = repl.name
+            out.callFunc[0] = cf
+        }
+    }
+    out.callArgs = SubstExprSlice(e.callArgs, subst)
+    out.indexTarget = SubstExprSlice(e.indexTarget, subst)
+    out.indexExpr = SubstExprSlice(e.indexExpr, subst)
+    out.fieldTarget = SubstExprSlice(e.fieldTarget, subst)
+    out.arrayElems = SubstExprSlice(e.arrayElems, subst)
+    out.arrayType = SubstTypeSlice(e.arrayType, subst)
+    out.mapKeys = SubstExprSlice(e.mapKeys, subst)
+    out.mapVals = SubstExprSlice(e.mapVals, subst)
+    out.setElems = SubstExprSlice(e.setElems, subst)
+
+    if len(e.structLitFields) > 0 {
+        var sfs []StructLitField
+        for i := 0; i < len(e.structLitFields); i = i + 1 {
+            sf := e.structLitFields[i]
+            sf.value = SubstExprSlice(e.structLitFields[i].value, subst)
+            sfs = append(sfs, sf)
+        }
+        out.structLitFields = sfs
+    }
+
+    out.inner = SubstExprSlice(e.inner, subst)
+    out.sliceTarget = SubstExprSlice(e.sliceTarget, subst)
+    out.sliceLow = SubstExprSlice(e.sliceLow, subst)
+    out.sliceHigh = SubstExprSlice(e.sliceHigh, subst)
+    out.fnLitParams = SubstParamSlice(e.fnLitParams, subst)
+    out.fnLitRetTypes = SubstTypeSlice(e.fnLitRetTypes, subst)
+    out.fnLitBody = SubstStmtSlice(e.fnLitBody, subst)
+    out.ifCond = SubstExprSlice(e.ifCond, subst)
+    out.ifThen = SubstExprSlice(e.ifThen, subst)
+    out.ifElse = SubstExprSlice(e.ifElse, subst)
+    out.matchExprSubject = SubstExprSlice(e.matchExprSubject, subst)
+    out.matchExprArms = SubstMatchArmSlice(e.matchExprArms, subst)
+    out.makeType = SubstTypeSlice(e.makeType, subst)
+    out.makeSize = SubstExprSlice(e.makeSize, subst)
+    out.sizeofType = SubstTypeSlice(e.sizeofType, subst)
+    out.rangeLow = SubstExprSlice(e.rangeLow, subst)
+    out.rangeHigh = SubstExprSlice(e.rangeHigh, subst)
+    out.spreadExpr = SubstExprSlice(e.spreadExpr, subst)
+    out.postfixTarget = SubstExprSlice(e.postfixTarget, subst)
+    out.awaitExpr = SubstExprSlice(e.awaitExpr, subst)
+    out.tupleElems = SubstExprSlice(e.tupleElems, subst)
+
+    if len(e.interpParts) > 0 {
+        var ips []InterpPart
+        for i := 0; i < len(e.interpParts); i = i + 1 {
+            ip := e.interpParts[i]
+            ip.expr = SubstExprSlice(e.interpParts[i].expr, subst)
+            ips = append(ips, ip)
+        }
+        out.interpParts = ips
+    }
+    return out
+}
+
+// CloneExpr returns a deep copy of `e` with no substitutions.
+pub fn CloneExpr(e: Expr) -> Expr {
+    empty := make(map[string]Type)
+    return SubstExpr(e, empty)
+}
+
+// SubstStmtSlice deep-clones a slice of statements with `subst` applied.
+pub fn SubstStmtSlice(ss: []Stmt, subst: map[string]Type) -> []Stmt {
+    var out []Stmt
+    for i := 0; i < len(ss); i = i + 1 {
+        out = append(out, SubstStmt(ss[i], subst))
+    }
+    return out
+}
+
+// SubstStmt deep-clones a statement node and substitutes generic type parameters.
+pub fn SubstStmt(s: Stmt, subst: map[string]Type) -> Stmt {
+    out := s
+    out.varType = SubstTypeSlice(s.varType, subst)
+    out.varValue = SubstExprSlice(s.varValue, subst)
+    out.varNames = cloneStrings(s.varNames)
+    out.assignTarget = SubstExprSlice(s.assignTarget, subst)
+    out.assignValue = SubstExprSlice(s.assignValue, subst)
+    out.tupleTargets = SubstExprSlice(s.tupleTargets, subst)
+    out.returnValues = SubstExprSlice(s.returnValues, subst)
+    out.cond = SubstExprSlice(s.cond, subst)
+    out.thenBody = SubstStmtSlice(s.thenBody, subst)
+    out.elseBody = SubstStmtSlice(s.elseBody, subst)
+    out.ifInit = SubstStmtSlice(s.ifInit, subst)
+    out.forInit = SubstStmtSlice(s.forInit, subst)
+    out.forPost = SubstStmtSlice(s.forPost, subst)
+    out.forIterExpr = SubstExprSlice(s.forIterExpr, subst)
+    out.matchSubject = SubstExprSlice(s.matchSubject, subst)
+    out.matchArms = SubstMatchArmSlice(s.matchArms, subst)
+    out.deferStmt = SubstStmtSlice(s.deferStmt, subst)
+    out.expr = SubstExprSlice(s.expr, subst)
+    out.spawnCall = SubstExprSlice(s.spawnCall, subst)
+
+    if len(s.selectCases) > 0 {
+        var scs []SelectCase
+        for i := 0; i < len(s.selectCases); i = i + 1 {
+            sc := s.selectCases[i]
+            sc.cond = SubstExprSlice(s.selectCases[i].cond, subst)
+            sc.body = SubstStmtSlice(s.selectCases[i].body, subst)
+            scs = append(scs, sc)
+        }
+        out.selectCases = scs
+    }
+
+    if s.decl.kind != 0 {
+        out.decl = SubstDecl(s.decl, subst)
+    }
+    return out
+}
+
+// CloneStmt returns a deep copy of `s` with no substitutions.
+pub fn CloneStmt(s: Stmt) -> Stmt {
+    empty := make(map[string]Type)
+    return SubstStmt(s, empty)
+}
+
+// filterShadowedSubst returns a copy of `subst` excluding any type parameter
+// names redeclared by `tps` (e.g. a generic method's own type parameters).
+fn filterShadowedSubst(subst: map[string]Type, tps: []TypeParam) -> map[string]Type {
+    if len(tps) == 0 || len(subst) == 0 {
+        return subst
+    }
+    shadowed := make(map[string]bool)
+    for i := 0; i < len(tps); i = i + 1 {
+        shadowed[tps[i].name] = true
+    }
+    filtered := make(map[string]Type)
+    for k in subst {
+        if !shadowed[k] {
+            filtered[k] = subst[k]
+        }
+    }
+    return filtered
+}
+
+// SubstDecl deep-clones a Decl node and substitutes generic type parameters.
+pub fn SubstDecl(d: Decl, subst: map[string]Type) -> Decl {
+    eff := subst
+    if d.kind == ST_FN && len(d.fnGenerics) > 0 {
+        eff = filterShadowedSubst(subst, d.fnGenerics)
+    }
+    out := d
+    out.fnParams = SubstParamSlice(d.fnParams, eff)
+    out.fnRetTypes = SubstTypeSlice(d.fnRetTypes, eff)
+    out.fnRetNames = cloneStrings(d.fnRetNames)
+    out.fnBody = SubstStmtSlice(d.fnBody, eff)
+    out.fnGenerics = SubstTypeParamSlice(d.fnGenerics, eff)
+    out.fnAttrs = cloneStrings(d.fnAttrs)
+    out.fnReceiver = SubstTypeSlice(d.fnReceiver, eff)
+
+    if len(d.structFields) > 0 {
+        var fs []Field
+        for i := 0; i < len(d.structFields); i = i + 1 {
+            f := d.structFields[i]
+            f.typ = SubstTypeSlice(d.structFields[i].typ, eff)
+            f.tags = cloneStrings(d.structFields[i].tags)
+            fs = append(fs, f)
+        }
+        out.structFields = fs
+    }
+    if len(d.structMethods) > 0 {
+        var ms []Decl
+        for i := 0; i < len(d.structMethods); i = i + 1 {
+            ms = append(ms, SubstDecl(d.structMethods[i], eff))
+        }
+        out.structMethods = ms
+    }
+    out.structGenerics = SubstTypeParamSlice(d.structGenerics, eff)
+
+    if len(d.enumVariants) > 0 {
+        var vs []Variant
+        for i := 0; i < len(d.enumVariants); i = i + 1 {
+            v := d.enumVariants[i]
+            v.payloads = SubstTypeSlice(d.enumVariants[i].payloads, eff)
+            vs = append(vs, v)
+        }
+        out.enumVariants = vs
+    }
+    out.enumGenerics = SubstTypeParamSlice(d.enumGenerics, eff)
+    out.constValue = SubstExprSlice(d.constValue, eff)
+    if len(d.constBlock) > 0 {
+        var cbs []ConstItem
+        for i := 0; i < len(d.constBlock); i = i + 1 {
+            ci := d.constBlock[i]
+            ci.value = SubstExprSlice(d.constBlock[i].value, eff)
+            cbs = append(cbs, ci)
+        }
+        out.constBlock = cbs
+    }
+    out.aliasType = SubstTypeSlice(d.aliasType, eff)
+
+    if len(d.templateMethods) > 0 {
+        var tms []Decl
+        for i := 0; i < len(d.templateMethods); i = i + 1 {
+            tms = append(tms, SubstDecl(d.templateMethods[i], eff))
+        }
+        out.templateMethods = tms
+    }
+    out.templateGenerics = SubstTypeParamSlice(d.templateGenerics, eff)
+
+    if len(d.rulesetRules) > 0 {
+        var rrs []RuleDecl
+        for i := 0; i < len(d.rulesetRules); i = i + 1 {
+            rr := d.rulesetRules[i]
+            rr.condition = SubstExprSlice(d.rulesetRules[i].condition, eff)
+            rr.ruleAction = SubstStmtSlice(d.rulesetRules[i].ruleAction, eff)
+            rrs = append(rrs, rr)
+        }
+        out.rulesetRules = rrs
+    }
+    if len(d.serviceMethods) > 0 {
+        var sms []Decl
+        for i := 0; i < len(d.serviceMethods); i = i + 1 {
+            sms = append(sms, SubstDecl(d.serviceMethods[i], eff))
+        }
+        out.serviceMethods = sms
+    }
+    return out
+}
+
+// CloneDecl returns a deep copy of `d` with no substitutions.
+pub fn CloneDecl(d: Decl) -> Decl {
+    empty := make(map[string]Type)
+    return SubstDecl(d, empty)
 }

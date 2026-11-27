@@ -1,0 +1,264 @@
+// Copyright 2026 Mark Oxley. All rights reserved.
+//
+// Project: Skink — A self-hosted, statically-typed programming language
+//          targeting LLVM IR, designed for systems programming with
+//          modern ergonomics and a Go-inspired syntax.
+//
+// File:    std/generic_monomorph_test.skink
+// Purpose: Regression tests for AST-level monomorphization of generic
+//          structs, functions, and methods. Under the old type-erasure
+//          scheme every type parameter lowered to i8*, which broke any
+//          instantiation storing real values (non-pointer-sized fields,
+//          []T composites, integer keys). These cases previously lived
+//          as compilefail fixtures (cf_generic_struct_erasure*) — they
+//          now compile and run correctly.
+// Author:  Mark Oxley
+// Created: 2026
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+module generic_monomorph_test
+
+import "std/sets"
+import "std/sort"
+import "std/str"
+import "testing"
+
+// WrapA mirrors the former cf_generic_struct_erasure fixture: a generic
+// struct whose field embeds the type parameter in a composite ([]T).
+struct WrapA<T> {
+    elems: []T
+}
+
+// Box mirrors cf_generic_struct_erasure_ret: reached only through a
+// generic function's return type.
+struct Box<T> {
+    buf: []T
+
+    fn Set(self: *Box<T>, i: int, v: T) {
+        self.buf[i] = v
+    }
+
+    fn Get(self: *Box<T>, i: int) -> T {
+        return self.buf[i]
+    }
+}
+
+fn NewBox<T>(n: int) -> Box<T> {
+    return Box<T>{buf: make([]T, n)}
+}
+
+// Stack exercises instance methods plus a static constructor.
+struct Stack<T> {
+    items: []T
+
+    fn push(self: *Stack<T>, v: T) {
+        self.items = append(self.items, v)
+    }
+
+    fn pop(self: *Stack<T>) -> T {
+        n := len(self.items) - 1
+        v := self.items[n]
+        self.items = self.items[:n]
+        return v
+    }
+
+    fn Of(v: T) -> Stack<T> {
+        s := Stack<T>{}
+        s.push(v)
+        return s
+    }
+}
+
+// Conv exercises a method with its OWN type parameter (recv.M<U>(x)).
+struct Conv {
+    fn To<U>(self: Conv, v: U) -> U {
+        return v
+    }
+}
+
+// Box2 exercises an inferred method-generic call b.Map(itos) where U
+// binds through a fn(T)->U parameter.
+struct Box2<T> {
+    v: T
+
+    fn Map<U>(self: *Box2<T>, f: fn(T) -> U) -> U {
+        return f(self.v)
+    }
+}
+
+// Pair exercises a two-parameter instantiation.
+struct Pair<K, V> {
+    first: K
+    second: V
+}
+
+fn id<T>(x: T) -> T {
+    return x
+}
+
+fn itos(i: int) -> string {
+    return "n"
+}
+
+// TestGenericStructSliceField guards comp_error.md #142 (former
+// cf_generic_struct_erasure): []T fields must carry the real element
+// type in a monomorphized instantiation, not erased i8* slots.
+pub fn TestGenericStructSliceField() {
+    w := WrapA<int>{elems: []int{3, 4}}
+    if w.elems[0] != 3 || w.elems[1] != 4 {
+        Errorf("WrapA<int> field access returned wrong values")
+    }
+    w.elems = append(w.elems, 5)
+    if len(w.elems) != 3 || w.elems[2] != 5 {
+        Errorf("WrapA<int> append on []T field failed")
+    }
+}
+
+// TestGenericStructViaReturnType guards comp_error.md #127 (former
+// cf_generic_struct_erasure_ret): a generic struct instantiation reached
+// only through a generic function's return type must still specialize.
+pub fn TestGenericStructViaReturnType() {
+    b := NewBox<int>(4)
+    if len(b.buf) != 4 || b.buf[0] != 0 {
+        Errorf("NewBox<int>(4) produced wrong buffer")
+    }
+    b.Set(2, 9)
+    if b.Get(2) != 9 {
+        Errorf("Box<int>.Set/Get round-trip failed")
+    }
+}
+
+// TestGenericStructMethods verifies instance methods on a monomorphized
+// struct bind the receiver's concrete element type.
+pub fn TestGenericStructMethods() {
+    s := Stack<int>{}
+    s.push(10)
+    s.push(20)
+    if s.pop() != 20 || s.pop() != 10 {
+        Errorf("Stack<int> push/pop returned wrong order")
+    }
+}
+
+// TestStaticGenericStructCall verifies Type<T>.Method() resolves to the
+// instantiation's method clone rather than the generic original.
+pub fn TestStaticGenericStructCall() {
+    s := Stack<int>.Of(99)
+    if len(s.items) != 1 || s.items[0] != 99 {
+        Errorf("Stack<int>.Of constructed wrong stack")
+    }
+}
+
+// TestGenericFnExplicit verifies explicit type arguments on a generic
+// function call.
+pub fn TestGenericFnExplicit() {
+    if id<int>(42) != 42 {
+        Errorf("id<int>(42) != 42")
+    }
+    if !str.Equal(id<string>("hi"), "hi") {
+        Errorf("id<string> did not return its argument")
+    }
+}
+
+// TestGenericFnInferred verifies generic type arguments inferred from
+// the call's argument types.
+pub fn TestGenericFnInferred() {
+    if id(7) != 7 {
+        Errorf("inferred id(7) != 7")
+    }
+    if !str.Equal(id("yo"), "yo") {
+        Errorf("inferred id(\"yo\") did not return its argument")
+    }
+}
+
+// TestGenericFnValue verifies a generic function referenced with
+// explicit type arguments as a value binds the instantiated clone.
+pub fn TestGenericFnValue() {
+    f := id<int>
+    if f(8) != 8 {
+        Errorf("id<int> bound as a value returned wrong result")
+    }
+}
+
+// TestGenericMethodExplicit verifies a method declaring its own type
+// parameter resolves recv.M<U>(args).
+pub fn TestGenericMethodExplicit() {
+    cv := Conv{}
+    if !str.Equal(cv.To<string>("x"), "x") {
+        Errorf("Conv.To<string> returned wrong value")
+    }
+}
+
+// TestGenericMethodInferred verifies a method's own type parameter can
+// be inferred structurally through a fn(T)->U parameter.
+pub fn TestGenericMethodInferred() {
+    b := Box2<int>{v: 5}
+    if !str.Equal(b.Map(itos), "n") {
+        Errorf("Box2<int>.Map(itos) returned wrong value")
+    }
+}
+
+// TestGenericTwoParam verifies a two-parameter generic struct
+// instantiation binds both arguments.
+pub fn TestGenericTwoParam() {
+    p := Pair<int, string>{first: 1, second: "two"}
+    if p.first != 1 || !str.Equal(p.second, "two") {
+        Errorf("Pair<int,string> fields wrong")
+    }
+}
+
+// TestNestedGenericInstantiation verifies a generic struct field whose
+// type is itself generic (members: HashMap<T,int> inside sets.Set<T>)
+// substitutes the receiver's args through the field chain — the
+// Entry<K,V>→Entry<T,int> case that produced phantom Entry__K_V types.
+pub fn TestNestedGenericInstantiation() {
+    s := sets.Set<int>{}
+    s.Add(3)
+    s.Add(1)
+    s.Add(3)
+    if s.Len() != 2 || !s.Has(1) || s.Has(9) {
+        Errorf("Set<int> basic operations failed")
+    }
+    a := sets.Set<string>{}
+    a.Add("x")
+    a.Add("y")
+    b := sets.Set<string>{}
+    b.Add("y")
+    b.Add("z")
+    u := a.Union(b)
+    if u.Len() != 3 {
+        Errorf("Set<string> union size wrong")
+    }
+    inter := a.Intersection(b)
+    if inter.Len() != 1 || !inter.Has("y") {
+        Errorf("Set<string> intersection wrong")
+    }
+}
+
+// TestGenericSortInstantiation verifies generic functions over slices
+// (sort.Sort<T>/IsSorted<T>/Reverse<T>) instantiate with real element
+// types and fn(T,T)->bool comparators.
+pub fn TestGenericSortInstantiation() {
+    arr := []int{5, 2, 8, 1, 9}
+    sort.Sort(arr, fn(x: int, y: int) -> bool { return x < y })
+    if arr[0] != 1 || arr[4] != 9 {
+        Errorf("sort.Sort<int> produced wrong order")
+    }
+    if !sort.IsSorted(arr, fn(x: int, y: int) -> bool { return x < y }) {
+        Errorf("sort.IsSorted<int> reported false on sorted input")
+    }
+    sort.Reverse(arr)
+    if arr[0] != 9 {
+        Errorf("sort.Reverse<int> wrong first element")
+    }
+}

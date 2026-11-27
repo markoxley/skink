@@ -1037,14 +1037,16 @@ fn marshalStructValue(t: reflect.Type, addr: int64) -> (Value, errors.Error) {
     return FromObject(keys, vals), errors.None()
 }
 
-// Marshal serializes the struct pointed to by obj to a JSON object
+// Marshal serializes the struct pointed to by v to a JSON object
 // string:
 //
 //   s, err := json.Marshal(&u)
 //
-// The compiler auto-injects the reflected type and object address at
-// the call site (emitAutoMarshalCall in std/emitter.skink); the `any`
-// parameter only satisfies the checker and is replaced by the injection.
+// T binds to the pointee struct type — inferred from the argument, so
+// the call site never needs explicit type arguments. Inside the
+// monomorphized clone reflect.TypeOf<T> emits real type metadata and
+// the pointer forwards to MarshalStruct as int64 — no compiler
+// injection required.
 // The returned string is Skink's byte-buffer type — equivalent to
 // ([]byte, error) elsewhere.
 //
@@ -1059,8 +1061,8 @@ fn marshalStructValue(t: reflect.Type, addr: int64) -> (Value, errors.Error) {
 //   [json(name=x)]    rename the key to x
 //   [json(ignore)]    omit the field entirely
 //   [json(omitempty)] omit the field when it holds its zero value
-pub fn Marshal(obj: any) -> (string, errors.Error) {
-    return "", errors.New("json.Marshal: compiler did not inject reflected arguments — report a bug")
+pub fn Marshal<T>(v: *T) -> (string, errors.Error) {
+    return MarshalStruct(reflect.TypeOf<T>(*v), int64(v))
 }
 
 // MarshalStruct serializes the struct at ptr (pass int64(&obj)) to a
@@ -1187,10 +1189,9 @@ fn unmarshalStructValue(t: reflect.Type, addr: int64, v: Value) -> errors.Error 
 //
 //   err := json.UnmarshalInto(data, &u)
 //
-// Like Marshal, the compiler auto-injects (reflect.Type, ptr) at the
-// call site; this stub exists only for the checker. (UnmarshalInto
-// rather than Unmarshal because json.Unmarshal is the existing
-// Value-tree parser.)
+// Like Marshal, T binds to the pointee struct type — inferred from the
+// argument. (UnmarshalInto rather than Unmarshal because json.Unmarshal
+// is the existing Value-tree parser.)
 //
 // Supports the same field-type matrix as Marshal: integers of every
 // width, float/double, bool, string, base64 byte buffers, pointers
@@ -1198,8 +1199,8 @@ fn unmarshalStructValue(t: reflect.Type, addr: int64, v: Value) -> errors.Error 
 // Keys not present in the JSON leave their fields unchanged; JSON keys
 // with no matching field are ignored. Honours [json(name=x)] and
 // [json(ignore)].
-pub fn UnmarshalInto(data: string, obj: any) -> errors.Error {
-    return errors.New("json.UnmarshalInto: compiler did not inject reflected arguments — report a bug")
+pub fn UnmarshalInto<T>(data: string, v: *T) -> errors.Error {
+    return UnmarshalStruct(data, reflect.TypeOf<T>(*v), int64(v))
 }
 
 // UnmarshalStruct parses s as a JSON object and writes each matching

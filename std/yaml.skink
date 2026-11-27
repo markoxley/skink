@@ -817,15 +817,16 @@ fn yamlMarshalStructValue(t: reflect.Type, addr: int64) -> (Value, errors.Error)
 //
 //   s, err := yaml.Marshal(&obj)
 //
-// The compiler auto-injects the reflected type and object address at
-// the call site (emitAutoMarshalCall in std/emitter.skink); the `any`
-// parameter only satisfies the checker and is replaced by the injection.
+// T binds to the pointee struct type — inferred from the argument, so
+// the call site never needs explicit type arguments. Inside the
+// monomorphized clone reflect.TypeOf<T> emits real type metadata and
+// the pointer forwards to MarshalStruct as int64.
 // Supports the same field matrix as json.Marshal (integers, floats,
 // bool, string, base64 byte buffers, pointers, slices, nested
 // structs). Field tags: [yaml(name=x)] renames the key, [yaml(ignore)]
 // omits the field, [yaml(omitempty)] omits zero values.
-pub fn Marshal(obj: any) -> (string, errors.Error) {
-    return "", errors.New("yaml.Marshal: compiler did not inject reflected arguments — report a bug")
+pub fn Marshal<T>(v: *T) -> (string, errors.Error) {
+    return MarshalStruct(reflect.TypeOf<T>(*v), int64(v))
 }
 
 // MarshalStruct serializes the struct at ptr (pass int64(&obj)) to a
@@ -959,12 +960,11 @@ fn yamlUnmarshalStructValue(t: reflect.Type, addr: int64, v: Value) -> errors.Er
 //
 //   err := yaml.UnmarshalInto(data, &obj)
 //
-// Like Marshal, the compiler auto-injects (reflect.Type, ptr) at the
-// call site; this stub only satisfies the checker. (UnmarshalInto
-// rather than Unmarshal because yaml.Unmarshal is the existing
-// tree parser.)
-pub fn UnmarshalInto(data: string, obj: any) -> errors.Error {
-    return errors.New("yaml.UnmarshalInto: compiler did not inject reflected arguments — report a bug")
+// Like Marshal, T binds to the pointee struct type — inferred from the
+// argument. (UnmarshalInto rather than Unmarshal because yaml.Unmarshal
+// is the existing tree parser.)
+pub fn UnmarshalInto<T>(data: string, v: *T) -> errors.Error {
+    return UnmarshalStruct(data, reflect.TypeOf<T>(*v), int64(v))
 }
 
 pub fn UnmarshalStruct(s: string, t: reflect.Type, ptr: int64) -> errors.Error {

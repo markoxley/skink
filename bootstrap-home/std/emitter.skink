@@ -295,6 +295,12 @@ pub struct CodeGen {
     currentFilePath:     string  // the current file path
     currentStmtLine:     int  // the current statement line
     currentStmtCol:      int  // the current statement column
+    // exprCtx namespaces checker expression lookups for monomorphized
+    // clones: instantiated decl bodies share the generic original's
+    // source positions, so the emitted symbol name (decl.monoKey, e.g.
+    // "main.Stack__int.push") disambiguates them. Empty for ordinary
+    // decls, preserving the historical "file line:col" key format.
+    exprCtx:             string
 
     // Global variable initializers: collected during emission and
     // initialized in a _skink_global_init function called before main.
@@ -2752,6 +2758,20 @@ fn emitReflectTypeOf(cg: *CodeGen, e: ast.Expr) -> string {
     typeArg := e.genericArgs[0]
     typeName := typeArg.name
 
+    // Inside a monomorphized clone the substituted generic arg carries
+    // the checker's resolved (module-qualified) name — e.g.
+    // "mytest.User" where the caller spelled "User". Peel the
+    // instantiation-site module's prefix so TypeOf<T> reports the name
+    // the caller would have spelled, matching what the old
+    // emitAutoMarshalCall injection did for xml/json/yaml root names.
+    site := checker.monoSiteModuleFor(cg.checker, cg.exprCtx)
+    if str.Len(site) > 0 {
+        sitePrefix := str.Concat(site, ".")
+        if str.StartsWith(typeName, sitePrefix) {
+            typeName = str.Substr(typeName, str.Len(sitePrefix), str.Len(typeName) - str.Len(sitePrefix))
+        }
+    }
+
     // Allocate a reflect.Type struct on the stack
     typeAlloca := nextReg(cg)
     emitln(cg, concatMany([]string{"  ", typeAlloca, " = alloca %struct.reflect_Type"}))
@@ -2885,100 +2905,6 @@ fn emitReflectTypeInto(cg: *CodeGen, typeName: string, destPtr: string, depth: i
         emitln(cg, concatMany([]string{"  ", fpGEP, " = getelementptr inbounds %struct.reflect_Type, %struct.reflect_Type* ", destPtr, ", i32 0, i32 3"}))
         emitln(cg, concatMany([]string{"  store %struct.reflect_Field* null, %struct.reflect_Field** ", fpGEP}))
     }
-}
-
-// emitAutoMarshalCall implements the auto-injected marshal calls:
-//   json.Marshal(&obj)              → json.MarshalStruct(Type, int64(&obj))
-//   json.UnmarshalInto(s, &obj)     → json.UnmarshalStruct(s, Type, int64(&obj))
-// (likewise for yaml. and xml.). Skink generics require explicit type
-// arguments, so the stdlib declares these as `any`-typed stubs; this
-// routine synthesizes the reflected arguments at the call site — the
-// same mechanism emitReflectTypeOf uses for TypeOf.
-fn emitAutoMarshalCall(cg: *CodeGen, e: ast.Expr, mod: string, isMarshal: bool) -> string {
-    argExpr := e.callArgs[0]
-    if !isMarshal {
-        argExpr = e.callArgs[1]
-    }
-
-    // Resolve the pointee type name ("*U"/"*mod.U" → "U"/"mod.U").
-    argLL := exprLLType(cg, argExpr)
-
-    // The stub takes `any`, so non-pointer arguments type-check but are
-    // meaningless here — diagnose at compile time instead of emitting
-    // invalid ptrtoint IR or silently marshalling garbage.
-    if !str.EndsWith(argLL, "*") {
-        which := "Marshal"
-        if !isMarshal {
-            which = "UnmarshalInto"
-        }
-        errorf(cg, str.Concat(mod, str.Concat(".", str.Concat(which, str.Concat(" requires a pointer argument (try ", str.Concat(which, "(&obj))"))))))
-        return "0"
-    }
-
-    // Prefer the checker's semantic name for the stored Type.name —
-    // skinkTypeName falls back to the LLVM name ("mod_T") for named
-    // types, while TypeOf reports the spelled name ("T"/"mod.T").
-    typeName := reflectNestedBase(llTypeToSkinkName(argLL))
-    argSk := exprSkinkType(cg, argExpr)
-    if argSk.kind == checker.TK_NAMED {
-        argSk = resolveAliasCG(cg, argSk)
-    }
-    for argSk.kind == checker.TK_POINTER || argSk.kind == checker.TK_ARRAY {
-        argSk = checker.typeOptT(argSk.elem)
-        if argSk.kind == checker.TK_NAMED {
-            argSk = resolveAliasCG(cg, argSk)
-        }
-    }
-    if argSk.kind == checker.TK_NAMED && str.Len(argSk.name) > 0 {
-        typeName = argSk.name
-        // Same-module types are named unqualified in TypeOf — strip the
-        // caller's own module prefix so both paths agree (e.g. the XML
-        // root element is <User>, not <mytest.User>).
-        prefix := str.Concat(cg.currentModule, ".")
-        if str.Len(cg.currentModule) > 0 && str.StartsWith(typeName, prefix) {
-            typeName = str.Substr(typeName, str.Len(prefix), str.Len(typeName) - str.Len(prefix))
-        }
-    }
-
-    // Build the reflect.Type value on the stack. Skink passes struct
-    // arguments by pointer, so the callee takes %struct.reflect_Type*
-    // and the alloca is forwarded directly (no load).
-    typeAlloca := nextReg(cg)
-    emitln(cg, concatMany([]string{"  ", typeAlloca, " = alloca %struct.reflect_Type"}))
-    emitReflectTypeInto(cg, typeName, typeAlloca, 0)
-
-    // The argument expression is already a *T pointer; convert to int64.
-    argReg := emitExpression(cg, argExpr)
-    ptrReg := nextReg(cg)
-    emitfmt(cg, "  %s = ptrtoint %s %s to i64\n", []string{ptrReg, argLL, argReg})
-
-    var args []string
-    if isMarshal {
-        args = append(args, str.Concat("%struct.reflect_Type* ", typeAlloca))
-        args = append(args, str.Concat("i64 ", ptrReg))
-    } else {
-        sReg := emitExpression(cg, e.callArgs[0])
-        sLL := exprLLType(cg, e.callArgs[0])
-        args = append(args, str.Concat(sLL, str.Concat(" ", sReg)))
-        args = append(args, str.Concat("%struct.reflect_Type* ", typeAlloca))
-        args = append(args, str.Concat("i64 ", ptrReg))
-    }
-
-    // Forward to the explicit (t, ptr) entry point.
-    target := str.Concat(mod, ".MarshalStruct")
-    if !isMarshal {
-        target = str.Concat(mod, ".UnmarshalStruct")
-    }
-    retType := "void"
-    hasFn := mapStringStringSliceHasKeyCG(cg.fnRetTypes, target)
-    if hasFn && len(cg.fnRetTypes[target]) > 0 {
-        if len(cg.fnRetTypes[target]) > 1 {
-            retType = aggregateRetType(cg.fnRetTypes[target])
-        } else {
-            retType = cg.fnRetTypes[target][0]
-        }
-    }
-    return emitCall(cg, retType, target, args)
 }
 
 // emitRegisterRuleCall handles registerRule calls on rulesets by generating
@@ -3907,7 +3833,7 @@ fn emitSetInOp(cg: *CodeGen, e: ast.Expr) -> string {
 // in. An unresolved type also yields "", which stays correct because the
 // heuristic hashes real string pointers by content anyway.
 fn mapKeyReflectName(cg: *CodeGen, mapExpr: ast.Expr) -> string {
-    t := checker.exprTypeLookup(cg.checker, cg.currentFilePath, mapExpr.line, mapExpr.col)
+    t := checker.exprTypeLookup(cg.checker, cg.currentFilePath, cg.exprCtx, mapExpr.line, mapExpr.col)
     if t.kind == checker.TK_MAP && len(t.keyType) > 0 {
         kt := checker.typeOptT(t.keyType)
         if kt.kind == checker.TK_BUILTIN && str.Equal(kt.name, "string") {
@@ -3920,7 +3846,7 @@ fn mapKeyReflectName(cg: *CodeGen, mapExpr: ast.Expr) -> string {
 // exprIsBuiltinString reports whether the checker's recorded type for e
 // is the builtin string type.
 fn exprIsBuiltinString(cg: *CodeGen, e: ast.Expr) -> bool {
-    t := checker.exprTypeLookup(cg.checker, cg.currentFilePath, e.line, e.col)
+    t := checker.exprTypeLookup(cg.checker, cg.currentFilePath, cg.exprCtx, e.line, e.col)
     return t.kind == checker.TK_BUILTIN && str.Equal(t.name, "string")
 }
 
@@ -6153,7 +6079,7 @@ fn callExprRetLLTypes(cg: *CodeGen, e: ast.Expr) -> []string {
             }
             return out
         }
-        resolved, dummy := resolveMethodCallFnName(cg, fnExpr)
+        resolved, _ := resolveMethodCallFnName(cg, fnExpr)
         if mapStringStringSliceHasKeyCG(cg.fnRetTypes, resolved) {
             return cg.fnRetTypes[resolved]
         }
@@ -6470,6 +6396,13 @@ fn emitIdent(cg: *CodeGen, e: ast.Expr) -> string {
             return emitTUBareVariant(cg, name)
         }
     }
+    // A generic function used as a value (f := id<int>) materializes the
+    // monomorphized specialization the checker recorded, not the erased
+    // generic symbol.
+    monoTarget := checker.callTargetFor(cg.checker, cg.currentFilePath, cg.exprCtx, e.line, e.col)
+    if str.Len(monoTarget) > 0 {
+        return emitClosureValue(cg, monoTarget)
+    }
     // Check if it's a function — materialize a closure handle (i8*).
     hasFn := mapStringStringSliceHasKeyCG(cg.fnRetTypes, name)
     if hasFn {
@@ -6781,7 +6714,7 @@ fn exprIsChan(cg: *CodeGen, e: ast.Expr) -> bool {
     // Prefer the checker's recorded type for this exact expression — it
     // resolves receivers like `h.ch`/`self.ch` where emitter-side scope
     // lookups below can't see the local/field types.
-    rt := checker.exprTypeLookup(cg.checker, cg.currentFilePath, e.line, e.col)
+    rt := checker.exprTypeLookup(cg.checker, cg.currentFilePath, cg.exprCtx, e.line, e.col)
     if rt.kind == checker.TK_NAMED {
         rt = resolveAliasCG(cg, rt)
     }
@@ -6813,7 +6746,7 @@ fn chanElemLLTypeOpt(cg: *CodeGen, chExpr: ast.Expr) -> string {
     // expression. Handles receivers like self.out and inferred locals
     // (oc := h.out) whose synType isn't tracked in the emitter's scope —
     // resolveFieldType below can't see `self`/locals at emit time.
-    rt := checker.exprTypeLookup(cg.checker, cg.currentFilePath, chExpr.line, chExpr.col)
+    rt := checker.exprTypeLookup(cg.checker, cg.currentFilePath, cg.exprCtx, chExpr.line, chExpr.col)
     if rt.kind == checker.TK_NAMED {
         rt = resolveAliasCG(cg, rt)
     }
@@ -6868,7 +6801,7 @@ fn chanRecvElemLLType(cg: *CodeGen, recvExpr: ast.Expr) -> string {
     // Preferred source: the checker's recorded type for the recv
     // expression itself — it IS the element type, and the key is
     // file-aware (chanElemTypes below keys on line:col only).
-    rt := checker.exprTypeLookup(cg.checker, cg.currentFilePath, recvExpr.line, recvExpr.col)
+    rt := checker.exprTypeLookup(cg.checker, cg.currentFilePath, cg.exprCtx, recvExpr.line, recvExpr.col)
     if rt.kind == checker.TK_NAMED {
         rt = resolveAliasCG(cg, rt)
     }
@@ -6878,7 +6811,7 @@ fn chanRecvElemLLType(cg: *CodeGen, recvExpr: ast.Expr) -> string {
             return ll
         }
     }
-    t := checker.chanElemTypeLookup(cg.checker, recvExpr.line, recvExpr.col)
+    t := checker.chanElemTypeLookup(cg.checker, cg.exprCtx, recvExpr.line, recvExpr.col)
     if t.kind != 0 {
         ll := llvmType(cg, t)
         if str.Len(ll) > 0 && !str.Equal(ll, "void") {
@@ -7760,7 +7693,7 @@ fn emitInterpPart(cg: *CodeGen, e: ast.Expr, idx: int) -> string {
     if !part.isExpr {
         return emitStringLiteral(cg, part.strVal)
     }
-    t := checker.exprTypeLookupAt(cg.checker, cg.currentFilePath, e.line, e.col, idx)
+    t := checker.exprTypeLookupAt(cg.checker, cg.currentFilePath, cg.exprCtx, e.line, e.col, idx)
     return emitExprAsStringT(cg, part.expr[0], t)
 }
 
@@ -7776,7 +7709,7 @@ fn typeIsUnsignedInt(t: checker.TType) -> bool {
 // exprIsUnsignedInt reports whether the expression's checker-recorded
 // type is an unsigned integer.
 fn exprIsUnsignedInt(cg: *CodeGen, e: ast.Expr) -> bool {
-    return typeIsUnsignedInt(checker.exprTypeLookup(cg.checker, cg.currentFilePath, e.line, e.col))
+    return typeIsUnsignedInt(checker.exprTypeLookup(cg.checker, cg.currentFilePath, cg.exprCtx, e.line, e.col))
 }
 
 // exprSkinkType returns the checker-recorded semantic type for an expression.
@@ -7796,7 +7729,7 @@ fn exprSkinkType(cg: *CodeGen, e: ast.Expr) -> checker.TType {
     if e.line <= 0 {
         return checker.TType{}
     }
-    return checker.exprTypeLookup(cg.checker, cg.currentFilePath, e.line, e.col)
+    return checker.exprTypeLookup(cg.checker, cg.currentFilePath, cg.exprCtx, e.line, e.col)
 }
 
 // typeIsString reports whether a checker type is the builtin string type.
@@ -7873,7 +7806,7 @@ fn emitExprAsStringT(cg: *CodeGen, e: ast.Expr, t: checker.TType) -> string {
 
 // emitExprAsString converts an expression to a string (i8*) based on its type.
 fn emitExprAsString(cg: *CodeGen, e: ast.Expr) -> string {
-    t := checker.exprTypeLookup(cg.checker, cg.currentFilePath, e.line, e.col)
+    t := checker.exprTypeLookup(cg.checker, cg.currentFilePath, cg.exprCtx, e.line, e.col)
     return emitExprAsStringT(cg, e, t)
 }
 
@@ -8039,6 +7972,16 @@ fn emitCallExpr(cg: *CodeGen, e: ast.Expr) -> string {
     // Handle direct function name calls
     if fnExpr.kind == ast.EX_IDENT {
         fnName := resolveDirectFnName(cg, fnExpr.ident)
+
+        // Monomorphized generic call: the checker recorded the concrete
+        // specialization for this call site.
+        monoTarget := checker.callTargetFor(cg.checker, cg.currentFilePath, cg.exprCtx, e.line, e.col)
+        if str.Len(monoTarget) == 0 {
+            monoTarget = checker.callTargetFor(cg.checker, cg.currentFilePath, cg.exprCtx, fnExpr.line, fnExpr.col)
+        }
+        if str.Len(monoTarget) > 0 {
+            fnName = monoTarget
+        }
 
         // Check for builtins
         if str.Equal(fnName, "len") {
@@ -8284,30 +8227,6 @@ fn emitCallExpr(cg: *CodeGen, e: ast.Expr) -> string {
             }
             if str.Equal(recvName, "reflect") {
                 return emitReflectTypeOf(cg, e)
-            }
-        }
-        // Auto-marshal interception: json/yaml/xml.Marshal(&obj) and
-        // .UnmarshalInto(data, &obj) synthesize (reflect.Type, ptr) at the
-        // call site — the `any`-typed stubs cannot recover them inside
-        // the callee — then forward to MarshalStruct/UnmarshalStruct.
-        if str.Equal(fnExpr.fieldName, "Marshal") || str.Equal(fnExpr.fieldName, "UnmarshalInto") {
-            recvName := ""
-            if fnExpr.fieldTarget[0].kind == ast.EX_IDENT {
-                recvName = fnExpr.fieldTarget[0].ident
-            }
-            // Resolve import aliases ("js" -> "json") so aliased module
-            // calls get the same auto-injection.
-            modName := resolveImportAliasCG(cg, recvName)
-            if (str.Equal(modName, "json") || str.Equal(modName, "yaml") || str.Equal(modName, "xml")) && str.Len(recvName) > 0 {
-                _, isLocal := lookupVar(cg, recvName)
-                if !isLocal {
-                    if str.Equal(fnExpr.fieldName, "Marshal") && len(e.callArgs) == 1 {
-                        return emitAutoMarshalCall(cg, e, modName, true)
-                    }
-                    if str.Equal(fnExpr.fieldName, "UnmarshalInto") && len(e.callArgs) == 2 {
-                        return emitAutoMarshalCall(cg, e, modName, false)
-                    }
-                }
             }
         }
         return emitMethodCall(cg, e)
@@ -8751,7 +8670,7 @@ fn emitIfExpr(cg: *CodeGen, e: ast.Expr) -> string {
 fn matchExprResultLLType(cg: *CodeGen, e: ast.Expr) -> string {
     // Prefer the checker's recorded result type — arm bodies may
     // reference pattern-bound variables that aren't in scope here.
-    key := str.Concat(strconv.Itoa(e.line), str.Concat(":", strconv.Itoa(e.col)))
+    key := checker.pubPosKey(cg.exprCtx, e.line, e.col)
     // NOTE: access via a local — the bootstrap compiler mis-emits the
     // receiver address for `cg.checker.matchResultTypes` (pointer field
     // treated as inline struct; comp_error.md #32). Going through an
@@ -10879,6 +10798,22 @@ fn resolveMethodCallFnName(cg: *CodeGen, fnExpr: ast.Expr) -> (string, bool) {
     methodName := fnExpr.fieldName
     receiverExpr := fnExpr.fieldTarget[0]
 
+    // A monomorphized callee recorded by the checker bypasses the
+    // name-splitting heuristics below — __-mangled names cannot be
+    // reconstructed from LLVM struct/identifier spellings.
+    monoSym := checker.callTargetFor(cg.checker, cg.currentFilePath, cg.exprCtx, fnExpr.line, fnExpr.col)
+    if str.Len(monoSym) > 0 {
+        isMonoModule := false
+        if receiverExpr.kind == ast.EX_IDENT {
+            _, isLocal := lookupVar(cg, receiverExpr.ident)
+            isGlobal := mapStringStringHasKeyCG(cg.globalVarTypes, receiverExpr.ident)
+            if !isLocal && !isGlobal {
+                isMonoModule = true
+            }
+        }
+        return monoSym, isMonoModule
+    }
+
     // Determine the function name to call
     fnName := methodName
     isModuleCall := false
@@ -11457,7 +11392,7 @@ fn i64Operand(cg: *CodeGen, op32: string) -> string {
 fn emitIndexBoundsCheck(cg: *CodeGen, targetExpr: ast.Expr, target: string, leftType: string, idxReg: string, idxExpr: ast.Expr, isWrite: bool) {
     isSlice := false
     isString := false
-    tt := checker.exprTypeLookup(cg.checker, cg.currentFilePath, targetExpr.line, targetExpr.col)
+    tt := checker.exprTypeLookup(cg.checker, cg.currentFilePath, cg.exprCtx, targetExpr.line, targetExpr.col)
     if tt.kind == checker.TK_NAMED {
         tt = resolveAliasCG(cg, tt)
     }
@@ -11787,6 +11722,13 @@ fn emitStructInitExpr(cg: *CodeGen, e: ast.Expr) -> string {
         if str.Len(qualifiedLayout.llType) > 0 {
             structName = qualified
         }
+    }
+    // Prefer the checker's recorded type: for monomorphized generics it
+    // carries the instantiated mangled name while structLitName still
+    // spells the generic source (Stack vs. Stack__int).
+    litType := exprSkinkType(cg, e)
+    if litType.kind == checker.TK_NAMED && str.Len(cg.structLayouts[litType.name].llType) > 0 {
+        structName = litType.name
     }
     layout := cg.structLayouts[structName]
     hasLayout := str.Len(layout.llType) > 0
@@ -13145,7 +13087,7 @@ fn emitVarStmt(cg: *CodeGen, stmt: ast.Stmt) {
         // callee returns a fn-typed alias), recover the checker's recorded
         // type so that calls through the variable emit indirect calls.
         if synT.kind == 0 || synT.kind == checker.TK_UNKNOWN {
-            rt := checker.exprTypeLookup(cg.checker, cg.currentFilePath, stmt.varValue[0].line, stmt.varValue[0].col)
+            rt := checker.exprTypeLookup(cg.checker, cg.currentFilePath, cg.exprCtx, stmt.varValue[0].line, stmt.varValue[0].col)
             if rt.kind != 0 && rt.kind != checker.TK_UNKNOWN {
                 synT = rt
             }
@@ -14739,7 +14681,7 @@ fn emitForInStmt(cg: *CodeGen, stmt: ast.Stmt) {
     // Channel iteration: the checker types the loop var as the element
     // type, but without a dedicated emit path the i8* chan pointer would
     // be treated as a byte slice and iterate garbage (comp_error.md #83).
-    chT := checker.exprTypeLookup(cg.checker, cg.currentFilePath, iterExpr.line, iterExpr.col)
+    chT := checker.exprTypeLookup(cg.checker, cg.currentFilePath, cg.exprCtx, iterExpr.line, iterExpr.col)
     if chT.kind == checker.TK_NAMED {
         chT = resolveAliasCG(cg, chT)
     }
@@ -15475,9 +15417,13 @@ fn emitFnDecl(cg: *CodeGen, d: ast.Decl) {
     savedCapturedVars := cg.capturedVars
     savedDeferQueueAlloca := cg.deferQueueAlloca
     savedCurrentFnName := cg.currentFnName
+    savedExprCtx := cg.exprCtx
     // Record the enclosing function for coverage-map entries (-cov);
     // restored with the rest of the saved state below.
     cg.currentFnName = d.fnName
+    // Monomorphized clones carry their emitted symbol name in monoKey so
+    // checker lookups namespace their expression types correctly.
+    cg.exprCtx = d.monoKey
     cg.currentModule = ""
     // Use the original function name (d.fnName) for module detection,
     // since fnName may have been renamed (e.g. main -> _skink_main).
@@ -15916,6 +15862,7 @@ fn emitFnDecl(cg: *CodeGen, d: ast.Decl) {
     cg.dbgCurrentLoc = ""
     cg.dbgDefaultLoc = ""
     cg.currentFnName = savedCurrentFnName
+    cg.exprCtx = savedExprCtx
 }
 
 // emitStructDecl handles struct declarations (emits type definition).
@@ -16123,6 +16070,14 @@ fn emitDebugMetadata(cg: *CodeGen) {
 
 // emitProgram emits the full LLVM IR for a program.
 pub fn emitProgram(cg: *CodeGen, decls: []ast.Stmt) -> string {
+    // Append the checker's monomorphized instantiations: they are
+    // registered and emitted through the ordinary decl loops below so
+    // struct layouts, fn signatures, and bodies all come out under
+    // their mangled symbol names.
+    mono := checker.MonoDecls(cg.checker)
+    for mi := 0; mi < len(mono); mi = mi + 1 {
+        decls = append(decls, mono[mi])
+    }
     // Emit module header
     emitHeader(cg, "; ModuleID = 'skink_program'\n")
     emitHeader(cg, "source_filename = \"skink_program\"\n")
@@ -16207,9 +16162,12 @@ pub fn emitProgram(cg: *CodeGen, decls: []ast.Stmt) -> string {
                 j = j + 1
             }
         }
-        if d.kind == ast.ST_STRUCT {
+        if d.kind == ast.ST_STRUCT && len(d.structGenerics) == 0 {
             // Lazily-computed layouts (declaration-order independence,
             // comp_error.md #131) are already registered — do not recompute.
+            // Generic originals are skipped entirely: their fields still
+            // mention type params and would resolve to phantom mangled
+            // names — only the monomorphized clones are real types.
             if str.Len(cg.structLayouts[d.structName].llType) == 0 {
                 registerStructLayout(cg, d.structName, computeStructLayout(cg, d.structName, d), d)
             }
@@ -16468,11 +16426,13 @@ pub fn emitProgram(cg: *CodeGen, decls: []ast.Stmt) -> string {
     // contain template-typed fields)
     emitTemplateTypes(cg)
 
-    // Emit struct type definitions
+    // Emit struct type definitions. Generic originals are never emitted —
+    // only their monomorphized clones exist as real types (their field
+    // types still mention unresolved type params).
     i = 0
     for i < len(decls) {
         d := decls[i].decl
-        if d.kind == ast.ST_STRUCT {
+        if d.kind == ast.ST_STRUCT && len(d.structGenerics) == 0 {
             emitStructDecl(cg, d)
         }
         i = i + 1
@@ -16482,7 +16442,9 @@ pub fn emitProgram(cg: *CodeGen, decls: []ast.Stmt) -> string {
     i = 0
     for i < len(decls) {
         d := decls[i].decl
-        if d.kind == ast.ST_FN && !d.fnIsExtern {
+        // Generic originals are never emitted — calls resolve to their
+        // monomorphized clones (appended to decls above) via callTargets.
+        if d.kind == ast.ST_FN && !d.fnIsExtern && len(d.fnGenerics) == 0 {
             cg.currentFilePath = decls[i].filePath
             cg.currentStmtLine = decls[i].line
             cg.currentStmtCol = decls[i].col
@@ -16493,21 +16455,33 @@ pub fn emitProgram(cg: *CodeGen, decls: []ast.Stmt) -> string {
             emitRulesetCode(cg, d)
         }
         if d.kind == ast.ST_STRUCT {
-            // Emit each struct method with qualified name
+            // Emit each struct method with qualified name. Generic
+            // originals emit nothing: their methods only exist as
+            // monomorphized clones.
             j := 0
-            for j < len(d.structMethods) {
-                m := d.structMethods[j]
-                origName := m.fnName
-                m.fnName = str.Concat(d.structName, str.Concat(".", m.fnName))
-                cg.currentFilePath = decls[i].filePath
-                cg.currentStmtLine = decls[i].line
-                cg.currentStmtCol = decls[i].col
-                emitFnDecl(cg, m)
-                m.fnName = origName
-                j = j + 1
+            if len(d.structGenerics) == 0 {
+                for j < len(d.structMethods) {
+                    m := d.structMethods[j]
+                    // Methods that declare their own type params only exist
+                    // as concrete instantiateMethod clones — never emit the
+                    // unspecialized original (its U-typed params are
+                    // unresolvable). Same for generic-original structs.
+                    if len(m.fnGenerics) == 0 {
+                        origName := m.fnName
+                        m.fnName = str.Concat(d.structName, str.Concat(".", m.fnName))
+                        cg.currentFilePath = decls[i].filePath
+                        cg.currentStmtLine = decls[i].line
+                        cg.currentStmtCol = decls[i].col
+                        emitFnDecl(cg, m)
+                        m.fnName = origName
+                    }
+                    j = j + 1
+                }
             }
-            layout := cg.structLayouts[d.structName]
-            emitStructDtorTrampoline(cg, d.structName, layout)
+            if len(d.structGenerics) == 0 {
+                layout := cg.structLayouts[d.structName]
+                emitStructDtorTrampoline(cg, d.structName, layout)
+            }
         }
         if d.kind == ast.ST_SERVICE && str.Len(d.serviceForType) > 0 {
             // Emit service implementation methods as forType.methodName
@@ -17782,6 +17756,15 @@ fn exprCallLLType(cg: *CodeGen, e: ast.Expr) -> string {
     fnExpr := e.callFunc[0]
     if fnExpr.kind == ast.EX_IDENT {
         fnName := resolveDirectFnName(cg, fnExpr.ident)
+        // Monomorphized generic call: resolve the concrete specialization
+        // so the return type comes from the instantiated signature.
+        monoTarget := checker.callTargetFor(cg.checker, cg.currentFilePath, cg.exprCtx, e.line, e.col)
+        if str.Len(monoTarget) == 0 {
+            monoTarget = checker.callTargetFor(cg.checker, cg.currentFilePath, cg.exprCtx, fnExpr.line, fnExpr.col)
+        }
+        if str.Len(monoTarget) > 0 {
+            fnName = monoTarget
+        }
         // Type casts
         if str.Equal(fnName, "int") || str.Equal(fnName, "uint") || str.Equal(fnName, "int32") || str.Equal(fnName, "uint32") {
             return "i32"
@@ -18060,6 +18043,12 @@ fn exprStructLitLLType(cg: *CodeGen, e: ast.Expr) -> string {
         if str.Len(cg.structLayouts[qualified].llType) > 0 {
             structName = qualified
         }
+    }
+    // Prefer the checker's recorded type for monomorphized generics —
+    // structLitName spells the generic source, not the mangled clone.
+    litType := exprSkinkType(cg, e)
+    if litType.kind == checker.TK_NAMED && str.Len(cg.structLayouts[litType.name].llType) > 0 {
+        structName = litType.name
     }
     layout := cg.structLayouts[structName]
     if str.Len(layout.llType) > 0 {

@@ -2031,37 +2031,19 @@ fn parsePrefix(p: *Parser) -> ast.Expr {
         e := ast.newExpr(ast.EX_IDENT, tok.line, tok.col)
         e.ident = tok.literal
         advance(p)
-        // Generic-vs-comparison disambiguation for ident<T
-        // Only uppercase identifiers are treated as generic types.
-        // Lowercase identifiers with '<' are always treated as comparison
-        // (e.g. `i < n`). This means lowercase generic function calls
-        // (e.g. `foo<int>(x)`) are not supported in expression context,
-        // but this is rare and the stdlib doesn't use this pattern.
+        // Generic-vs-comparison disambiguation for ident<T...>:
+        // Use bounded lookahead + backtracking for both uppercase and
+        // lowercase identifiers so `MAX < count` stays a comparison while
+        // `Box<int>{}`, `Box<int>.Of()`, `id<int>(x)`, `Identity<int>(x)`,
+        // and `f := Identity<int>` parse their type arguments cleanly.
         if curIs(p, lexer.T_LT) && peekIsTypeStart(p) {
-            isUpper := isUpperIdent(tok.literal)
-            if isUpper {
-                // Uppercase identifiers are always treated as generic types
-                // (e.g. List<int>, Map<string, int>, HashMap<K, V>{...}).
-                e.genericArgs = parseGenericArgs(p)
-            } else {
-                // Lowercase identifiers use backtracking: try parsing generic
-                // args, but if not followed by '(' (a call) or '{' (struct lit),
-                // restore and treat '<' as a comparison operator.
-                saved := saveState(p)
-                if !genericCallFollows(p) {
+            saved := saveState(p)
+            if genericCallFollows(p) {
+                args := parseGenericArgs(p)
+                if len(p.errors) > saved.errCount {
                     restoreState(p, saved)
                 } else {
-                    args := parseGenericArgs(p)
-                    if curIs(p, lexer.T_LPAREN) {
-                        // Confirmed: generic function call
-                        e.genericArgs = args
-                    } else if curIs(p, lexer.T_LBRACE) && !p.noStructInit {
-                        // Confirmed: generic struct literal (e.g. foo<T>{...})
-                        e.genericArgs = args
-                    } else {
-                        // Not a generic call — restore and treat '<' as comparison
-                        restoreState(p, saved)
-                    }
+                    e.genericArgs = args
                 }
             }
         }
@@ -2613,19 +2595,20 @@ fn parseInfix(p: *Parser, left: ast.Expr) -> ast.Expr {
         e := ast.newExpr(ast.EX_FIELD, tok.line, tok.col)
         e.fieldTarget = ast.singleExpr(left)
         e.fieldName = fieldName
-        // Generic args on a selector are only meaningful when the closing
-        // '>' is immediately followed by '(' (generic method call, e.g.
-        // pkg.New<T>()) or '{' (generic struct literal, pkg.Type<T>{...}).
-        // Otherwise the '<' is a comparison (e.g. `out.Wellbeing < 0.0`),
-        // so backtrack and let the infix parser handle it.
-        if curIs(p, lexer.T_LT) && peekIsTypeStart(p) && isUpperIdent(fieldName) {
+        // Generic args on a selector: supports uppercase & lowercase generic
+        // methods (`obj.Map<U>(f)`, `obj.map<U>(f)`), module-qualified generic
+        // functions (`pkg.New<T>()`, `pkg.id<T>(x)`), qualified struct literals
+        // (`pkg.Box<T>{...}`), static generic calls (`pkg.Box<T>.Of()`), and
+        // qualified generic function values (`f := pkg.Identity<int>`).
+        // Otherwise '<' is a comparison (e.g. `out.Wellbeing < 0.0`).
+        if curIs(p, lexer.T_LT) && peekIsTypeStart(p) {
             saved := saveState(p)
             if genericCallFollows(p) {
                 args := parseGenericArgs(p)
-                if curIs(p, lexer.T_LPAREN) || curIs(p, lexer.T_LBRACE) {
-                    e.genericArgs = args
-                } else {
+                if len(p.errors) > saved.errCount {
                     restoreState(p, saved)
+                } else {
+                    e.genericArgs = args
                 }
             }
         }
@@ -2718,6 +2701,9 @@ fn looksLikeGenericArgs(p: *Parser) -> bool {
 // peekIsTypeStart checks if the peek token could start a type.
 fn peekIsTypeStart(p: *Parser) -> bool {
     pk := p.peekTok.kind
+    if pk == lexer.T_FLOAT {
+        return str.Equal(p.peekTok.literal, "float")
+    }
     return pk == lexer.T_IDENT || pk == lexer.T_STAR || pk == lexer.T_LBRACKET ||
     pk == lexer.T_MAP || pk == lexer.T_SET || pk == lexer.T_CHAN ||
     pk == lexer.T_TENSOR || pk == lexer.T_FN || pk == lexer.T_LPAREN ||
@@ -2725,12 +2711,15 @@ fn peekIsTypeStart(p: *Parser) -> bool {
     pk == lexer.T_INT64 || pk == lexer.T_UINT || pk == lexer.T_UINT8 ||
     pk == lexer.T_UINT16 || pk == lexer.T_UINT32 || pk == lexer.T_UINT64 ||
     pk == lexer.T_BOOL || pk == lexer.T_STRING_TYPE || pk == lexer.T_BYTES_TYPE ||
-    pk == lexer.T_FLOAT || pk == lexer.T_VOID || pk == lexer.T_ERROR
+    pk == lexer.T_VOID || pk == lexer.T_ERROR
 }
 
 // curIsTypeStart reports whether the current token could start a type.
 fn curIsTypeStart(p: *Parser) -> bool {
     k := p.curTok.kind
+    if k == lexer.T_FLOAT {
+        return str.Equal(p.curTok.literal, "float")
+    }
     return k == lexer.T_IDENT || k == lexer.T_STAR || k == lexer.T_LBRACKET ||
     k == lexer.T_MAP || k == lexer.T_SET || k == lexer.T_CHAN ||
     k == lexer.T_TENSOR || k == lexer.T_FN || k == lexer.T_LPAREN ||
@@ -2738,36 +2727,119 @@ fn curIsTypeStart(p: *Parser) -> bool {
     k == lexer.T_INT64 || k == lexer.T_UINT || k == lexer.T_UINT8 ||
     k == lexer.T_UINT16 || k == lexer.T_UINT32 || k == lexer.T_UINT64 ||
     k == lexer.T_BOOL || k == lexer.T_STRING_TYPE || k == lexer.T_BYTES_TYPE ||
-    k == lexer.T_FLOAT || k == lexer.T_VOID || k == lexer.T_ERROR
+    k == lexer.T_VOID || k == lexer.T_ERROR
 }
 
-// genericCallFollows checks if a '<' starts generic args followed by a call.
+// isValidGenericArgToken reports whether tok can legally appear inside a
+// `<Type, ...>` argument list in expression context. Rejecting expression
+// operators (`&&`, `||`, `+`, `==`, etc.) and numeric literals prevents
+// comparisons like `a < b && c > (d)` from mis-parsing as generic arguments.
+fn isValidGenericArgToken(tok: lexer.Token) -> bool {
+    k := tok.kind
+    if k == lexer.T_FLOAT {
+        return str.Equal(tok.literal, "float")
+    }
+    return k == lexer.T_IDENT || k == lexer.T_STAR || k == lexer.T_LBRACKET ||
+    k == lexer.T_RBRACKET || k == lexer.T_COMMA || k == lexer.T_DOT ||
+    k == lexer.T_LPAREN || k == lexer.T_RPAREN || k == lexer.T_ARROW ||
+    k == lexer.T_LT || k == lexer.T_GT || k == lexer.T_RSHIFT ||
+    k == lexer.T_MAP || k == lexer.T_SET || k == lexer.T_CHAN ||
+    k == lexer.T_TENSOR || k == lexer.T_FN || k == lexer.T_VOID ||
+    k == lexer.T_ERROR || k == lexer.T_INT8 || k == lexer.T_INT16 ||
+    k == lexer.T_INT32 || k == lexer.T_INT64 || k == lexer.T_UINT ||
+    k == lexer.T_UINT8 || k == lexer.T_UINT16 || k == lexer.T_UINT32 ||
+    k == lexer.T_UINT64 || k == lexer.T_BOOL || k == lexer.T_STRING_TYPE ||
+    k == lexer.T_BYTES_TYPE || k == lexer.T_COMMENT || k == lexer.T_DOC
+}
+
+// genericCallFollows checks whether '<' starts a balanced `<Type, ...>` list
+// followed by a valid generic-instantiation continuation: '(' (call), '{'
+// (struct literal when allowed), '.' (static call `Type<T>.Method()`), or a
+// delimiter/end-of-expression for generic function values (`f := id<int>`).
 fn genericCallFollows(p: *Parser) -> bool {
     idx := p.pos
     depth := 0
+    parenDepth := 0
+    bracketDepth := 0
+    prevKind := lexer.T_ILLEGAL
     for idx < len(p.tokens) {
-        kind := p.tokens[idx].kind
-        if kind == lexer.T_LT {
+        tok := p.tokens[idx]
+        kind := tok.kind
+        if kind == lexer.T_NEWLINE {
+            // Allow line continuation only right after ',' or '<'.
+            if prevKind != lexer.T_COMMA && prevKind != lexer.T_LT {
+                return false
+            }
+            idx = idx + 1
+            continue
+        }
+        if !isValidGenericArgToken(tok) {
+            return false
+        }
+        if kind == lexer.T_COMMENT || kind == lexer.T_DOC {
+            idx = idx + 1
+            continue
+        }
+        if kind == lexer.T_LPAREN {
+            parenDepth = parenDepth + 1
+        } else if kind == lexer.T_RPAREN {
+            parenDepth = parenDepth - 1
+            if parenDepth < 0 {
+                return false
+            }
+        } else if kind == lexer.T_LBRACKET {
+            bracketDepth = bracketDepth + 1
+        } else if kind == lexer.T_RBRACKET {
+            bracketDepth = bracketDepth - 1
+            if bracketDepth < 0 {
+                return false
+            }
+        } else if kind == lexer.T_LT {
             depth = depth + 1
-        } else if kind == lexer.T_GT {
-            depth = depth - 1
+        } else if kind == lexer.T_GT || kind == lexer.T_RSHIFT {
+            step := 1
+            if kind == lexer.T_RSHIFT {
+                step = 2
+            }
+            depth = depth - step
+            if depth < 0 {
+                return false
+            }
             if depth == 0 {
+                if parenDepth != 0 || bracketDepth != 0 {
+                    return false
+                }
                 idx = idx + 1
-                for idx < len(p.tokens) && isTrivia(p.tokens[idx].kind) {
+                for idx < len(p.tokens) && (p.tokens[idx].kind == lexer.T_COMMENT || p.tokens[idx].kind == lexer.T_DOC) {
                     idx = idx + 1
                 }
                 if idx >= len(p.tokens) {
-                    return false
+                    return true
                 }
-                return p.tokens[idx].kind == lexer.T_LPAREN || p.tokens[idx].kind == lexer.T_LBRACE
+                nk := p.tokens[idx].kind
+                if nk == lexer.T_LPAREN || nk == lexer.T_DOT {
+                    return true
+                }
+                if nk == lexer.T_LBRACE {
+                    return !p.noStructInit
+                }
+                if nk == lexer.T_NEWLINE || nk == lexer.T_SEMICOLON ||
+                   nk == lexer.T_COMMA || nk == lexer.T_RPAREN ||
+                   nk == lexer.T_RBRACKET || nk == lexer.T_RBRACE ||
+                   nk == lexer.T_EOF {
+                    return true
+                }
+                return false
             }
         }
+        prevKind = kind
         idx = idx + 1
     }
     return false
 }
 
-// parseGenericArgs parses <Type, Type, ...>.
+// parseGenericArgs parses <Type, Type, ...>, splitting `>>` (T_RSHIFT) when
+// nested generic type arguments close back-to-back (e.g. `Box<Box<int>>`).
 fn parseGenericArgs(p: *Parser) -> []ast.Type {
     var args []ast.Type
     advance(p)
@@ -2782,6 +2854,15 @@ fn parseGenericArgs(p: *Parser) -> []ast.Type {
     }
     if curIs(p, lexer.T_GT) {
         advance(p)
+    } else if curIs(p, lexer.T_RSHIFT) {
+        p.curTok = lexer.Token{
+            kind:    lexer.T_GT,
+            literal: ">",
+            line:    p.curTok.line,
+            col:     p.curTok.col + 1
+        }
+    } else {
+        errorAt(p, p.curTok, "expected >")
     }
     return args
 }

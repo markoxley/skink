@@ -1223,9 +1223,48 @@ pub struct Checker {
     // expression so that untyped integer constants can be range-checked
     // when they flow into narrow integer targets (comp_error.md #28).
     constExprs: exprTable
-    // erasureDepth bounds the generic-struct instantiation check against
-    // mutually recursive generic field types (comp_error.md #142).
-    erasureDepth: int
+    // exprCtx namespaces exprTypes/callTargets keys for monomorphized
+    // decl bodies: instantiated clones share the source positions of
+    // their generic originals, so the emitted symbol name (e.g.
+    // "main.Stack__int.push") disambiguates otherwise identical keys.
+    exprCtx: string
+    // activeTypeParams names the type parameters in scope for the
+    // enclosing generic declaration (fnGenerics, structGenerics, and
+    // method-level generics). Generic type applications whose args still
+    // mention them are not monomorphized — they remain in the
+    // substitution-based representation used inside generic bodies.
+    activeTypeParams: strBoolTable
+    activeTPList: []string
+    // monoDecls accumulates instantiated declaration stmts for the
+    // emitter (appended to the program's decl list); monoPending is the
+    // checker worklist drained after the main pass so instantiated
+    // bodies are fully type-checked under their own exprCtx.
+    monoDecls: []ast.Stmt
+    monoPending: []ast.Stmt
+    // monoSeen dedupes instantiations by mangled symbol name so each
+    // (decl, concrete-args) pair is cloned exactly once.
+    monoSeen: strBoolTable
+    // monoFrozen is set once checking completes: emitter-side
+    // astTypeToType calls still canonicalize names to their mangled
+    // forms, but never enqueue new clones for emission.
+    monoFrozen: bool
+    // callTargets maps each generic call/fn-value expression's key
+    // ("file|ctx line:col") to the concrete instantiated symbol name
+    // the emitter must resolve — the emitter's name-splitting
+    // heuristics cannot reconstruct mangled names reliably.
+    callTargets: strStrTable
+    // declFiles records the source file of each struct/fn declaration
+    // so instantiated clones inherit the same exprTypes file prefix.
+    declFiles: strStrTable
+    // lastMonoFn records the symbol instantiated by the most recent
+    // applyGenericSubst/inferGenericSubst call so the caller can file
+    // it under the enclosing call expression's callTargets key.
+    lastMonoFn: string
+    // monoSiteModules maps each instantiated clone's monoKey to the
+    // module that triggered the instantiation. TypeOf<T> inside a clone
+    // peels that module's prefix so reflected type names match what the
+    // caller would have spelled (xml roots stay <User>, not <mod.User>).
+    monoSiteModules: strStrTable
 }
 
 // newChecker creates a Checker with a global scope pre-populated with builtins.
@@ -1644,7 +1683,24 @@ pub fn astTypeToType(c: *Checker, t: ast.Type) -> TType {
                 gargs = append(gargs, astTypeToType(c, t.genericArgs[i]))
             }
             result.genericArgs = gargs
-            checkStructErasureSafety(c, result, gargs)
+            // Fully-concrete instantiations monomorphize: the TType name
+            // becomes the mangled instance name so every downstream
+            // lookup (struct decls, method bindings, LLVM layouts)
+            // resolves the specialized clone. Args still mentioning an
+            // enclosing type parameter keep the base name plus
+            // genericArgs and flow through the substitution machinery.
+            sdecl := c.structs.Get(result.name)
+            if sdecl.kind != 0 && len(sdecl.structGenerics) > 0 {
+                if len(t.genericArgs) != len(sdecl.structGenerics) {
+                    report(c, str.Concat("generic struct \"", str.Concat(result.name, str.Concat("\" expects ", str.Concat(itoa(len(sdecl.structGenerics)), str.Concat(" type argument(s), got ", itoa(len(t.genericArgs))))))))
+                } else if argsAreConcrete(c, gargs) {
+                    // The mangled name fully encodes the instantiation —
+                    // keeping genericArgs would double-mangle downstream
+                    // (Box<int> → Box__int__int in mangleTypeName).
+                    result.name = instantiateStruct(c, sdecl, gargs)
+                    result.genericArgs = []TType{}
+                }
+            }
         }
         return result
     }
@@ -2135,6 +2191,7 @@ pub fn checkProgram(c: *Checker, decls: []ast.Stmt) -> bool {
             }
             declare(c, d.structName, namedType(d.structName))
             c.structs.Set(d.structName, d)
+            c.declFiles.Set(d.structName, decl.filePath)
             // Also register under short name for backward compatibility
             // (only if not already taken by another struct)
             shortName := d.structName
@@ -2324,11 +2381,19 @@ pub fn checkProgram(c: *Checker, decls: []ast.Stmt) -> bool {
             }
         } else if decl.kind == ast.ST_FN {
             d := decl.decl
+            // The fn's own type params must be active while its signature
+            // is built — otherwise `Box<U>` inside a generic method's
+            // signature looks "concrete" and spawns a bogus Box__U clone.
+            pushed := pushTypeParams(c, d.fnGenerics)
             fnType := fnTypeFromDecl(c, d)
+            popTypeParams(c, pushed)
             declare(c, d.fnName, fnType)
             c.fnDecls.Set(d.fnName, d)
+            c.declFiles.Set(d.fnName, decl.filePath)
             if str.Len(c.currentModule) > 0 {
-                c.fnDecls.Set(str.Concat(str.Concat(c.currentModule, "."), d.fnName), d)
+                qualified := str.Concat(str.Concat(c.currentModule, "."), d.fnName)
+                c.fnDecls.Set(qualified, d)
+                c.declFiles.Set(qualified, decl.filePath)
             }
         } else if decl.kind == ast.ST_CONST {
             // Consts are pre-registered in the pre-pass; their types are
@@ -2337,7 +2402,10 @@ pub fn checkProgram(c: *Checker, decls: []ast.Stmt) -> bool {
         } else if decl.kind == ast.ST_STRUCT {
             d := decl.decl
             for j := 0; j < len(d.structMethods); j = j + 1 {
+                pushed := pushTypeParams(c, d.structGenerics)
+                pushed = pushed + pushTypeParams(c, d.structMethods[j].fnGenerics)
                 fnType := fnTypeFromDecl(c, d.structMethods[j])
+                popTypeParams(c, pushed)
                 declare(c, str.Concat(str.Concat(d.structName, "."), d.structMethods[j].fnName), fnType)
             }
         } else if decl.kind == ast.ST_ENUM {
@@ -2425,8 +2493,11 @@ pub fn checkProgram(c: *Checker, decls: []ast.Stmt) -> bool {
             fnType := fnTypeFromDecl(c, d)
             declare(c, d.fnName, fnType)
             c.fnDecls.Set(d.fnName, d)
+            c.declFiles.Set(d.fnName, decl.filePath)
             if str.Len(c.currentModule) > 0 {
-                c.fnDecls.Set(str.Concat(str.Concat(c.currentModule, "."), d.fnName), d)
+                qualified := str.Concat(str.Concat(c.currentModule, "."), d.fnName)
+                c.fnDecls.Set(qualified, d)
+                c.declFiles.Set(qualified, decl.filePath)
             }
         }
     }
@@ -2509,6 +2580,40 @@ pub fn checkProgram(c: *Checker, decls: []ast.Stmt) -> bool {
         }
         checkDeclaration(c, decl)
     }
+
+    // Drain the monomorphization worklist. Checking a clone's body can
+    // itself instantiate further generics (e.g. HashMap<K,V>.Put using
+    // Entry<K,V>), so the queue is drained iteratively. Each clone runs
+    // under its own exprCtx (set from decl.monoKey inside checkFnDecl)
+    // so exprTypes/callTargets keys stay distinct from the generic
+    // original's identical source positions. The total instantiation
+    // count is bounded: a self-referential instantiation chain such as
+    // `next: Node<Node<T>>` fields would otherwise grow the queue
+    // without limit.
+    mi := 0
+    for mi < len(c.monoPending) {
+        if len(c.monoDecls) > 4096 {
+            report(c, "monomorphization limit exceeded (4096 instantiations) — recursive generic expansion?")
+            break
+        }
+        st := c.monoPending[mi]
+        mi = mi + 1
+        setModuleFromDecl(c, st)
+        // Clone stmts carry no ST_MODULE marker; restore the module
+        // from the mangled name's "module." prefix so unqualified
+        // references inside the body resolve against the source module.
+        if str.Len(st.decl.monoKey) > 0 {
+            dotIdx := str.IndexOf(st.decl.monoKey, ".")
+            if dotIdx > 0 {
+                c.currentModule = str.Substr(st.decl.monoKey, 0, dotIdx)
+            }
+        }
+        checkDeclaration(c, st)
+    }
+    // Checking is finished: emit-time astTypeToType calls may still
+    // canonicalize names to their mangled forms, but must never enqueue
+    // new clones for emission.
+    c.monoFrozen = true
 
     // Report unused imports
     for mi := 0; mi < len(c.importModules); mi = mi + 1 {
@@ -2670,6 +2775,10 @@ fn resolveConstNamedType(c: *Checker, name: string) {
 
 // checkStructDecl validates struct field types and checks its methods.
 fn checkStructDecl(c: *Checker, d: ast.Decl) {
+    // The struct's type parameters are active throughout field and
+    // method checking so generic applications still mentioning them
+    // (e.g. a Pair<K,V> field inside Box<T>) are not monomorphized.
+    pushed := pushTypeParams(c, d.structGenerics)
     for i := 0; i < len(d.structFields); i = i + 1 {
         // Duplicate field names silently shadow the earlier slot
         // (comp_error.md #89) — reject them at declaration time.
@@ -2708,6 +2817,7 @@ fn checkStructDecl(c: *Checker, d: ast.Decl) {
     for i := 0; i < len(d.structMethods); i = i + 1 {
         checkFnDecl(c, d.structMethods[i])
     }
+    popTypeParams(c, pushed)
 }
 
 // structValueCycle reports whether a by-value struct-field path from
@@ -2781,7 +2891,15 @@ fn checkFnDecl(c: *Checker, fnDecl: ast.Decl) {
             }
         }
     }
+    // The fn's own type parameters are active while its signature is
+    // built and its body checked — composite types mentioning them
+    // (Box<U>) must stay generic rather than instantiating bogus clones.
+    // For monomorphized clones exprCtx namespaces every recorded
+    // expression type/call target under the emitted symbol name.
+    pushed := pushTypeParams(c, fnDecl.fnGenerics)
     fnType := fnTypeFromDecl(c, fnDecl)
+    oldCtx := c.exprCtx
+    c.exprCtx = fnDecl.monoKey
     oldFn := c.currentFn
     c.currentFn = singleTType(fnType)
     oldRetNames := c.currentFnRetNames
@@ -2826,6 +2944,8 @@ fn checkFnDecl(c: *Checker, fnDecl: ast.Decl) {
         }
     }
     popScope(c)
+    popTypeParams(c, pushed)
+    c.exprCtx = oldCtx
     c.currentFn = oldFn
     c.currentFnRetNames = oldRetNames
 }
@@ -3459,10 +3579,52 @@ fn checkExpr(c: *Checker, e: ast.Expr) -> TType {
     t := checkExprImpl(c, e)
     c.exprDepth = c.exprDepth - 1
     if !c.suppressExprTypes && t.kind != 0 && t.kind != TK_UNKNOWN && e.line > 0 {
-        key := str.Concat(c.currentFile, str.Concat(" ", str.Concat(strconv.Itoa(e.line), str.Concat(":", strconv.Itoa(e.col)))))
-        c.exprTypes.Set(key, t)
+        c.exprTypes.Set(exprKey(c, e.line, e.col), t)
     }
     return t
+}
+
+// exprKey builds the exprTypes key for an expression position. Inside
+// monomorphized clones the emitted symbol name disambiguates positions
+// shared with the generic original ("file|ctx line:col"); outside clones
+// the historical "file line:col" format is preserved.
+fn exprKey(c: *Checker, line: int, col: int) -> string {
+    base := str.Concat(strconv.Itoa(line), str.Concat(":", strconv.Itoa(col)))
+    if str.Len(c.exprCtx) > 0 {
+        return str.Concat(str.Concat(c.currentFile, str.Concat("|", c.exprCtx)), str.Concat(" ", base))
+    }
+    return str.Concat(c.currentFile, str.Concat(" ", base))
+}
+
+// pubExprKey is the emitter-side twin of exprKey: it rebuilds the exact
+// key the checker recorded under, given the decl's monoKey context.
+pub fn pubExprKey(file: string, ctx: string, line: int, col: int) -> string {
+    base := str.Concat(strconv.Itoa(line), str.Concat(":", strconv.Itoa(col)))
+    if str.Len(ctx) > 0 {
+        return str.Concat(str.Concat(file, str.Concat("|", ctx)), str.Concat(" ", base))
+    }
+    return str.Concat(file, str.Concat(" ", base))
+}
+
+// posKey builds the key for position-only tables (chanElemTypes,
+// matchResultTypes, awaitElemTypes). Inside clones the monoKey ctx is
+// prefixed ("ctx|line:col"); the plain "line:col" form is kept
+// elsewhere.
+fn posKey(c: *Checker, line: int, col: int) -> string {
+    base := str.Concat(strconv.Itoa(line), str.Concat(":", strconv.Itoa(col)))
+    if str.Len(c.exprCtx) > 0 {
+        return str.Concat(str.Concat(c.exprCtx, "|"), base)
+    }
+    return base
+}
+
+// pubPosKey is the emitter-side twin of posKey.
+pub fn pubPosKey(ctx: string, line: int, col: int) -> string {
+    base := str.Concat(strconv.Itoa(line), str.Concat(":", strconv.Itoa(col)))
+    if str.Len(ctx) > 0 {
+        return str.Concat(str.Concat(ctx, "|"), base)
+    }
+    return base
 }
 
 // checkExprImpl type-checks an expression and returns its inferred type.
@@ -3502,9 +3664,8 @@ fn checkExprImpl(c: *Checker, e: ast.Expr) -> TType {
         }
         it := checkExpr(c, e.awaitExpr[0])
         if it.kind == TK_NAMED && str.Equal(it.name, "future") && len(it.elem) > 0 {
-            key := str.Concat(strconv.Itoa(e.line), str.Concat(":", strconv.Itoa(e.col)))
             elemT := typeOptT(it.elem)
-            c.awaitElemTypes.Set(key, elemT)
+            c.awaitElemTypes.Set(posKey(c, e.line, e.col), elemT)
             // Awaiting a void call yields the raw (null) handle value.
             if elemT.kind == TK_BUILTIN && str.Equal(elemT.name, "void") {
                 return anyType()
@@ -3567,6 +3728,16 @@ fn checkIdent(c: *Checker, e: ast.Expr) -> TType {
         reportAt(c, e.line, e.col, str.Concat("undefined variable: ", e.ident))
         return unknownType()
     }
+    // A generic fn used as a value (f := id<int>) substitutes the
+    // explicit type arguments and instantiates the specialization,
+    // exactly as a call site would — the emitter resolves the concrete
+    // symbol via callTargets. Non-function idents carrying type args
+    // (e.g. `Stack<int>` in a static method receiver) are left for the
+    // struct-instantiation paths.
+    if len(e.genericArgs) > 0 && typ.kind == TK_FUNCTION {
+        typ = applyGenericSubst(c, e.ident, typ, e.genericArgs)
+        takeMonoFn(c, e)
+    }
     return typ
 }
 
@@ -3600,8 +3771,7 @@ fn checkPrefixExpr(c: *Checker, e: ast.Expr) -> TType {
     if e.prefixOp == "<-" {
         elemType := checkRecvPrefix(c, operand)
         if operand.kind == TK_CHAN && len(operand.elem) > 0 {
-            key := str.Concat(strconv.Itoa(e.line), str.Concat(":", strconv.Itoa(e.col)))
-            c.chanElemTypes.Set(key, typeOptT(operand.elem))
+            c.chanElemTypes.Set(posKey(c, e.line, e.col), typeOptT(operand.elem))
         }
         return elemType
     }
@@ -3965,6 +4135,773 @@ fn substituteType(t: TType, paramMap: map[string]TType) -> TType {
     return t
 }
 
+// canonicalizeTType rewrites Named<args> types whose type arguments are
+// fully concrete into their instantiated struct name (Pair<int,int> →
+// main.Pair__int_int), recursively and without mutating shared type
+// slices. substituteType produces name+args TTypes; downstream lookups
+// (struct decls, method bindings, LLVM layouts) need the mangled symbol.
+fn canonicalizeTType(c: *Checker, t: TType) -> TType {
+    out := t
+    if t.kind == TK_NAMED && len(t.genericArgs) > 0 {
+        sdecl := c.structs.Get(t.name)
+        if sdecl.kind != 0 && len(sdecl.structGenerics) > 0 && len(t.genericArgs) == len(sdecl.structGenerics) && argsAreConcrete(c, t.genericArgs) {
+            out.name = instantiateStruct(c, sdecl, t.genericArgs)
+            out.genericArgs = []TType{}
+        }
+    }
+    if len(out.genericArgs) > 0 {
+        var na []TType
+        for i := 0; i < len(out.genericArgs); i = i + 1 {
+            na = append(na, canonicalizeTType(c, out.genericArgs[i]))
+        }
+        out.genericArgs = na
+    }
+    if len(t.elem) > 0 {
+        var ne []TType
+        for i := 0; i < len(t.elem); i = i + 1 {
+            ne = append(ne, canonicalizeTType(c, t.elem[i]))
+        }
+        out.elem = ne
+    }
+    if len(t.keyType) > 0 {
+        var nk []TType
+        for i := 0; i < len(t.keyType); i = i + 1 {
+            nk = append(nk, canonicalizeTType(c, t.keyType[i]))
+        }
+        out.keyType = nk
+    }
+    if len(t.params) > 0 {
+        var np []TType
+        for i := 0; i < len(t.params); i = i + 1 {
+            np = append(np, canonicalizeTType(c, t.params[i]))
+        }
+        out.params = np
+    }
+    if len(t.retTypes) > 0 {
+        var nr []TType
+        for i := 0; i < len(t.retTypes); i = i + 1 {
+            nr = append(nr, canonicalizeTType(c, t.retTypes[i]))
+        }
+        out.retTypes = nr
+    }
+    if len(t.tupleTypes) > 0 {
+        var nt []TType
+        for i := 0; i < len(t.tupleTypes); i = i + 1 {
+            nt = append(nt, canonicalizeTType(c, t.tupleTypes[i]))
+        }
+        out.tupleTypes = nt
+    }
+    return out
+}
+
+// === Monomorphization ===
+//
+// Generic decls are instantiated by deep-cloning their AST (std/ast
+// SubstDecl) with each type parameter replaced by the concrete argument
+// type, then registering the clone under a mangled symbol name so the
+// ordinary declaration pipeline checks and emits it like any other
+// decl. Names take the form base__arg1_arg2 (module-qualified base kept
+// verbatim, e.g. "hashmap.Entry__string_int"); inside generic bodies —
+// where args still mention the enclosing decl's type parameters — no
+// instantiation happens and the substitution-based representation is
+// retained.
+
+// mangleTypeName renders a concrete type as an identifier-safe fragment
+// for monomorphized symbol/layout names. Named types keep their
+// module-qualified spelling with '.' flattened to '_'; composite types
+// get a structural prefix so distinct types never collide.
+pub fn mangleTypeName(t: TType) -> string {
+    if t.kind == TK_BUILTIN { return t.name }
+    if t.kind == TK_NAMED {
+        n := str.Replace(t.name, ".", "_")
+        if len(t.genericArgs) > 0 {
+            return mangleInstanceName(n, t.genericArgs)
+        }
+        return n
+    }
+    if t.kind == TK_POINTER { return str.Concat("ptr_", mangleTypeName(typeOptT(t.elem))) }
+    if t.kind == TK_ARRAY { return str.Concat("arr_", mangleTypeName(typeOptT(t.elem))) }
+    if t.kind == TK_SET { return str.Concat("set_", mangleTypeName(typeOptT(t.elem))) }
+    if t.kind == TK_CHAN { return str.Concat("chan_", mangleTypeName(typeOptT(t.elem))) }
+    if t.kind == TK_TENSOR { return str.Concat("tensor_", mangleTypeName(typeOptT(t.elem))) }
+    if t.kind == TK_MAP {
+        return str.Concat(str.Concat("map_", str.Concat(mangleTypeName(typeOptT(t.keyType)), "_")), mangleTypeName(typeOptT(t.elem)))
+    }
+    if t.kind == TK_FUNCTION {
+        s := "fn"
+        for i := 0; i < len(t.params); i = i + 1 {
+            s = str.Concat(s, str.Concat("_", mangleTypeName(t.params[i])))
+        }
+        for i := 0; i < len(t.retTypes); i = i + 1 {
+            s = str.Concat(s, str.Concat("_", mangleTypeName(t.retTypes[i])))
+        }
+        return s
+    }
+    if t.kind == TK_TUPLE {
+        s := "tup"
+        for i := 0; i < len(t.tupleTypes); i = i + 1 {
+            s = str.Concat(s, str.Concat("_", mangleTypeName(t.tupleTypes[i])))
+        }
+        return s
+    }
+    if str.Len(t.name) > 0 {
+        return str.Replace(t.name, ".", "_")
+    }
+    return "unk"
+}
+
+// mangleInstanceName builds the monomorphized symbol name for a generic
+// declaration instantiated with concrete type arguments.
+pub fn mangleInstanceName(base: string, args: []TType) -> string {
+    s := str.Concat(base, "__")
+    for i := 0; i < len(args); i = i + 1 {
+        if i > 0 {
+            s = str.Concat(s, "_")
+        }
+        s = str.Concat(s, mangleTypeName(args[i]))
+    }
+    return s
+}
+
+// typeHasActiveParam reports whether t mentions a type parameter of the
+// enclosing generic declaration. Such types stay unmonomorphized: they
+// are still generic relative to the decl being checked.
+fn typeHasActiveParam(c: *Checker, t: TType) -> bool {
+    if t.kind == TK_NAMED && c.activeTypeParams.Get(t.name) {
+        return true
+    }
+    for i := 0; i < len(t.genericArgs); i = i + 1 {
+        if typeHasActiveParam(c, t.genericArgs[i]) { return true }
+    }
+    for i := 0; i < len(t.elem); i = i + 1 {
+        if typeHasActiveParam(c, t.elem[i]) { return true }
+    }
+    for i := 0; i < len(t.keyType); i = i + 1 {
+        if typeHasActiveParam(c, t.keyType[i]) { return true }
+    }
+    for i := 0; i < len(t.params); i = i + 1 {
+        if typeHasActiveParam(c, t.params[i]) { return true }
+    }
+    for i := 0; i < len(t.retTypes); i = i + 1 {
+        if typeHasActiveParam(c, t.retTypes[i]) { return true }
+    }
+    for i := 0; i < len(t.tupleTypes); i = i + 1 {
+        if typeHasActiveParam(c, t.tupleTypes[i]) { return true }
+    }
+    return false
+}
+
+// namedTypeResolvable reports whether name refers to a real, declared
+// type — builtin, struct, template, tagged union, alias, or service —
+// rather than an unresolved generic type parameter. A bare identifier
+// like "K" or "V" can appear inside another generic decl's context
+// (e.g. `Entry<K,V>` field types inside `Set<T>`'s methods) where the
+// name is NOT one of the currently-active type params; it still must
+// not be treated as a concrete instantiation argument, or it gets
+// mangled into a phantom `Entry__K_V` clone that can never be
+// substituted or emitted correctly.
+fn namedTypeResolvable(c: *Checker, name: string) -> bool {
+    if isBuiltinTypeName(name) {
+        return true
+    }
+    if str.Equal(name, "any") || str.Equal(name, "void") || str.Equal(name, "error") {
+        return true
+    }
+    if c.structs.Get(name).kind != 0 { return true }
+    if c.templates.Get(name).kind != 0 { return true }
+    if c.taggedUnions.Get(name).kind != 0 { return true }
+    if c.aliases.Get(name).kind != 0 { return true }
+    if c.services.Get(name).kind != 0 { return true }
+    if str.Len(c.currentModule) > 0 && !str.Contains(name, ".") {
+        q := str.Concat(str.Concat(c.currentModule, "."), name)
+        if c.structs.Get(q).kind != 0 { return true }
+        if c.templates.Get(q).kind != 0 { return true }
+        if c.taggedUnions.Get(q).kind != 0 { return true }
+        if c.aliases.Get(q).kind != 0 { return true }
+        if c.services.Get(q).kind != 0 { return true }
+    }
+    return false
+}
+
+// typeMentionsUnresolvable reports whether t contains a named type that
+// resolves to no declared type — the mark of an unbound generic type
+// parameter (possibly one belonging to a different generic decl).
+fn typeMentionsUnresolvable(c: *Checker, t: TType) -> bool {
+    if t.kind == TK_NAMED && !namedTypeResolvable(c, t.name) {
+        return true
+    }
+    for i := 0; i < len(t.genericArgs); i = i + 1 {
+        if typeMentionsUnresolvable(c, t.genericArgs[i]) { return true }
+    }
+    for i := 0; i < len(t.elem); i = i + 1 {
+        if typeMentionsUnresolvable(c, t.elem[i]) { return true }
+    }
+    for i := 0; i < len(t.keyType); i = i + 1 {
+        if typeMentionsUnresolvable(c, t.keyType[i]) { return true }
+    }
+    for i := 0; i < len(t.params); i = i + 1 {
+        if typeMentionsUnresolvable(c, t.params[i]) { return true }
+    }
+    for i := 0; i < len(t.retTypes); i = i + 1 {
+        if typeMentionsUnresolvable(c, t.retTypes[i]) { return true }
+    }
+    for i := 0; i < len(t.tupleTypes); i = i + 1 {
+        if typeMentionsUnresolvable(c, t.tupleTypes[i]) { return true }
+    }
+    return false
+}
+
+// argsAreConcrete reports whether every instantiation argument is free
+// of enclosing-decl type parameters and is a real, resolvable type.
+fn argsAreConcrete(c: *Checker, args: []TType) -> bool {
+    for i := 0; i < len(args); i = i + 1 {
+        if args[i].kind == 0 || args[i].kind == TK_UNKNOWN {
+            return false
+        }
+        if typeHasActiveParam(c, args[i]) {
+            return false
+        }
+        if typeMentionsUnresolvable(c, args[i]) {
+            return false
+        }
+    }
+    return true
+}
+
+// ttypeToAstType converts a checker TType back to an AST type so cloned
+// declarations carry concrete type spellings after substitution.
+fn ttypeToAstType(c: *Checker, t: TType) -> ast.Type {
+    ty := ast.Type{}
+    if t.kind == TK_POINTER {
+        ty.kind = ast.TY_POINTER
+        ty.elem = []ast.Type{ttypeToAstType(c, typeOptT(t.elem))}
+        return ty
+    }
+    if t.kind == TK_ARRAY {
+        ty.kind = ast.TY_ARRAY
+        ty.elem = []ast.Type{ttypeToAstType(c, typeOptT(t.elem))}
+        return ty
+    }
+    if t.kind == TK_SET {
+        ty.kind = ast.TY_SET
+        ty.elem = []ast.Type{ttypeToAstType(c, typeOptT(t.elem))}
+        return ty
+    }
+    if t.kind == TK_CHAN {
+        ty.kind = ast.TY_CHAN
+        ty.elem = []ast.Type{ttypeToAstType(c, typeOptT(t.elem))}
+        return ty
+    }
+    if t.kind == TK_TENSOR {
+        ty.kind = ast.TY_TENSOR
+        ty.elem = []ast.Type{ttypeToAstType(c, typeOptT(t.elem))}
+        return ty
+    }
+    if t.kind == TK_MAP {
+        ty.kind = ast.TY_MAP
+        ty.keyType = []ast.Type{ttypeToAstType(c, typeOptT(t.keyType))}
+        ty.elem = []ast.Type{ttypeToAstType(c, typeOptT(t.elem))}
+        return ty
+    }
+    if t.kind == TK_FUNCTION {
+        ty.kind = ast.TY_FUNC
+        var ps []ast.Type
+        for i := 0; i < len(t.params); i = i + 1 {
+            ps = append(ps, ttypeToAstType(c, t.params[i]))
+        }
+        ty.paramTypes = ps
+        var rs []ast.Type
+        for i := 0; i < len(t.retTypes); i = i + 1 {
+            rs = append(rs, ttypeToAstType(c, t.retTypes[i]))
+        }
+        ty.retTypes = rs
+        return ty
+    }
+    if t.kind == TK_TUPLE {
+        ty.kind = ast.TY_TUPLE
+        var ts []ast.Type
+        for i := 0; i < len(t.tupleTypes); i = i + 1 {
+            ts = append(ts, ttypeToAstType(c, t.tupleTypes[i]))
+        }
+        ty.tupleTypes = ts
+        return ty
+    }
+    ty.kind = ast.TY_NAMED
+    if t.kind == TK_NIL {
+        ty.name = "nil"
+    } else if t.kind == TK_ANY {
+        ty.name = "any"
+    } else {
+        ty.name = t.name
+    }
+    var gas []ast.Type
+    for i := 0; i < len(t.genericArgs); i = i + 1 {
+        gas = append(gas, ttypeToAstType(c, t.genericArgs[i]))
+    }
+    // A name already canonicalized to a monomorphized instance must not
+    // carry its arguments again — re-writing them would re-trigger
+    // generic-arity checks against the non-generic clone.
+    if str.Len(t.name) > 0 && c.monoSeen.Get(t.name) {
+        gas = []ast.Type{}
+    }
+    ty.genericArgs = gas
+    return ty
+}
+
+// substMapFromParams builds the AST-level substitution map for a generic
+// declaration's type parameters bound to concrete argument types.
+fn substMapFromParams(c: *Checker, tps: []ast.TypeParam, args: []TType) -> map[string]ast.Type {
+    m := make(map[string]ast.Type)
+    n := len(tps)
+    if n > len(args) {
+        n = len(args)
+    }
+    for i := 0; i < n; i = i + 1 {
+        m[tps[i].name] = ttypeToAstType(c, args[i])
+    }
+    return m
+}
+
+// checkGenericBounds validates each instantiated type argument against
+// the declared parameter bound (a template name or type). Bounds were
+// previously parsed but never enforced.
+fn checkGenericBounds(c: *Checker, tps: []ast.TypeParam, args: []TType) {
+    n := len(tps)
+    if n > len(args) {
+        n = len(args)
+    }
+    for i := 0; i < n; i = i + 1 {
+        if len(tps[i].bound) == 0 {
+            continue
+        }
+        bt := astTypeToType(c, tps[i].bound[0])
+        if bt.kind == TK_UNKNOWN {
+            continue
+        }
+        if !checkerIsAssignable(c, bt, args[i]) {
+            report(c, str.Concat("type argument ", str.Concat(typeString(args[i]),
+                str.Concat(" does not satisfy bound ", str.Concat(typeString(bt),
+                    str.Concat(" for parameter ", tps[i].name))))))
+        }
+    }
+}
+
+// declareGlobal registers a binding in the global (module) scope.
+// Instantiated names are declared here directly — not via declare —
+// because instantiation fires mid-expression inside an inner scope that
+// would be popped before the binding is ever used.
+fn declareGlobal(c: *Checker, name: string, typ: TType) {
+    existing := c.scopes[0].bindings.Get(name)
+    if existing.typ.kind != 0 && !str.Equal(name, "_") {
+        if existing.typ.kind == TK_NAMED && typ.kind == TK_FUNCTION {
+            nb := Binding{typ: typ}
+            nb.used = true
+            scopeSet(&c.scopes[0], name, nb)
+            return
+        }
+        // A mangled name colliding with a user declaration is possible
+        // only if the user wrote the same __-mangled spelling — flag it
+        // rather than silently shadowing either decl.
+        if !c.monoSeen.Get(name) {
+            report(c, str.Concat("monomorphized name \"", str.Concat(name, "\" collides with an existing declaration")))
+        }
+        return
+    }
+    nb := Binding{typ: typ}
+    nb.used = true
+    scopeSet(&c.scopes[0], name, nb)
+}
+
+// monoStmtFile returns the file path recorded for a declaration name,
+// or the checker's current file when unknown.
+fn monoStmtFile(c: *Checker, name: string) -> string {
+    f := c.declFiles.Get(name)
+    if str.Len(f) > 0 {
+        return f
+    }
+    return c.currentFile
+}
+
+// pushTypeParams marks the given type parameters active for the
+// enclosing generic declaration and returns the count added so the
+// caller can pop exactly those on exit.
+fn pushTypeParams(c: *Checker, tps: []ast.TypeParam) -> int {
+    added := 0
+    for i := 0; i < len(tps); i = i + 1 {
+        if !c.activeTypeParams.Get(tps[i].name) {
+            c.activeTypeParams.Set(tps[i].name, true)
+            c.activeTPList = append(c.activeTPList, tps[i].name)
+            added = added + 1
+        }
+    }
+    return added
+}
+
+// popTypeParams removes the last `added` entries pushed by
+// pushTypeParams.
+fn popTypeParams(c: *Checker, added: int) {
+    for added > 0 && len(c.activeTPList) > 0 {
+        name := c.activeTPList[len(c.activeTPList) - 1]
+        c.activeTPList = c.activeTPList[:len(c.activeTPList) - 1]
+        c.activeTypeParams.Set(name, false)
+        added = added - 1
+    }
+}
+
+// instantiateStruct clones a generic struct declaration with concrete
+// type arguments, registers the clone (fields, methods, type binding),
+// and queues it for checking and emission. Returns the mangled name.
+fn instantiateStruct(c: *Checker, decl: ast.Decl, args: []TType) -> string {
+    mangled := mangleInstanceName(decl.structName, args)
+    if c.monoSeen.Get(mangled) {
+        return mangled
+    }
+    c.monoSeen.Set(mangled, true)
+    if c.monoFrozen {
+        return mangled
+    }
+    checkGenericBounds(c, decl.structGenerics, args)
+    subst := substMapFromParams(c, decl.structGenerics, args)
+    clone := ast.SubstDecl(decl, subst)
+    clone.structName = mangled
+    clone.structGenerics = []ast.TypeParam{}
+    clone.monoKey = mangled
+    c.monoSiteModules.Set(mangled, c.currentModule)
+    for mi := 0; mi < len(clone.structMethods); mi = mi + 1 {
+        clone.structMethods[mi].monoKey = str.Concat(mangled, str.Concat(".", clone.structMethods[mi].fnName))
+        c.monoSiteModules.Set(clone.structMethods[mi].monoKey, c.currentModule)
+    }
+    st := ast.Stmt{}
+    st.kind = ast.ST_STRUCT
+    st.decl = clone
+    st.filePath = monoStmtFile(c, decl.structName)
+    c.declFiles.Set(mangled, st.filePath)
+    c.monoDecls = append(c.monoDecls, st)
+    c.monoPending = append(c.monoPending, st)
+    c.structs.Set(mangled, clone)
+    dotIdx := str.LastIndexOf(mangled, ".")
+    if dotIdx > 0 {
+        short := str.Substr(mangled, dotIdx + 1, str.Len(mangled) - dotIdx - 1)
+        if c.structs.Get(short).kind == 0 {
+            c.structs.Set(short, clone)
+        }
+    }
+    nt := namedType(mangled)
+    nt.genericArgs = args
+    declareGlobal(c, mangled, nt)
+    for mi := 0; mi < len(clone.structMethods); mi = mi + 1 {
+        m := clone.structMethods[mi]
+        // Generic methods get a binding too — still carrying their own
+        // type params — so `recv.M<U>(...)` and inferred `recv.M(...)`
+        // resolve before the method-generic substitution runs. The
+        // method's own params are pushed so types mentioning them
+        // (Box<U>) are not mistaken for concrete instantiations.
+        pushed := pushTypeParams(c, m.fnGenerics)
+        declareGlobal(c, str.Concat(mangled, str.Concat(".", m.fnName)), fnTypeFromDecl(c, m))
+        popTypeParams(c, pushed)
+    }
+    return mangled
+}
+
+// instantiateFn clones a generic function declaration bound to concrete
+// type arguments and registers it under the mangled symbol name.
+// Returns the mangled name.
+fn instantiateFn(c: *Checker, decl: ast.Decl, args: []TType) -> string {
+    mangled := mangleInstanceName(decl.fnName, args)
+    if c.monoSeen.Get(mangled) {
+        return mangled
+    }
+    c.monoSeen.Set(mangled, true)
+    if c.monoFrozen {
+        return mangled
+    }
+    checkGenericBounds(c, decl.fnGenerics, args)
+    subst := substMapFromParams(c, decl.fnGenerics, args)
+    // SubstDecl filters a fn's own type parameters out of the map so its
+    // generics survive cloning; instantiation needs them substituted, so
+    // clear the generics on the source copy first.
+    src := decl
+    src.fnGenerics = []ast.TypeParam{}
+    clone := ast.SubstDecl(src, subst)
+    clone.fnName = mangled
+    clone.monoKey = mangled
+    c.monoSiteModules.Set(mangled, c.currentModule)
+    st := ast.Stmt{}
+    st.kind = ast.ST_FN
+    st.decl = clone
+    st.filePath = monoStmtFile(c, decl.fnName)
+    c.declFiles.Set(mangled, st.filePath)
+    c.monoDecls = append(c.monoDecls, st)
+    c.monoPending = append(c.monoPending, st)
+    declareGlobal(c, mangled, fnTypeFromDecl(c, clone))
+    c.fnDecls.Set(mangled, clone)
+    return mangled
+}
+
+// instantiateMethod clones a method that declares its own type
+// parameters (e.g. `fn Conv<U>(self: Stack<T>, x: U)`) for a concrete
+// receiver instance plus concrete method arguments. methodDecl comes
+// from the (already struct-substituted) structMethods list when the
+// receiver is a monomorphized struct, so only the method's own params
+// remain generic. Returns the fully-qualified emitted symbol name
+// "<struct>__<args>.<method>__<args>".
+fn instantiateMethod(c: *Checker, methodDecl: ast.Decl, structMangled: string, args: []TType) -> string {
+    methodMangled := mangleInstanceName(methodDecl.fnName, args)
+    full := str.Concat(structMangled, str.Concat(".", methodMangled))
+    if c.monoSeen.Get(full) {
+        return full
+    }
+    c.monoSeen.Set(full, true)
+    if c.monoFrozen {
+        return full
+    }
+    checkGenericBounds(c, methodDecl.fnGenerics, args)
+    subst := substMapFromParams(c, methodDecl.fnGenerics, args)
+    src := methodDecl
+    src.fnGenerics = []ast.TypeParam{}
+    clone := ast.SubstDecl(src, subst)
+    clone.fnName = full
+    clone.monoKey = full
+    c.monoSiteModules.Set(full, c.currentModule)
+    st := ast.Stmt{}
+    st.kind = ast.ST_FN
+    st.decl = clone
+    st.filePath = monoStmtFile(c, structMangled)
+    c.monoDecls = append(c.monoDecls, st)
+    c.monoPending = append(c.monoPending, st)
+    declareGlobal(c, full, fnTypeFromDecl(c, clone))
+    c.fnDecls.Set(full, clone)
+    return full
+}
+
+// orderedParamArgs extracts the substitution map's values in the
+// declaration's generic-parameter order so mangled names are
+// deterministic.
+fn orderedParamArgs(fnDecl: ast.Decl, paramMap: map[string]TType) -> []TType {
+    var args []TType
+    for i := 0; i < len(fnDecl.fnGenerics); i = i + 1 {
+        args = append(args, paramMap[fnDecl.fnGenerics[i].name])
+    }
+    return args
+}
+
+// instantiateFnFromParamMap instantiates a generic function when every
+// substituted type argument is concrete. Returns "" when the call still
+// mentions enclosing type parameters (no real instantiation).
+fn instantiateFnFromParamMap(c: *Checker, fnDecl: ast.Decl, paramMap: map[string]TType) -> string {
+    if len(paramMap) == 0 {
+        return ""
+    }
+    args := orderedParamArgs(fnDecl, paramMap)
+
+    if !argsAreConcrete(c, args) {
+        return ""
+    }
+    return instantiateFn(c, fnDecl, args)
+}
+
+// applyMethodGenerics substitutes a method's own type parameters
+// (`recv.M<U>(x)` or inferred `recv.M(x)`) into fnType and records the
+// emitted `struct.M__args` symbol via callTargets. skipParams is the
+// number of leading fnType.params that do not pair with callArgs (1 for
+// receiver methods whose params[0] is self, 0 for static methods).
+// Returns (substituted fnType, whether the method declares type params).
+fn applyMethodGenerics(c: *Checker, e: ast.Expr, fa: ast.Expr, structName: string, fnType: TType, skipParams: int) -> (TType, bool) {
+    sdecl := c.structs.Get(structName)
+    if sdecl.kind == 0 {
+        return fnType, false
+    }
+    var mdecl ast.Decl
+    for mi := 0; mi < len(sdecl.structMethods); mi = mi + 1 {
+        if str.Equal(sdecl.structMethods[mi].fnName, fa.fieldName) {
+            mdecl = sdecl.structMethods[mi]
+            break
+        }
+    }
+    if mdecl.kind == 0 || len(mdecl.fnGenerics) == 0 {
+        if len(e.genericArgs) > 0 && mdecl.kind != 0 {
+            report(c, str.Concat("method \"", str.Concat(fa.fieldName, "\" is not generic")))
+        }
+        return fnType, false
+    }
+    if len(e.genericArgs) > 0 {
+        if len(e.genericArgs) != len(mdecl.fnGenerics) {
+            report(c, str.Concat("generic method \"", str.Concat(fa.fieldName, str.Concat("\" expects ", str.Concat(itoa(len(mdecl.fnGenerics)), str.Concat(" type argument(s), got ", itoa(len(e.genericArgs))))))))
+            return fnType, true
+        }
+        paramMap := buildGenericSubstMap(c, mdecl, e.genericArgs)
+        var margs []TType
+        for gi := 0; gi < len(e.genericArgs); gi = gi + 1 {
+            margs = append(margs, astTypeToType(c, e.genericArgs[gi]))
+        }
+        checkGenericBounds(c, mdecl.fnGenerics, margs)
+        out := canonicalizeTType(c, substituteType(fnType, paramMap))
+        if argsAreConcrete(c, margs) {
+            recordCallTarget(c, e, instantiateMethod(c, mdecl, structName, margs))
+        }
+        return out, true
+    }
+    // Infer the method's type params from the argument types —
+    // callArgs[i] pairs with params[i+skipParams].
+    paramMap := make(map[string]TType)
+    for i := skipParams; i < len(fnType.params); i = i + 1 {
+        pt := fnType.params[i]
+        if typeMentionsParam(mdecl, pt) {
+            ai := i - skipParams
+            if ai < len(e.callArgs) {
+                at := checkExpr(c, e.callArgs[ai])
+                inferTypeParamsIn(c, mdecl, pt, at, paramMap)
+            }
+        }
+    }
+    if len(paramMap) == 0 {
+        return fnType, true
+    }
+    margs := orderedParamArgs(mdecl, paramMap)
+    checkGenericBounds(c, mdecl.fnGenerics, margs)
+    out := canonicalizeTType(c, substituteType(fnType, paramMap))
+    if argsAreConcrete(c, margs) {
+        recordCallTarget(c, e, instantiateMethod(c, mdecl, structName, margs))
+    }
+    return out, true
+}
+
+// typeMentionsParam reports whether t contains one of the declaration's
+// generic type parameter names anywhere in its structure.
+fn typeMentionsParam(fnDecl: ast.Decl, t: TType) -> bool {
+    if t.kind == TK_NAMED && isGenericParamName(fnDecl, t.name) {
+        return true
+    }
+    for i := 0; i < len(t.genericArgs); i = i + 1 {
+        if typeMentionsParam(fnDecl, t.genericArgs[i]) { return true }
+    }
+    for i := 0; i < len(t.elem); i = i + 1 {
+        if typeMentionsParam(fnDecl, t.elem[i]) { return true }
+    }
+    for i := 0; i < len(t.keyType); i = i + 1 {
+        if typeMentionsParam(fnDecl, t.keyType[i]) { return true }
+    }
+    for i := 0; i < len(t.params); i = i + 1 {
+        if typeMentionsParam(fnDecl, t.params[i]) { return true }
+    }
+    for i := 0; i < len(t.retTypes); i = i + 1 {
+        if typeMentionsParam(fnDecl, t.retTypes[i]) { return true }
+    }
+    for i := 0; i < len(t.tupleTypes); i = i + 1 {
+        if typeMentionsParam(fnDecl, t.tupleTypes[i]) { return true }
+    }
+    return false
+}
+
+// inferTypeParamsIn binds generic params appearing inside a composite
+// parameter type by structurally matching it against the argument's
+// type — e.g. `f: fn(T) -> U` vs `fn(int) -> string` binds U = string.
+fn inferTypeParamsIn(c: *Checker, fnDecl: ast.Decl, pt: TType, at: TType, paramMap: map[string]TType) {
+    if at.kind == 0 || at.kind == TK_UNKNOWN {
+        return
+    }
+    if pt.kind == TK_NAMED {
+        if isGenericParamName(fnDecl, pt.name) {
+            if paramMap[pt.name].kind == 0 {
+                paramMap[pt.name] = at
+            }
+            return
+        }
+        n := len(pt.genericArgs)
+        if len(at.genericArgs) < n {
+            n = len(at.genericArgs)
+        }
+        for i := 0; i < n; i = i + 1 {
+            inferTypeParamsIn(c, fnDecl, pt.genericArgs[i], at.genericArgs[i], paramMap)
+        }
+        return
+    }
+    if pt.kind != at.kind {
+        return
+    }
+    ne := len(pt.elem)
+    if len(at.elem) < ne {
+        ne = len(at.elem)
+    }
+    for i := 0; i < ne; i = i + 1 {
+        inferTypeParamsIn(c, fnDecl, pt.elem[i], at.elem[i], paramMap)
+    }
+    nk := len(pt.keyType)
+    if len(at.keyType) < nk {
+        nk = len(at.keyType)
+    }
+    for i := 0; i < nk; i = i + 1 {
+        inferTypeParamsIn(c, fnDecl, pt.keyType[i], at.keyType[i], paramMap)
+    }
+    np := len(pt.params)
+    if len(at.params) < np {
+        np = len(at.params)
+    }
+    for i := 0; i < np; i = i + 1 {
+        inferTypeParamsIn(c, fnDecl, pt.params[i], at.params[i], paramMap)
+    }
+    nr := len(pt.retTypes)
+    if len(at.retTypes) < nr {
+        nr = len(at.retTypes)
+    }
+    for i := 0; i < nr; i = i + 1 {
+        inferTypeParamsIn(c, fnDecl, pt.retTypes[i], at.retTypes[i], paramMap)
+    }
+    nt := len(pt.tupleTypes)
+    if len(at.tupleTypes) < nt {
+        nt = len(at.tupleTypes)
+    }
+    for i := 0; i < nt; i = i + 1 {
+        inferTypeParamsIn(c, fnDecl, pt.tupleTypes[i], at.tupleTypes[i], paramMap)
+    }
+}
+
+// recordCallTarget files the concrete symbol a call/fn-value expression
+// resolves to after monomorphization.
+fn recordCallTarget(c: *Checker, e: ast.Expr, sym: string) {
+    if c.suppressExprTypes || str.Len(sym) == 0 || e.line <= 0 {
+        return
+    }
+    c.callTargets.Set(exprKey(c, e.line, e.col), sym)
+    // Emitter-side resolution sites see the callee sub-expression
+    // (e.callFunc[0]) rather than the whole call, so file the symbol
+    // under that position too.
+    if len(e.callFunc) > 0 {
+        callee := e.callFunc[0]
+        if callee.line > 0 {
+            c.callTargets.Set(exprKey(c, callee.line, callee.col), sym)
+        }
+    }
+}
+
+// takeMonoFn consumes the pending instantiated symbol left by
+// applyGenericSubst/inferGenericSubst and records it for e.
+fn takeMonoFn(c: *Checker, e: ast.Expr) {
+    if str.Len(c.lastMonoFn) > 0 {
+        recordCallTarget(c, e, c.lastMonoFn)
+        c.lastMonoFn = ""
+    }
+}
+
+// callTargetFor returns the concrete symbol recorded for the expression
+// at file/ctx/line:col, or "" when the call is not a generic
+// instantiation.
+pub fn callTargetFor(c: *Checker, file: string, ctx: string, line: int, col: int) -> string {
+    return c.callTargets.Get(pubExprKey(file, ctx, line, col))
+}
+
+// MonoDecls returns the instantiated declaration statements the emitter
+// must emit alongside the program's own declarations.
+pub fn MonoDecls(c: *Checker) -> []ast.Stmt {
+    return c.monoDecls
+}
+
+// monoSiteModuleFor returns the module that triggered instantiation of
+// the clone whose monoKey is ctx, or "" for non-clone contexts.
+pub fn monoSiteModuleFor(c: *Checker, ctx: string) -> string {
+    return c.monoSiteModules.Get(ctx)
+}
+
 // buildGenericSubstMap builds a substitution map from a function's generic
 // type parameters to the concrete types provided at the call site.
 fn buildGenericSubstMap(c: *Checker, fnDecl: ast.Decl, genericArgs: []ast.Type) -> map[string]TType {
@@ -3992,6 +4929,7 @@ fn applyGenericSubst(c: *Checker, fnName: string, fnType: TType, genericArgs: []
         return fnType
     }
     if len(fnDecl.fnGenerics) == 0 {
+        report(c, str.Concat("function \"", str.Concat(fnName, "\" is not generic")))
         return fnType
     }
     // Explicit type args must match the declared generic arity —
@@ -4001,145 +4939,13 @@ fn applyGenericSubst(c: *Checker, fnName: string, fnType: TType, genericArgs: []
         return fnType
     }
     paramMap := buildGenericSubstMap(c, fnDecl, genericArgs)
-    checkGenericErasureSafety(c, fnDecl, paramMap)
-    return substituteType(fnType, paramMap)
-}
-
-// isErasureSafeType reports whether a concrete type keeps the uniform
-// i8* representation generic code assumes. Type erasure lowers every
-// type parameter to i8*, so a composite []T/map[K]V instantiation is
-// only correct when the substituted element type is pointer-sized —
-// the generic body indexes the backing store with an 8-byte stride
-// (comp_error.md #36).
-fn isErasureSafeType(c: *Checker, t: TType) -> bool {
-    if t.kind == TK_BUILTIN {
-        // string/bytes/any are i8*; the numeric and bool builtins have
-        // narrower erased representations (i32, double, i1, ...).
-        return str.Equal(t.name, "string") || str.Equal(t.name, "bytes") || str.Equal(t.name, "any")
+    var gargs []TType
+    for gi := 0; gi < len(genericArgs); gi = gi + 1 {
+        gargs = append(gargs, astTypeToType(c, genericArgs[gi]))
     }
-    if t.kind == TK_NAMED {
-        // future<T> handles are opaque i8*.
-        if str.Equal(t.name, "future") {
-            return true
-        }
-        resolved := resolveAlias(c, t)
-        if resolved.kind != TK_NAMED {
-            return isErasureSafeType(c, resolved)
-        }
-        // A named type backed by a struct declaration erases to a
-        // %struct value — wider than i8* and unsafe in erased
-        // composites. Other named types are opaque pointers.
-        return c.structs.Get(t.name).kind == 0
-    }
-    // Struct/union/aggregate values are wider than i8*; everything else
-    // (pointers, slices, maps, sets, chans, tensors, functions, any,
-    // nil) is already a single pointer.
-    return t.kind != TK_ERROR && t.kind != TK_TAGGED_UNION && t.kind != TK_TUPLE
-}
-
-// checkErasureType walks a pre-substitution param/return type and
-// validates every erased composite element slot.
-fn checkErasureType(c: *Checker, t: TType, paramMap: map[string]TType) {
-    if t.kind == TK_ARRAY {
-        checkErasureElem(c, typeOptT(t.elem), paramMap)
-        return
-    }
-    if t.kind == TK_MAP {
-        checkErasureElem(c, typeOptT(t.keyType), paramMap)
-        checkErasureElem(c, typeOptT(t.elem), paramMap)
-        return
-    }
-    // A generic struct instantiation (e.g. `-> Box<T>` on NewBox<int>)
-    // hides composite fields behind the named type — substitute the
-    // current parameter map into its type arguments and validate the
-    // struct's fields, or `b := NewBox<int>(n)` compiles a []int field
-    // that erased reads/writes misalign (comp_error.md #127).
-    if t.kind == TK_POINTER {
-        checkErasureType(c, typeOptT(t.elem), paramMap)
-        return
-    }
-    if t.kind == TK_NAMED && len(t.genericArgs) > 0 {
-        var concreteArgs []TType
-        for i := 0; i < len(t.genericArgs); i = i + 1 {
-            ga := t.genericArgs[i]
-            if ga.kind == TK_NAMED && paramMap[ga.name].kind != 0 {
-                concreteArgs = append(concreteArgs, paramMap[ga.name])
-            } else {
-                concreteArgs = append(concreteArgs, ga)
-            }
-        }
-        checkStructErasureSafety(c, t, concreteArgs)
-    }
-}
-
-// checkErasureElem validates one composite element slot: when the slot
-// holds a generic type parameter its concrete substitution must be
-// pointer-sized; nested composites ([][]T, map[string][]T) recurse.
-fn checkErasureElem(c: *Checker, t: TType, paramMap: map[string]TType) {
-    if t.kind == TK_NAMED && paramMap[t.name].kind != 0 {
-        concrete := paramMap[t.name]
-        if !isErasureSafeType(c, concrete) {
-            report(c, str.Concat("generic parameter ", str.Concat(t.name,
-                str.Concat(" instantiated with non-pointer-sized type ",
-                    str.Concat(typeString(concrete),
-                        " — erased composite generics ([]T, map[K]V) require pointer-sized element types")))))
-        }
-        return
-    }
-    checkErasureType(c, t, paramMap)
-}
-
-// checkStructErasureSafety applies the erased-composite element rule
-// (checkGenericErasureSafety, comp_error.md #36) to generic *struct*
-// instantiations: a field whose declared type embeds a type parameter in
-// an erased composite ([]T, map[K]V) must resolve to a pointer-sized
-// element type, because the field's single LLVM slot is erased while a
-// concrete []int/map[int]V value keeps its natural stride — either
-// reading or writing direction would silently corrupt memory
-// (comp_error.md #142). Type annotations (x: WrapA<int>, parameters,
-// fields) reach here via astTypeToType; struct literals via
-// checkStructLit. erasureDepth bounds recursion through mutually
-// recursive generic field types.
-fn checkStructErasureSafety(c: *Checker, result: TType, gargs: []TType) {
-    if c.erasureDepth > 8 {
-        return
-    }
-    decl := c.structs.Get(result.name)
-    if decl.kind == 0 || len(decl.structGenerics) == 0 {
-        return
-    }
-    paramMap := make(map[string]TType)
-    gn := len(decl.structGenerics)
-    if gn > len(gargs) {
-        gn = len(gargs)
-    }
-    for gi := 0; gi < gn; gi = gi + 1 {
-        paramMap[decl.structGenerics[gi].name] = gargs[gi]
-    }
-    c.erasureDepth = c.erasureDepth + 1
-    for i := 0; i < len(decl.structFields); i = i + 1 {
-        if len(decl.structFields[i].typ) > 0 {
-            checkErasureType(c, astTypeToType(c, decl.structFields[i].typ[0]), paramMap)
-        }
-    }
-    c.erasureDepth = c.erasureDepth - 1
-}
-
-// checkGenericErasureSafety rejects generic instantiations where a type
-// parameter substituted into a composite element position resolves to a
-// non-pointer-sized concrete type. Under type erasure the generic body
-// reads and writes such elements with a uniform i8* stride, so the call
-// would silently corrupt data — a clean error beats bad codegen until
-// call-site reboxing or monomorphization lands (comp_error.md #36).
-fn checkGenericErasureSafety(c: *Checker, fnDecl: ast.Decl, paramMap: map[string]TType) {
-    for i := 0; i < len(fnDecl.fnParams); i = i + 1 {
-        if len(fnDecl.fnParams[i].typ) > 0 {
-            checkErasureType(c, astTypeToType(c, fnDecl.fnParams[i].typ[0]), paramMap)
-        }
-    }
-    for i := 0; i < len(fnDecl.fnRetTypes); i = i + 1 {
-        checkErasureType(c, astTypeToType(c, fnDecl.fnRetTypes[i]), paramMap)
-    }
+    checkGenericBounds(c, fnDecl.fnGenerics, gargs)
+    c.lastMonoFn = instantiateFnFromParamMap(c, fnDecl, paramMap)
+    return canonicalizeTType(c, substituteType(fnType, paramMap))
 }
 
 // genericFnDecl finds the declaration of a possibly-generic function.
@@ -4191,33 +4997,18 @@ fn inferGenericSubst(c: *Checker, fnName: string, fnType: TType, args: []ast.Exp
     }
     for i := 0; i < n; i = i + 1 {
         pt := fnType.params[i]
-        if pt.kind == TK_NAMED && isGenericParamName(fnDecl, pt.name) {
-            if paramMap[pt.name].kind == 0 {
-                at := checkExpr(c, args[i])
-                checked[i] = at
-                if at.kind != TK_UNKNOWN {
-                    paramMap[pt.name] = at
-                }
-            }
-        }
-        if pt.kind == TK_ARRAY && len(pt.elem) > 0 {
-            et := typeOptT(pt.elem)
-            if et.kind == TK_NAMED && isGenericParamName(fnDecl, et.name) {
-                if paramMap[et.name].kind == 0 {
-                    at := checkExpr(c, args[i])
-                    checked[i] = at
-                    if at.kind == TK_ARRAY && len(at.elem) > 0 {
-                        paramMap[et.name] = typeOptT(at.elem)
-                    }
-                }
-            }
+        if typeMentionsParam(fnDecl, pt) {
+            at := checkExpr(c, args[i])
+            checked[i] = at
+            inferTypeParamsIn(c, fnDecl, pt, at, paramMap)
         }
     }
     if len(paramMap) == 0 {
         return fnType, checked
     }
-    checkGenericErasureSafety(c, fnDecl, paramMap)
-    return substituteType(fnType, paramMap), checked
+    checkGenericBounds(c, fnDecl.fnGenerics, orderedParamArgs(fnDecl, paramMap))
+    c.lastMonoFn = instantiateFnFromParamMap(c, fnDecl, paramMap)
+    return canonicalizeTType(c, substituteType(fnType, paramMap)), checked
 }
 
 // checkCallExpr type-checks a function call, including builtins and generics.
@@ -4314,9 +5105,11 @@ fn checkCallExpr(c: *Checker, e: ast.Expr) -> TType {
     // Apply generic type substitution if generic args are present
     if e.callFunc[0].kind == ast.EX_IDENT && len(e.genericArgs) > 0 {
         fnType = applyGenericSubst(c, e.callFunc[0].ident, fnType, e.genericArgs)
+        takeMonoFn(c, e)
     } else if e.callFunc[0].kind == ast.EX_IDENT {
         var preChecked []TType
         fnType, preChecked = inferGenericSubst(c, e.callFunc[0].ident, fnType, e.callArgs)
+        takeMonoFn(c, e)
         // Args already checked during inference must not be re-checked —
         // that second pass is what made nested generic calls exponential.
         return checkCallArgsWithTypes(c, e, fnType, false, preChecked)
@@ -4451,6 +5244,37 @@ fn checkMethodCall(c: *Checker, e: ast.Expr) -> TType {
     // Handle module-qualified top-level function call
     if fa.fieldTarget[0].kind == ast.EX_IDENT {
         ident := fa.fieldTarget[0]
+        // Static calls on a generic struct (Stack<int>.Of(...)): the type
+        // args ride on the receiver ident — instantiate the struct and
+        // resolve the method on the concrete clone BEFORE the module
+        // probe below claims `Stack.Of` as a module call (the original
+        // binding still carries the T param).
+        if len(ident.genericArgs) > 0 {
+            sdecl := c.structs.Get(ident.ident)
+            if sdecl.kind == 0 && str.Len(c.currentModule) > 0 && !str.Contains(ident.ident, ".") {
+                sdecl = c.structs.Get(str.Concat(str.Concat(c.currentModule, "."), ident.ident))
+            }
+            if sdecl.kind != 0 && len(sdecl.structGenerics) > 0 {
+                var targs []TType
+                for gi := 0; gi < len(ident.genericArgs); gi = gi + 1 {
+                    targs = append(targs, astTypeToType(c, ident.genericArgs[gi]))
+                }
+                if len(targs) != len(sdecl.structGenerics) {
+                    report(c, str.Concat("generic struct \"", str.Concat(ident.ident, str.Concat("\" expects ", str.Concat(itoa(len(sdecl.structGenerics)), str.Concat(" type argument(s), got ", itoa(len(targs))))))))
+                    return unknownType()
+                }
+                if argsAreConcrete(c, targs) {
+                    mangled := instantiateStruct(c, sdecl, targs)
+                    mq := str.Concat(str.Concat(mangled, "."), fa.fieldName)
+                    mtyp := resolveWithKey(c, mq)
+                    if mtyp.kind == TK_FUNCTION {
+                        recordCallTarget(c, e, mq)
+                        mtyp, _ = applyMethodGenerics(c, e, fa, mangled, mtyp, 0)
+                        return checkCallArgs(c, e, mtyp, false)
+                    }
+                }
+            }
+        }
         moduleName := resolveImportAlias(c, ident.ident)
         isModuleName := false
         if str.Len(c.currentModule) > 0 {
@@ -4490,10 +5314,12 @@ fn checkMethodCall(c: *Checker, e: ast.Expr) -> TType {
                 if len(e.genericArgs) > 0 {
                     fqNameForSubst := str.Concat(str.Concat(moduleName, "."), fa.fieldName)
                     typ = applyGenericSubst(c, fqNameForSubst, typ, e.genericArgs)
+                    takeMonoFn(c, e)
                     return checkCallArgs(c, e, typ, false)
                 }
                 var preChecked []TType
                 typ, preChecked = inferGenericSubst(c, fqName, typ, e.callArgs)
+                takeMonoFn(c, e)
                 return checkCallArgsWithTypes(c, e, typ, false, preChecked)
             }
             report(c, str.Concat("module \"", str.Concat(moduleName, str.Concat("\" has no exported symbol \"", str.Concat(fa.fieldName, "\"")))))
@@ -4530,6 +5356,27 @@ fn checkMethodCall(c: *Checker, e: ast.Expr) -> TType {
         inner := typeOptT(recvType.elem)
         if inner.kind == TK_NAMED {
             structName = inner.name
+        }
+    }
+    // Static calls on a generic struct (Stack<int>.Of(...)): the type
+    // arguments ride on the field-target ident, so canonicalize the
+    // receiver struct to the instantiated symbol before resolving the
+    // method binding.
+    if str.Len(structName) > 0 && fa.fieldTarget[0].kind == ast.EX_IDENT && len(fa.fieldTarget[0].genericArgs) > 0 {
+        targs := []TType{}
+        for gi := 0; gi < len(fa.fieldTarget[0].genericArgs); gi = gi + 1 {
+            targs = append(targs, astTypeToType(c, fa.fieldTarget[0].genericArgs[gi]))
+        }
+        sdecl := c.structs.Get(structName)
+        if sdecl.kind == 0 && str.Len(c.currentModule) > 0 && !str.Contains(structName, ".") {
+            sdecl = c.structs.Get(str.Concat(str.Concat(c.currentModule, "."), structName))
+        }
+        if sdecl.kind != 0 && len(sdecl.structGenerics) > 0 {
+            if len(targs) != len(sdecl.structGenerics) {
+                report(c, str.Concat("generic struct \"", str.Concat(structName, str.Concat("\" expects ", str.Concat(itoa(len(sdecl.structGenerics)), str.Concat(" type argument(s), got ", itoa(len(targs))))))))
+            } else if argsAreConcrete(c, targs) {
+                structName = instantiateStruct(c, sdecl, targs)
+            }
         }
     }
     var fnType TType
@@ -4572,8 +5419,7 @@ fn checkMethodCall(c: *Checker, e: ast.Expr) -> TType {
                         // exprSkinkType routes the call through the
                         // indirect closure-call path.
                         if !c.suppressExprTypes && fa.line > 0 {
-                            key := str.Concat(c.currentFile, str.Concat(" ", str.Concat(strconv.Itoa(fa.line), str.Concat(":", strconv.Itoa(fa.col)))))
-                            c.exprTypes.Set(key, fieldType)
+                            c.exprTypes.Set(exprKey(c, fa.line, fa.col), fieldType)
                         }
                         return checkCallArgs(c, e, fieldType, false)
                     }
@@ -4640,10 +5486,24 @@ fn checkMethodCall(c: *Checker, e: ast.Expr) -> TType {
                     for i := 0; i < n; i = i + 1 {
                         paramMap[structDecl.structGenerics[i].name] = recvGenericArgs[i]
                     }
-                    fnType = substituteType(fnType, paramMap)
+                    fnType = canonicalizeTType(c, substituteType(fnType, paramMap))
                 }
             }
         }
+    }
+    // Method-level generics (obj.M<U>(...) or inferred obj.M(...)):
+    // substitute the method's own type params and instantiate a concrete
+    // method clone on the receiver's struct.
+    methodIsGeneric := false
+    if str.Len(structName) > 0 {
+        fnType, methodIsGeneric = applyMethodGenerics(c, e, fa, structName, fnType, 1)
+    }
+    if !methodIsGeneric && str.Len(structName) > 0 && c.monoSeen.Get(structName) {
+        // A method call on a monomorphized receiver resolves to the
+        // instance's method symbol — record the emitted name so the
+        // emitter bypasses its name-splitting heuristics (which cannot
+        // reconstruct __-mangled struct names).
+        recordCallTarget(c, e, str.Concat(str.Concat(structName, "."), fa.fieldName))
     }
     isStaticCall := false
     if str.Len(structName) > 0 {
@@ -5020,13 +5880,26 @@ fn checkStructLit(c: *Checker, e: ast.Expr) -> TType {
     // before comparing — otherwise []T never matches []int (comp_error.md #112).
     var litParamMap map[string]TType
     if len(e.genericArgs) > 0 && len(decl.structGenerics) > 0 {
-        litParamMap = make(map[string]TType)
-        gn := len(decl.structGenerics)
-        if gn > len(e.genericArgs) {
-            gn = len(e.genericArgs)
+        var litArgs []TType
+        for gi := 0; gi < len(e.genericArgs); gi = gi + 1 {
+            litArgs = append(litArgs, astTypeToType(c, e.genericArgs[gi]))
         }
-        for gi := 0; gi < gn; gi = gi + 1 {
-            litParamMap[decl.structGenerics[gi].name] = astTypeToType(c, e.genericArgs[gi])
+        if len(litArgs) != len(decl.structGenerics) {
+            report(c, str.Concat("generic struct \"", str.Concat(structName, str.Concat("\" expects ", str.Concat(itoa(len(decl.structGenerics)), str.Concat(" type argument(s), got ", itoa(len(litArgs))))))))
+        } else if argsAreConcrete(c, litArgs) {
+            // Concrete instantiation: check against the specialized
+            // clone whose fields are already substituted.
+            structName = instantiateStruct(c, decl, litArgs)
+            decl = c.structs.Get(structName)
+        } else {
+            litParamMap = make(map[string]TType)
+            gn := len(decl.structGenerics)
+            if gn > len(litArgs) {
+                gn = len(litArgs)
+            }
+            for gi := 0; gi < gn; gi = gi + 1 {
+                litParamMap[decl.structGenerics[gi].name] = litArgs[gi]
+            }
         }
     }
     for i := 0; i < len(e.structLitFields); i = i + 1 {
@@ -5038,7 +5911,7 @@ fn checkStructLit(c: *Checker, e: ast.Expr) -> TType {
                 if len(e.structLitFields[i].value) > 0 && len(decl.structFields[j].typ) > 0 {
                     ft := astTypeToType(c, decl.structFields[j].typ[0])
                     if len(litParamMap) > 0 {
-                        ft = substituteType(ft, litParamMap)
+                        ft = canonicalizeTType(c, substituteType(ft, litParamMap))
                     }
                     vt := checkExpr(c, e.structLitFields[i].value[0])
                     if ft.kind != TK_UNKNOWN && vt.kind != TK_UNKNOWN && !checkerIsAssignable(c, ft, vt) {
@@ -5054,13 +5927,12 @@ fn checkStructLit(c: *Checker, e: ast.Expr) -> TType {
         }
     }
     result := namedType(structName)
-    if len(e.genericArgs) > 0 {
+    if len(e.genericArgs) > 0 && !c.monoSeen.Get(structName) {
         var gargs []TType
         for i := 0; i < len(e.genericArgs); i = i + 1 {
             gargs = append(gargs, astTypeToType(c, e.genericArgs[i]))
         }
         result.genericArgs = gargs
-        checkStructErasureSafety(c, result, gargs)
     }
     return result
 }
@@ -5210,7 +6082,7 @@ fn checkFieldAccessExpr(c: *Checker, e: ast.Expr) -> TType {
             if len(decl.structFields[i].typ) > 0 {
                 ft := astTypeToType(c, decl.structFields[i].typ[0])
                 if len(fieldParamMap) > 0 {
-                    ft = substituteType(ft, fieldParamMap)
+                    ft = canonicalizeTType(c, substituteType(ft, fieldParamMap))
                 }
                 return ft
             }
@@ -5290,7 +6162,7 @@ pub fn resolveFieldType(c: *Checker, e: ast.Expr) -> TType {
             if len(decl.structFields[i].typ) > 0 {
                 ft := astTypeToType(c, decl.structFields[i].typ[0])
                 if len(fieldParamMap) > 0 {
-                    ft = substituteType(ft, fieldParamMap)
+                    ft = canonicalizeTType(c, substituteType(ft, fieldParamMap))
                 }
                 return ft
             }
@@ -5301,26 +6173,25 @@ pub fn resolveFieldType(c: *Checker, e: ast.Expr) -> TType {
 }
 
 // chanElemTypeLookup returns the element type for a <-ch expression
-// at the given line:col, or a zero TType (kind == 0) if not found.
-pub fn chanElemTypeLookup(c: *Checker, line: int, col: int) -> TType {
-    key := str.Concat(strconv.Itoa(line), str.Concat(":", strconv.Itoa(col)))
-    return c.chanElemTypes.Get(key)
+// at the given ctx|line:col, or a zero TType (kind == 0) if not found.
+pub fn chanElemTypeLookup(c: *Checker, ctx: string, line: int, col: int) -> TType {
+    return c.chanElemTypes.Get(pubPosKey(ctx, line, col))
 }
 
 // exprTypeLookup returns the recorded checker type of the expression at
-// file:line:col, or a zero TType (kind == 0) if not found.
-pub fn exprTypeLookup(c: *Checker, file: string, line: int, col: int) -> TType {
-    key := str.Concat(file, str.Concat(" ", str.Concat(strconv.Itoa(line), str.Concat(":", strconv.Itoa(col)))))
-    return c.exprTypes.Get(key)
+// file:line:col (namespaced by ctx inside monomorphized clones), or a
+// zero TType (kind == 0) if not found.
+pub fn exprTypeLookup(c: *Checker, file: string, ctx: string, line: int, col: int) -> TType {
+    return c.exprTypes.Get(pubExprKey(file, ctx, line, col))
 }
 
 // exprTypeLookupAt returns the recorded type of the idx-th interpolation
 // part of the interpolated-string expression at file line:col.
-// checkInterpExpr records part types under this "file line:col#idx" key
-// because sub-parsed part exprs carry fragment-relative positions that
-// would collide across parts.
-pub fn exprTypeLookupAt(c: *Checker, file: string, line: int, col: int, idx: int) -> TType {
-    key := str.Concat(file, str.Concat(" ", str.Concat(strconv.Itoa(line), str.Concat(":", str.Concat(strconv.Itoa(col), str.Concat("#", strconv.Itoa(idx)))))))
+// checkInterpExpr records part types under this "file[|ctx] line:col#idx"
+// key because sub-parsed part exprs carry fragment-relative positions
+// that would collide across parts.
+pub fn exprTypeLookupAt(c: *Checker, file: string, ctx: string, line: int, col: int, idx: int) -> TType {
+    key := str.Concat(pubExprKey(file, ctx, line, col), str.Concat("#", strconv.Itoa(idx)))
     return c.exprTypes.Get(key)
 }
 
@@ -5463,8 +6334,7 @@ fn checkMatchExpr(c: *Checker, e: ast.Expr) -> TType {
     } else if !hasWildcard {
         report(c, "match expression must have a wildcard (_) arm")
     }
-    key := str.Concat(itoa(e.line), str.Concat(":", itoa(e.col)))
-    c.matchResultTypes.Set(key, resultType)
+    c.matchResultTypes.Set(posKey(c, e.line, e.col), resultType)
     return resultType
 }
 
@@ -5594,7 +6464,7 @@ fn checkInterpExpr(c: *Checker, e: ast.Expr) -> TType {
             // line:col are fragment-relative and collide across parts.
             // Record each under the string's real position + "#index".
             if t.kind != 0 && t.kind != TK_UNKNOWN && e.line > 0 {
-                key := str.Concat(c.currentFile, str.Concat(" ", str.Concat(strconv.Itoa(e.line), str.Concat(":", str.Concat(strconv.Itoa(e.col), str.Concat("#", strconv.Itoa(i)))))))
+                key := str.Concat(exprKey(c, e.line, e.col), str.Concat("#", strconv.Itoa(i)))
                 c.exprTypes.Set(key, t)
             }
         }

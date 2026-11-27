@@ -492,9 +492,9 @@ pub fn TestUnmarshalNullPointer() {
 
 
 // TestMarshalAutoAPI covers the pointer-only Marshal(&obj) entry point:
-// the emitter must synthesize (reflect.Type, int64 ptr) at the call site
-// and forward to MarshalStruct — regression for the auto-injection path
-// itself (previously callers passed TypeOf+ptr manually).
+// T must be inferred as the pointee type so Marshal(&u) resolves to the
+// monomorphized json.Marshal__TaggedUser clone (previously an
+// emitter-side auto-injection synthesized reflect.Type+ptr).
 pub fn TestMarshalAutoAPI() {
     var u TaggedUser
     u.name = "Ada"
@@ -518,8 +518,8 @@ pub fn TestMarshalAutoAPI() {
 }
 
 // TestUnmarshalIntoAutoAPI covers UnmarshalInto(data, &obj) — the
-// two-argument pointer form must auto-inject type+ptr (distinct from
-// the tree parser json.Unmarshal, which stays one-argument returning a
+// two-argument pointer form must infer T from &obj (distinct from the
+// tree parser json.Unmarshal, which stays one-argument returning a
 // Value).
 pub fn TestUnmarshalIntoAutoAPI() {
     var u TaggedUser
@@ -529,6 +529,35 @@ pub fn TestUnmarshalIntoAutoAPI() {
     }
     if str.Equal(u.name, "Alan") == false || u.age != 41 || u.active == false {
         Errorf("UnmarshalInto(s, &u) should populate fields")
+    }
+}
+
+// TestMarshalExplicitTypeArgs covers the explicit generic spelling
+// json.Marshal<TaggedUser>(&u) — the same clone the inferred call
+// resolves to — guarding that both type-argument syntaxes instantiate
+// the marshal entry point.
+pub fn TestMarshalExplicitTypeArgs() {
+    var u TaggedUser
+    u.name = "Bo"
+    u.age = 29
+    s, err := json.Marshal<TaggedUser>(&u)
+    if err.message != "" {
+        Errorf("Marshal<TaggedUser>(&u) should succeed")
+    }
+    v, perr := json.Unmarshal(s)
+    if perr.message != "" {
+        Errorf("Marshal<TaggedUser>(&u) output should parse")
+    }
+    if str.Equal(json.AsString(json.ObjectGet(v, "full_name")), "Bo") == false {
+        Errorf("Marshal<TaggedUser>(&u) should apply the name= tag")
+    }
+    var u2 TaggedUser
+    err2 := json.UnmarshalInto<TaggedUser>("{\"full_name\":\"Cy\",\"age\":12}", &u2)
+    if err2.message != "" {
+        Errorf("UnmarshalInto<TaggedUser>(s, &u2) should succeed")
+    }
+    if str.Equal(u2.name, "Cy") == false || u2.age != 12 {
+        Errorf("UnmarshalInto<TaggedUser>(s, &u2) should populate fields")
     }
 }
 
