@@ -5,7 +5,11 @@
 //          modern ergonomics and a Go-inspired syntax.
 //
 // File:    std/i2c.skink
-// Purpose: Skink module for i2c.
+// Purpose: Linux i2c-dev (/dev/i2c-N) master bus support for Raspberry Pi and
+//          Linux SBCs, including atomic repeated-START combined transfers
+//          (I2C_RDWR), binary-safe RC byte-slice and string reads, 8/16-bit
+//          register helpers, strict OpenStrict hardware errors, and a
+//          workstation simulation fallback.
 // Author:  Mark Oxley
 // Created: 2026
 //
@@ -25,18 +29,89 @@ module i2c
 
 import "std/errors"
 import "std/libc"
-
-extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
 import "std/strconv"
+import "std/str"
 
+extern fn Skink_mem_alloc(size: int64) -> string
+extern fn Skink_mem_byte(ptr: string, idx: int64) -> int
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
 extern fn open(path: string, flags: int) -> int
 extern fn read(fd: int, buf: string, count: int64) -> int
 extern fn write(fd: int, buf: string, count: int64) -> int
 extern fn ioctl(fd: int, request: int64, arg: int64) -> int
 extern fn Skink_close_fd(fd: int) -> int
 
-// Linux <linux/i2c-dev.h> slave-address selector ioctl.
-pub const I2C_SLAVE = 0x0703
+// Linux <linux/i2c-dev.h> and <linux/i2c.h> ioctl request codes and flags.
+pub const I2C_RETRIES     = 0x0701
+pub const I2C_TIMEOUT     = 0x0702
+pub const I2C_SLAVE       = 0x0703
+pub const I2C_TENBIT      = 0x0704
+pub const I2C_FUNCS       = 0x0705
+pub const I2C_SLAVE_FORCE = 0x0706
+pub const I2C_RDWR        = 0x0707
+pub const I2C_PEC         = 0x0708
+pub const I2C_SMBUS       = 0x0720
+
+pub const I2C_M_RD     = 0x0001
+pub const I2C_FUNC_I2C = 0x00000001
+
+pub const I2C_MSG_SIZE       = 16
+pub const I2C_RDWR_DATA_SIZE = 16
+
+// packU16LE writes a 16-bit little-endian integer into buf at byte offset off.
+fn packU16LE(buf: string, off: int, v: int) {
+    Skink_mem_write_byte(buf, int64(off), v & 255)
+    Skink_mem_write_byte(buf, int64(off + 1), (v >> 8) & 255)
+}
+
+// packU32LE writes a 32-bit little-endian integer into buf at byte offset off.
+fn packU32LE(buf: string, off: int, v: int) {
+    Skink_mem_write_byte(buf, int64(off), v & 255)
+    Skink_mem_write_byte(buf, int64(off + 1), (v >> 8) & 255)
+    Skink_mem_write_byte(buf, int64(off + 2), (v >> 16) & 255)
+    Skink_mem_write_byte(buf, int64(off + 3), (v >> 24) & 255)
+}
+
+// packU64LE writes a 64-bit little-endian integer into buf at byte offset off.
+fn packU64LE(buf: string, off: int, v: int64) {
+    for i := 0; i < 8; i = i + 1 {
+        shift := int64(i * 8)
+        Skink_mem_write_byte(buf, int64(off + i), int((v >> shift) & int64(255)))
+    }
+}
+
+// PackRdwrWriteRead populates a two-segment struct i2c_msg[2] array (32 bytes
+// in msgsBuf) and its struct i2c_rdwr_ioctl_data wrapper (16 bytes in rdwrBuf)
+// for an atomic write-then-repeated-START-read transaction on 64-bit Linux.
+//
+//   struct i2c_msg (16 bytes):
+//     0..1:  u16 addr
+//     2..3:  u16 flags (0 = write, I2C_M_RD = 1 = read)
+//     4..5:  u16 len
+//     6..7:  padding
+//     8..15: u8* buf
+//   struct i2c_rdwr_ioctl_data (16 bytes):
+//     0..7:  struct i2c_msg* msgs
+//     8..11: u32 nmsgs (2)
+pub fn PackRdwrWriteRead(addr: int, txPtr: string, txLen: int, rxPtr: string, rxLen: int, msgsBuf: string, rdwrBuf: string) {
+    libc.memset(msgsBuf, 0, int64(2 * I2C_MSG_SIZE))
+    libc.memset(rdwrBuf, 0, int64(I2C_RDWR_DATA_SIZE))
+
+    // Segment 0: write txPtr[0..txLen)
+    packU16LE(msgsBuf, 0, addr)
+    packU16LE(msgsBuf, 2, 0)
+    packU16LE(msgsBuf, 4, txLen)
+    packU64LE(msgsBuf, 8, int64(txPtr))
+
+    // Segment 1: repeated-START read into rxPtr[0..rxLen)
+    packU16LE(msgsBuf, 16, addr)
+    packU16LE(msgsBuf, 18, I2C_M_RD)
+    packU16LE(msgsBuf, 20, rxLen)
+    packU64LE(msgsBuf, 24, int64(rxPtr))
+
+    packU64LE(rdwrBuf, 0, int64(msgsBuf))
+    packU32LE(rdwrBuf, 8, 2)
+}
 
 // Bus represents an I2C bus connection to a single slave device.
 //
@@ -45,42 +120,188 @@ pub const I2C_SLAVE = 0x0703
 //   - deviceAddr: the 7-bit slave address selected via I2C_SLAVE.
 //   - hw:         true when fd is a live /dev/i2c-N descriptor.
 pub struct Bus {
-    fd: int  // the file descriptor
-    deviceAddr: int  // the device address
-    hw: bool  // whether backed by a real /dev/i2c-N descriptor
+    fd: int
+    deviceAddr: int
+    hw: bool
+
+    // supportsRdwr queries I2C_FUNCS on self.fd to detect whether the underlying
+    // descriptor is a full Linux I2C adapter supporting I2C_RDWR combined
+    // repeated-START transfers (true on Raspberry Pi i2c-bcm2835 and Pi 5
+    // i2c-designware; false on SMBus-only adapters or test stream descriptors).
+    fn supportsRdwr(self: Bus) -> bool {
+        if !self.hw || self.fd < 0 {
+            return false
+        }
+        funcsBuf := libc.calloc(8, 1)
+        rc := ioctl(self.fd, int64(I2C_FUNCS), int64(funcsBuf))
+        f0 := Skink_mem_byte(funcsBuf, int64(0))
+        libc.free(funcsBuf)
+        return rc >= 0 && (f0 & I2C_FUNC_I2C) != 0
+    }
+
+    // rawTransfer performs a write of txBuf[0..txLen) followed by a read into
+    // rxBuf[0..rxLen). Uses a single atomic ioctl(I2C_RDWR) with repeated START
+    // when the adapter supports I2C_FUNC_I2C, falling back to write() + read().
+    fn rawTransfer(self: *Bus, txBuf: string, txLen: int, rxBuf: string, rxLen: int) -> errors.Error {
+        if self.supportsRdwr() && txLen > 0 && rxLen > 0 {
+            msgs := libc.calloc(2 * I2C_MSG_SIZE, 1)
+            rdwr := libc.calloc(I2C_RDWR_DATA_SIZE, 1)
+            PackRdwrWriteRead(self.deviceAddr, txBuf, txLen, rxBuf, rxLen, msgs, rdwr)
+            rc := ioctl(self.fd, int64(I2C_RDWR), int64(rdwr))
+            libc.free(msgs)
+            libc.free(rdwr)
+            if rc < 0 {
+                return errors.New("i2c combined transfer failed")
+            }
+            return errors.New("")
+        }
+        if txLen > 0 {
+            if write(self.fd, txBuf, int64(txLen)) != txLen {
+                return errors.New("i2c register select failed")
+            }
+        }
+        got := 0
+        for got < rxLen {
+            dst := string(int64(rxBuf) + int64(got))
+            n := read(self.fd, dst, int64(rxLen - got))
+            if n <= 0 {
+                return errors.New("i2c register read failed")
+            }
+            got = got + n
+        }
+        return errors.New("")
+    }
 
     // Write sends len bytes of data to the currently selected slave.
     pub fn Write(self: *Bus, data: string, len: int) -> int {
+        if len < 0 {
+            return -1
+        }
         if self.hw {
-            return write(self.fd, data, len)
+            return write(self.fd, data, int64(len))
         }
         return len
     }
 
-    // Read receives up to len bytes from the currently selected slave.
-    // The returned string is heap-allocated and must be freed with libc.free.
-    pub fn Read(self: *Bus, len: int) -> (string, errors.Error) {
-        buf := libc.malloc(len + 1)
-        if self.hw {
-            n := read(self.fd, buf, len)
-            if n < 0 {
-                Skink_mem_write_byte(buf, int64(0), 0)
-                return buf, errors.New("i2c read failed")
-            }
-            Skink_mem_write_byte(buf, int64(n), 0)
-            return buf, errors.New("")
+    // WriteBytes sends all bytes in data to the currently selected slave,
+    // preserving embedded 0x00 bytes without C-string NUL truncation.
+    pub fn WriteBytes(self: *Bus, data: []uint8) -> (int, errors.Error) {
+        n := len(data)
+        if n == 0 {
+            return 0, errors.New("")
         }
-        Skink_mem_write_byte(buf, int64(len), 0)
-        return buf, errors.New("")
+        if self.hw {
+            buf := libc.calloc(n + 1, 1)
+            for i := 0; i < n; i = i + 1 {
+                Skink_mem_write_byte(buf, int64(i), int(data[i]))
+            }
+            w := write(self.fd, buf, int64(n))
+            libc.free(buf)
+            if w != n {
+                return w, errors.New("i2c write failed")
+            }
+        }
+        return n, errors.New("")
+    }
+
+    // Read receives up to len bytes from the currently selected slave.
+    // Returns an RC-managed allocation whose tracked size is n+1 so indexing
+    // data[0..n) works safely even when binary sensor payloads contain 0x00
+    // bytes; libc.free(data) remains a safe optional release for legacy callers.
+    pub fn Read(self: *Bus, len: int) -> (string, errors.Error) {
+        if len < 0 {
+            empty := Skink_mem_alloc(int64(1))
+            Skink_mem_write_byte(empty, int64(0), 0)
+            return empty, errors.New("invalid i2c read length")
+        }
+        if self.hw {
+            raw := libc.calloc(len + 1, 1)
+            n := read(self.fd, raw, int64(len))
+            if n < 0 {
+                libc.free(raw)
+                empty := Skink_mem_alloc(int64(1))
+                Skink_mem_write_byte(empty, int64(0), 0)
+                return empty, errors.New("i2c read failed")
+            }
+            out := Skink_mem_alloc(int64(n + 1))
+            if n > 0 {
+                libc.memcpy(out, raw, int64(n))
+            }
+            Skink_mem_write_byte(out, int64(n), 0)
+            libc.free(raw)
+            return out, errors.New("")
+        }
+        out := Skink_mem_alloc(int64(len + 1))
+        Skink_mem_write_byte(out, int64(len), 0)
+        return out, errors.New("")
+    }
+
+    // ReadBytes receives up to count bytes from the currently selected slave
+    // as an RC-managed []uint8 slice (NUL-safe, no manual free required).
+    pub fn ReadBytes(self: *Bus, count: int) -> ([]uint8, errors.Error) {
+        if count < 0 {
+            var empty []uint8
+            return empty, errors.New("invalid i2c read length")
+        }
+        if count == 0 {
+            return make([]uint8, 0), errors.New("")
+        }
+        if self.hw {
+            raw := libc.calloc(count + 1, 1)
+            n := read(self.fd, raw, int64(count))
+            if n < 0 {
+                libc.free(raw)
+                var empty []uint8
+                return empty, errors.New("i2c read failed")
+            }
+            out := make([]uint8, n)
+            for i := 0; i < n; i = i + 1 {
+                out[i] = uint8(Skink_mem_byte(raw, int64(i)))
+            }
+            libc.free(raw)
+            return out, errors.New("")
+        }
+        return make([]uint8, count), errors.New("")
+    }
+
+    // Transfer executes a combined write of tx followed by a repeated-START
+    // read of rxLen bytes (via ioctl(I2C_RDWR) when supported by the adapter).
+    pub fn Transfer(self: *Bus, tx: []uint8, rxLen: int) -> ([]uint8, errors.Error) {
+        if rxLen < 0 {
+            var empty []uint8
+            return empty, errors.New("invalid i2c transfer rx length")
+        }
+        if !self.hw {
+            return make([]uint8, rxLen), errors.New("")
+        }
+        txLen := len(tx)
+        txBuf := libc.calloc(txLen + 1, 1)
+        for i := 0; i < txLen; i = i + 1 {
+            Skink_mem_write_byte(txBuf, int64(i), int(tx[i]))
+        }
+        rxBuf := libc.calloc(rxLen + 1, 1)
+        err := self.rawTransfer(txBuf, txLen, rxBuf, rxLen)
+        libc.free(txBuf)
+        if err.message != "" {
+            libc.free(rxBuf)
+            var empty []uint8
+            return empty, err
+        }
+        out := make([]uint8, rxLen)
+        for j := 0; j < rxLen; j = j + 1 {
+            out[j] = uint8(Skink_mem_byte(rxBuf, int64(j)))
+        }
+        libc.free(rxBuf)
+        return out, errors.New("")
     }
 
     // WriteReg writes a single byte value to an 8-bit device register.
     pub fn WriteReg(self: *Bus, reg: int, val: int) -> errors.Error {
         if self.hw {
-            buf := libc.malloc(2)
+            buf := libc.calloc(2, 1)
             Skink_mem_write_byte(buf, int64(0), reg & 255)
             Skink_mem_write_byte(buf, int64(1), val & 255)
-            n := write(self.fd, buf, 2)
+            n := write(self.fd, buf, int64(2))
             libc.free(buf)
             if n != 2 {
                 return errors.New("i2c write register failed")
@@ -89,24 +310,72 @@ pub struct Bus {
         return errors.New("")
     }
 
-    // ReadReg writes the 8-bit register address and reads back one byte.
+    // ReadReg selects an 8-bit register address and reads back one unsigned
+    // byte (0..255), using an atomic repeated-START transfer when supported.
     pub fn ReadReg(self: *Bus, reg: int) -> (int, errors.Error) {
         if self.hw {
-            buf := libc.malloc(2)
-            Skink_mem_write_byte(buf, int64(0), reg & 255)
-            if write(self.fd, buf, 1) != 1 {
-                libc.free(buf)
-                return 0, errors.New("i2c register select failed")
+            tx := libc.calloc(2, 1)
+            rx := libc.calloc(2, 1)
+            Skink_mem_write_byte(tx, int64(0), reg & 255)
+            err := self.rawTransfer(tx, 1, rx, 1)
+            v := Skink_mem_byte(rx, int64(0))
+            libc.free(tx)
+            libc.free(rx)
+            if err.message != "" {
+                return 0, err
             }
-            if read(self.fd, buf, 1) != 1 {
-                libc.free(buf)
-                return 0, errors.New("i2c register read failed")
-            }
-            v := int(uint8(buf[0]))
-            libc.free(buf)
             return v, errors.New("")
         }
         return 0, errors.New("")
+    }
+
+    // WriteRegBytes writes [reg, data...] in a single I2C frame for burst
+    // multi-byte register writes.
+    pub fn WriteRegBytes(self: *Bus, reg: int, data: []uint8) -> errors.Error {
+        if self.hw {
+            total := 1 + len(data)
+            buf := libc.calloc(total, 1)
+            Skink_mem_write_byte(buf, int64(0), reg & 255)
+            for i := 0; i < len(data); i = i + 1 {
+                Skink_mem_write_byte(buf, int64(1 + i), int(data[i]))
+            }
+            n := write(self.fd, buf, int64(total))
+            libc.free(buf)
+            if n != total {
+                return errors.New("i2c burst register write failed")
+            }
+        }
+        return errors.New("")
+    }
+
+    // ReadRegBytes selects an 8-bit register address and burst-reads count
+    // consecutive bytes via a repeated-START transfer.
+    pub fn ReadRegBytes(self: *Bus, reg: int, count: int) -> ([]uint8, errors.Error) {
+        sel := make([]uint8, 1)
+        sel[0] = uint8(reg & 255)
+        return self.Transfer(sel, count)
+    }
+
+    // WriteRegWord writes a 16-bit little-endian value to an 8-bit register
+    // (matching SMBus Write Word Data byte order).
+    pub fn WriteRegWord(self: *Bus, reg: int, val: int) -> errors.Error {
+        payload := make([]uint8, 2)
+        payload[0] = uint8(val & 255)
+        payload[1] = uint8((val >> 8) & 255)
+        return self.WriteRegBytes(reg, payload)
+    }
+
+    // ReadRegWord reads a 16-bit unsigned little-endian value (0..65535) from
+    // an 8-bit register (matching SMBus Read Word Data byte order).
+    pub fn ReadRegWord(self: *Bus, reg: int) -> (int, errors.Error) {
+        b, err := self.ReadRegBytes(reg, 2)
+        if err.message != "" {
+            return 0, err
+        }
+        if len(b) < 2 {
+            return 0, errors.New("i2c short word read")
+        }
+        return int(b[0]) | (int(b[1]) << 8), errors.New("")
     }
 
     // WriteRegister is an alias for WriteReg.
@@ -140,6 +409,32 @@ pub struct Bus {
     pub fn Fd(self: Bus) -> int {
         return self.fd
     }
+
+    // IsHardware reports whether this Bus is backed by a live /dev/i2c-N
+    // kernel descriptor rather than the workstation fallback.
+    pub fn IsHardware(self: Bus) -> bool {
+        return self.hw
+    }
+}
+
+// OpenStrict opens /dev/i2c-{busNumber} and selects the 7-bit slave at
+// deviceAddr via ioctl(I2C_SLAVE). Unlike Open, returns an explicit error when
+// the device node is absent or permissions are insufficient instead of falling
+// back to an in-memory stub.
+pub fn OpenStrict(busNumber: int, deviceAddr: int) -> (Bus, errors.Error) {
+    if busNumber < 0 || deviceAddr < 0 || deviceAddr > 0x7f {
+        return Bus{fd: 0, deviceAddr: deviceAddr, hw: false}, errors.New("invalid i2c bus or address")
+    }
+    path := "/dev/i2c-" + strconv.Itoa(busNumber)
+    fd := open(path, 2) // O_RDWR = 2
+    if fd < 0 {
+        return Bus{fd: 0, deviceAddr: deviceAddr, hw: false}, errors.New("cannot open " + path)
+    }
+    if ioctl(fd, int64(I2C_SLAVE), int64(deviceAddr)) < 0 {
+        Skink_close_fd(fd)
+        return Bus{fd: 0, deviceAddr: deviceAddr, hw: false}, errors.New("ioctl I2C_SLAVE failed")
+    }
+    return Bus{fd: fd, deviceAddr: deviceAddr, hw: true}, errors.New("")
 }
 
 // Open opens /dev/i2c-{busNumber} and selects the slave at deviceAddr via
@@ -150,16 +445,14 @@ pub fn Open(busNumber: int, deviceAddr: int) -> (Bus, errors.Error) {
     if busNumber < 0 || deviceAddr < 0 || deviceAddr > 0x7f {
         return Bus{fd: 0, deviceAddr: deviceAddr, hw: false}, errors.New("invalid i2c bus or address")
     }
-    path := "/dev/i2c-" + strconv.Itoa(busNumber)
-    fd := open(path, 2) // O_RDWR = 2
-    if fd >= 0 {
-        if ioctl(fd, int64(I2C_SLAVE), int64(deviceAddr)) < 0 {
-            Skink_close_fd(fd)
-            return Bus{fd: 0, deviceAddr: deviceAddr, hw: false}, errors.New("ioctl I2C_SLAVE failed")
-        }
-        return Bus{fd: fd, deviceAddr: deviceAddr, hw: true}, errors.New("")
+    bus, err := OpenStrict(busNumber, deviceAddr)
+    if err.message == "" {
+        return bus, errors.New("")
     }
-    return Bus{fd: 1, deviceAddr: deviceAddr, hw: false}, errors.New("")
+    if str.StartsWith(err.message, "cannot open ") {
+        return Bus{fd: 1, deviceAddr: deviceAddr, hw: false}, errors.New("")
+    }
+    return bus, err
 }
 
 // Standard I2C clock speeds (Hz), for documentation and future SetSpeed support.
@@ -169,7 +462,7 @@ pub const SPEED_FAST_PLUS = 1000000 // 1 MHz
 
 // I2C_SMBUS ioctl sub-commands for reference (values from <linux/i2c.h>).
 pub const SMBUS_READ_BYTE = 1
-pub const SMBUS_READ_BYTE_DATA = 2  // the smbus read byte data
-pub const SMBUS_WRITE_BYTE_DATA = 3  // the smbus write byte data
-pub const SMBUS_READ_WORD_DATA = 4  // the smbus read word data
-pub const SMBUS_WRITE_WORD_DATA = 5  // the smbus write word data
+pub const SMBUS_READ_BYTE_DATA = 2
+pub const SMBUS_WRITE_BYTE_DATA = 3
+pub const SMBUS_READ_WORD_DATA = 4
+pub const SMBUS_WRITE_WORD_DATA = 5

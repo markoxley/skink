@@ -5,7 +5,10 @@
 //          modern ergonomics and a Go-inspired syntax.
 //
 // File:    std/gpio.skink
-// Purpose: Skink module for gpio.
+// Purpose: Raspberry Pi and Linux GPIO support backed primarily by the Linux
+//          GPIO v2 character-device ABI (/dev/gpiochipN ioctls for Pi Zero/1-5
+//          on Bullseye, Bookworm, and Trixie), with legacy /sys/class/gpio
+//          base-offset resolution and a workstation in-memory fallback.
 // Author:  Mark Oxley
 // Created: 2026
 //
@@ -25,27 +28,560 @@ module gpio
 
 import "std/errors"
 import "std/fs"
+import "std/libc"
 import "std/strconv"
 import "std/str"
 
+extern fn open(path: string, flags: int) -> int
+extern fn ioctl(fd: int, request: int64, arg: int64) -> int
+extern fn Skink_close_fd(fd: int) -> int
+extern fn Skink_mem_alloc(size: int64) -> string
+extern fn Skink_mem_byte(ptr: string, idx: int64) -> int
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
+extern fn getenv(name: string) -> string
+extern fn usleep(useconds: int) -> int
+
+// Pin direction constants used by SetInput/SetOutput and Mode.
+pub const INPUT = 0
+pub const OUTPUT = 1
+pub const PWM_MODE = 2
+
+// Pin level constants used by Write/Read.
+pub const LOW = 0
+pub const HIGH = 1
+
+// Pull resistor constants used by SetPull and Pull.
+pub const PULL_OFF = 0
+pub const PULL_DOWN = 1
+pub const PULL_UP = 2
+
+// Backend identifiers stored on Pin.backend.
+pub const BACKEND_STUB = 0
+pub const BACKEND_CDEV = 1
+pub const BACKEND_SYSFS = 2
+
+// Linux <linux/gpio.h> character-device v2 ioctl request codes (64-bit clean:
+// cast via int64 literal path so values >= 0x80000000 never sign-extend).
+pub const GPIO_GET_CHIPINFO_IOCTL      = int64(0x8044b401)
+pub const GPIO_V2_GET_LINEINFO_IOCTL   = int64(0xc100b405)
+pub const GPIO_V2_GET_LINE_IOCTL       = int64(0xc250b407)
+pub const GPIO_V2_LINE_SET_CONFIG_IOCTL = int64(0xc110b40d)
+pub const GPIO_V2_LINE_GET_VALUES_IOCTL = int64(0xc010b40e)
+pub const GPIO_V2_LINE_SET_VALUES_IOCTL = int64(0xc010b40f)
+
+// Linux <linux/gpio.h> enum gpio_v2_line_flag bitmasks.
+pub const GPIO_V2_LINE_FLAG_USED           = int64(1)
+pub const GPIO_V2_LINE_FLAG_ACTIVE_LOW     = int64(2)
+pub const GPIO_V2_LINE_FLAG_INPUT          = int64(4)
+pub const GPIO_V2_LINE_FLAG_OUTPUT         = int64(8)
+pub const GPIO_V2_LINE_FLAG_BIAS_PULL_UP   = int64(256)
+pub const GPIO_V2_LINE_FLAG_BIAS_PULL_DOWN = int64(512)
+pub const GPIO_V2_LINE_FLAG_BIAS_DISABLED  = int64(1024)
+
+// Linux <linux/gpio.h> enum gpio_v2_line_attr_id values and struct sizes.
+pub const GPIO_V2_LINE_ATTR_ID_FLAGS         = 1
+pub const GPIO_V2_LINE_ATTR_ID_OUTPUT_VALUES = 2
+pub const GPIO_CHIPINFO_SIZE       = 68
+pub const GPIO_V2_LINE_VALUES_SIZE = 16
+pub const GPIO_V2_LINE_CONFIG_SIZE = 272
+pub const GPIO_V2_LINE_REQ_SIZE    = 592
+
+// Active hardware handles tracked so Cleanup() releases kernel resources.
+var activeLineFds []int
+var activeSysfsRoots []string
+var activeSysfsNums []int
+
+// packU32LE writes a 32-bit little-endian integer into buf at byte offset off.
+fn packU32LE(buf: string, off: int, v: int) {
+    Skink_mem_write_byte(buf, int64(off), v & 255)
+    Skink_mem_write_byte(buf, int64(off + 1), (v >> 8) & 255)
+    Skink_mem_write_byte(buf, int64(off + 2), (v >> 16) & 255)
+    Skink_mem_write_byte(buf, int64(off + 3), (v >> 24) & 255)
+}
+
+// unpackS32LE reads a signed 32-bit little-endian integer from buf at off.
+fn unpackS32LE(buf: string, off: int) -> int {
+    b0 := Skink_mem_byte(buf, int64(off))
+    b1 := Skink_mem_byte(buf, int64(off + 1))
+    b2 := Skink_mem_byte(buf, int64(off + 2))
+    b3 := Skink_mem_byte(buf, int64(off + 3))
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+}
+
+// packU64LE writes a 64-bit little-endian integer into buf at byte offset off.
+fn packU64LE(buf: string, off: int, v: int64) {
+    for i := 0; i < 8; i = i + 1 {
+        shift := int64(i * 8)
+        Skink_mem_write_byte(buf, int64(off + i), int((v >> shift) & int64(255)))
+    }
+}
+
+// unpackU64LE reads a 64-bit little-endian integer from buf at byte offset off.
+fn unpackU64LE(buf: string, off: int) -> int64 {
+    v := int64(0)
+    for i := 0; i < 8; i = i + 1 {
+        b := int64(Skink_mem_byte(buf, int64(off + i)))
+        shift := int64(i * 8)
+        v = v | (b << shift)
+    }
+    return v
+}
+
+// readFixedCString extracts a NUL-terminated string from a fixed-width C char
+// array of maxLen bytes inside raw buffer buf at offset off.
+fn readFixedCString(buf: string, off: int, maxLen: int) -> string {
+    n := 0
+    for n < maxLen {
+        if Skink_mem_byte(buf, int64(off + n)) == 0 {
+            break
+        }
+        n = n + 1
+    }
+    out := Skink_mem_alloc(int64(n + 1))
+    for i := 0; i < n; i = i + 1 {
+        Skink_mem_write_byte(out, int64(i), Skink_mem_byte(buf, int64(off + i)))
+    }
+    Skink_mem_write_byte(out, int64(n), 0)
+    return out
+}
+
+// writeFixedCString copies up to maxLen-1 bytes of s into buf at off and NUL-pads.
+fn writeFixedCString(buf: string, off: int, maxLen: int, s: string) {
+    n := str.Len(s)
+    if n >= maxLen {
+        n = maxLen - 1
+    }
+    for i := 0; i < n; i = i + 1 {
+        Skink_mem_write_byte(buf, int64(off + i), int(uint8(s[i])))
+    }
+    Skink_mem_write_byte(buf, int64(off + n), 0)
+}
+
+// IsPiHeaderChipLabel reports whether a kernel gpiochip label identifies the
+// 40-pin BCM GPIO header controller on a Raspberry Pi (or a Linux kernel GPIO
+// simulator). Non-header controllers — such as Pi 5's internal SoC
+// "pinctrl-bcm2712", board expanders, or x86 PCH controllers — return false so
+// automatic discovery never claims non-header system lines.
+pub fn IsPiHeaderChipLabel(label: string) -> bool {
+    clean := str.Trim(label)
+    if str.Equal(clean, "pinctrl-rp1") {
+        // Raspberry Pi 5 / 500 / CM5 40-pin header (RP1 southbridge).
+        return true
+    }
+    if str.Equal(clean, "pinctrl-bcm2711") {
+        // Raspberry Pi 4 / 400 / CM4 40-pin header.
+        return true
+    }
+    if str.Equal(clean, "pinctrl-bcm2835") {
+        // Raspberry Pi Zero / 1 / 2 / 3 / Zero 2 W 40-pin header.
+        return true
+    }
+    if str.StartsWith(clean, "gpio-sim") || str.StartsWith(clean, "gpio-mockup") {
+        return true
+    }
+    return false
+}
+
+// ComputeV2Flags translates a Skink direction mode and optional pull bias into
+// the corresponding Linux gpio_v2_line_flag bitmask.
+pub fn ComputeV2Flags(mode: int, pull: int, pullSet: bool) -> int64 {
+    flags := GPIO_V2_LINE_FLAG_INPUT
+    if mode == OUTPUT {
+        flags = GPIO_V2_LINE_FLAG_OUTPUT
+    }
+    if pullSet {
+        if pull == PULL_UP {
+            flags = flags | GPIO_V2_LINE_FLAG_BIAS_PULL_UP
+        } else if pull == PULL_DOWN {
+            flags = flags | GPIO_V2_LINE_FLAG_BIAS_PULL_DOWN
+        } else if pull == PULL_OFF {
+            flags = flags | GPIO_V2_LINE_FLAG_BIAS_DISABLED
+        }
+    }
+    return flags
+}
+
+// PackV2LineConfig populates a 272-byte struct gpio_v2_line_config buffer.
+// When mode == OUTPUT, attaches a GPIO_V2_LINE_ATTR_ID_OUTPUT_VALUES attribute
+// so switching direction drives the initial level atomically without glitching.
+pub fn PackV2LineConfig(buf: string, mode: int, pull: int, pullSet: bool, outVal: int) {
+    libc.memset(buf, 0, int64(GPIO_V2_LINE_CONFIG_SIZE))
+    flags := ComputeV2Flags(mode, pull, pullSet)
+    packU64LE(buf, 0, flags)
+    if mode == OUTPUT {
+        packU32LE(buf, 8, 1) // num_attrs = 1
+        // attrs[0] begins at offset 32 (struct gpio_v2_line_config_attribute):
+        //   32..35: attr.id (u32) = GPIO_V2_LINE_ATTR_ID_OUTPUT_VALUES (2)
+        //   36..39: attr.padding (u32) = 0
+        //   40..47: attr.values (u64) = 0 or 1
+        //   48..55: mask (u64) = 1 (line index 0)
+        packU32LE(buf, 32, GPIO_V2_LINE_ATTR_ID_OUTPUT_VALUES)
+        bits := int64(0)
+        if outVal != 0 {
+            bits = int64(1)
+        }
+        packU64LE(buf, 40, bits)
+        packU64LE(buf, 48, int64(1))
+    }
+}
+
+// PackV2LineRequest populates a 592-byte struct gpio_v2_line_request buffer
+// for requesting a single line at lineOffset with initial flags and consumer.
+pub fn PackV2LineRequest(buf: string, lineOffset: int, flags: int64, consumer: string) {
+    libc.memset(buf, 0, int64(GPIO_V2_LINE_REQ_SIZE))
+    packU32LE(buf, 0, lineOffset)           // offsets[0]
+    writeFixedCString(buf, 256, 32, consumer) // consumer[32]
+    packU64LE(buf, 288, flags)              // config.flags
+    packU32LE(buf, 560, 1)                  // num_lines = 1
+}
+
+// PackV2LineValues populates a 16-byte struct gpio_v2_line_values buffer.
+pub fn PackV2LineValues(buf: string, bits: int64, mask: int64) {
+    packU64LE(buf, 0, bits)
+    packU64LE(buf, 8, mask)
+}
+
+// PWMChannelForPin maps a BCM GPIO number to its hardware PWM channel index
+// given the pwmchip's channel count (npwm). On Raspberry Pi 5 (RP1, npwm >= 4),
+// BCM 12/13/18/19 map to channels 0/1/2/3; on Pi 1-4 (BCM2835/2711, npwm == 2),
+// BCM 12 & 18 share channel 0 and BCM 13 & 19 share channel 1.
+pub fn PWMChannelForPin(bcmNumber: int, npwm: int) -> int {
+    if npwm >= 4 {
+        if bcmNumber == 12 { return 0 }
+        if bcmNumber == 13 { return 1 }
+        if bcmNumber == 18 { return 2 }
+        if bcmNumber == 19 { return 3 }
+        return 0
+    }
+    if npwm >= 2 {
+        if bcmNumber == 13 || bcmNumber == 19 {
+            return 1
+        }
+    }
+    return 0
+}
+
+// registerLineFd records an open cdev line descriptor for Cleanup().
+fn registerLineFd(fd: int) {
+    activeLineFds = append(activeLineFds, fd)
+}
+
+// unregisterLineFd removes fd from activeLineFds so Close() + Cleanup() never
+// double-close a descriptor number the OS may have recycled.
+fn unregisterLineFd(fd: int) {
+    var kept []int
+    for i := 0; i < len(activeLineFds); i = i + 1 {
+        if activeLineFds[i] != fd {
+            kept = append(kept, activeLineFds[i])
+        }
+    }
+    activeLineFds = kept
+}
+
+// registerSysfsPin records an exported sysfs GPIO number for Cleanup().
+fn registerSysfsPin(root: string, sysfsNum: int) {
+    for i := 0; i < len(activeSysfsNums); i = i + 1 {
+        if activeSysfsNums[i] == sysfsNum && str.Equal(activeSysfsRoots[i], root) {
+            return
+        }
+    }
+    activeSysfsRoots = append(activeSysfsRoots, root)
+    activeSysfsNums = append(activeSysfsNums, sysfsNum)
+}
+
+// unregisterSysfsPin removes a sysfs GPIO from the active cleanup list.
+fn unregisterSysfsPin(root: string, sysfsNum: int) {
+    var keptRoots []string
+    var keptNums []int
+    for i := 0; i < len(activeSysfsNums); i = i + 1 {
+        if !(activeSysfsNums[i] == sysfsNum && str.Equal(activeSysfsRoots[i], root)) {
+            keptRoots = append(keptRoots, activeSysfsRoots[i])
+            keptNums = append(keptNums, activeSysfsNums[i])
+        }
+    }
+    activeSysfsRoots = keptRoots
+    activeSysfsNums = keptNums
+}
+
+// openChipDevice opens /dev/gpiochipN with O_RDWR, falling back to O_RDONLY.
+fn openChipDevice(path: string) -> int {
+    fd := open(path, 2) // O_RDWR
+    if fd < 0 {
+        fd = open(path, 0) // O_RDONLY
+    }
+    return fd
+}
+
+// requestLineFromChipFd requests a single GPIO v2 line from an already-open
+// chipFd and always closes chipFd before returning.
+fn requestLineFromChipFd(chipFd: int, bcmNumber: int, lineOffset: int) -> (Pin, errors.Error) {
+    info := libc.calloc(GPIO_CHIPINFO_SIZE, 1)
+    if ioctl(chipFd, GPIO_GET_CHIPINFO_IOCTL, int64(info)) < 0 {
+        libc.free(info)
+        Skink_close_fd(chipFd)
+        return Pin{}, errors.New("gpio chipinfo ioctl failed")
+    }
+    lines := unpackS32LE(info, 64)
+    libc.free(info)
+    if lineOffset < 0 || lineOffset >= lines {
+        Skink_close_fd(chipFd)
+        return Pin{}, errors.New("gpio line offset out of range for chip")
+    }
+
+    req := libc.calloc(GPIO_V2_LINE_REQ_SIZE, 1)
+    PackV2LineRequest(req, lineOffset, GPIO_V2_LINE_FLAG_INPUT, "skink-gpio")
+    rc := ioctl(chipFd, GPIO_V2_GET_LINE_IOCTL, int64(req))
+    lineFd := unpackS32LE(req, 588)
+    libc.free(req)
+    Skink_close_fd(chipFd)
+    if rc < 0 || lineFd < 0 {
+        return Pin{}, errors.New("gpio v2 line request ioctl failed")
+    }
+    registerLineFd(lineFd)
+    return Pin{
+        number: bcmNumber,
+        mode: INPUT,
+        value: LOW,
+        hw: true,
+        backend: BACKEND_CDEV,
+        lineFd: lineFd,
+        pull: PULL_OFF,
+        pullSet: false,
+        sysfsNum: -1,
+        sysfsRoot: ""
+    }, errors.New("")
+}
+
+// findAndOpenPiCdev scans SKINK_GPIO_CHIP (when set) or /dev/gpiochip0..15 for
+// a Raspberry Pi 40-pin header controller (RP1 on Pi 5, BCM2711 on Pi 4,
+// BCM2835 on Pi Zero/1/2/3, or kernel gpio-sim/gpio-mockup) and requests
+// bcmNumber via GPIO_V2_GET_LINE_IOCTL.
+fn findAndOpenPiCdev(bcmNumber: int) -> (Pin, errors.Error) {
+    if bcmNumber < 0 {
+        return Pin{}, errors.New("invalid negative GPIO pin number")
+    }
+    override := getenv("SKINK_GPIO_CHIP")
+    if int64(override) != 0 && str.Len(override) > 0 {
+        chipPath := override
+        if !str.StartsWith(override, "/") {
+            chipPath = "/dev/gpiochip" + override
+        }
+        cfd := openChipDevice(chipPath)
+        if cfd < 0 {
+            return Pin{}, errors.New("cannot open SKINK_GPIO_CHIP " + chipPath)
+        }
+        return requestLineFromChipFd(cfd, bcmNumber, bcmNumber)
+    }
+
+    // Scan /dev/gpiochip0..15; check RP1 ("pinctrl-rp1") priority first so a
+    // Raspberry Pi 5 always selects the 40-pin RP1 header even if internal SoC
+    // chips appear at lower indices (e.g. /dev/gpiochip4 on early 6.6 kernels).
+    bestChipPath := ""
+    for idx := 0; idx < 16; idx = idx + 1 {
+        path := "/dev/gpiochip" + strconv.Itoa(idx)
+        cfd := openChipDevice(path)
+        if cfd < 0 {
+            continue
+        }
+        info := libc.calloc(GPIO_CHIPINFO_SIZE, 1)
+        rc := ioctl(cfd, GPIO_GET_CHIPINFO_IOCTL, int64(info))
+        if rc < 0 {
+            libc.free(info)
+            Skink_close_fd(cfd)
+            continue
+        }
+        label := readFixedCString(info, 32, 32)
+        lines := unpackS32LE(info, 64)
+        libc.free(info)
+        Skink_close_fd(cfd)
+
+        if bcmNumber < lines && IsPiHeaderChipLabel(label) {
+            if str.Equal(str.Trim(label), "pinctrl-rp1") {
+                bestChipPath = path
+                break
+            }
+            if str.Len(bestChipPath) == 0 {
+                bestChipPath = path
+            }
+        }
+    }
+    if str.Len(bestChipPath) == 0 {
+        return Pin{}, errors.New("no accessible Raspberry Pi /dev/gpiochip header controller found")
+    }
+    cfd := openChipDevice(bestChipPath)
+    if cfd < 0 {
+        return Pin{}, errors.New("failed to reopen " + bestChipPath)
+    }
+    return requestLineFromChipFd(cfd, bcmNumber, bcmNumber)
+}
+
+// resolveSysfsLineNumber resolves a BCM pin offset to a global sysfs GPIO
+// number by inspecting <sysfsRoot>/gpiochip*/{label,base,ngpio}. On Bookworm
+// kernels where sysfs is enabled, gpiochip bases are 512 (Pi 1-4) or 571 (Pi 5
+// RP1) rather than 0. Falls back to bcmNumber when no matching chip metadata
+// is present.
+pub fn ResolveSysfsLineNumber(sysfsRoot: string, bcmNumber: int) -> int {
+    entries, err := fs.ReadDir(sysfsRoot)
+    if err.message != "" {
+        return bcmNumber
+    }
+    bestBase := -1
+    for i := 0; i < len(entries); i = i + 1 {
+        name := entries[i].Name
+        if !str.StartsWith(name, "gpiochip") {
+            continue
+        }
+        chipDir := sysfsRoot + "/" + name
+        labelRaw, lerr := fs.ReadAll(chipDir + "/label")
+        baseRaw, berr := fs.ReadAll(chipDir + "/base")
+        ngpioRaw, nerr := fs.ReadAll(chipDir + "/ngpio")
+        if lerr.message != "" || berr.message != "" || nerr.message != "" {
+            continue
+        }
+        label := str.Trim(labelRaw)
+        if !IsPiHeaderChipLabel(label) {
+            continue
+        }
+        base, bok := strconv.ParseInt(baseRaw)
+        ngpio, nok := strconv.ParseInt(ngpioRaw)
+        if !bok || !nok {
+            continue
+        }
+        if bcmNumber >= 0 && bcmNumber < ngpio {
+            if str.Equal(label, "pinctrl-rp1") {
+                return base + bcmNumber
+            }
+            if bestBase < 0 {
+                bestBase = base
+            }
+        }
+    }
+    if bestBase >= 0 {
+        return bestBase + bcmNumber
+    }
+    return bcmNumber
+}
+
+// openSysfsPin attempts to export and open a GPIO pin through a sysfs root
+// (typically "/sys/class/gpio"), waiting briefly for udev permission rules
+// when newly exported.
+fn openSysfsPin(sysfsRoot: string, bcmNumber: int) -> (Pin, errors.Error) {
+    if bcmNumber < 0 {
+        return Pin{}, errors.New("invalid negative GPIO pin number")
+    }
+    if !fs.Exists(sysfsRoot) {
+        return Pin{}, errors.New("sysfs gpio directory absent")
+    }
+    sysfsNum := ResolveSysfsLineNumber(sysfsRoot, bcmNumber)
+    pinDir := sysfsRoot + "/gpio" + strconv.Itoa(sysfsNum)
+    exportedNow := false
+    if !fs.Exists(pinDir) {
+        exportPath := sysfsRoot + "/export"
+        if !fs.Exists(exportPath) {
+            return Pin{}, errors.New("sysfs export absent")
+        }
+        werr := fs.WriteAll(exportPath, strconv.Itoa(sysfsNum))
+        if werr.message != "" {
+            return Pin{}, werr
+        }
+        exportedNow = true
+    }
+    valPath := pinDir + "/value"
+    dirPath := pinDir + "/direction"
+    // When freshly exported on Raspberry Pi OS, udev asynchronously applies
+    // group gpio (0660) permissions; poll briefly for write access (mode 2).
+    if exportedNow {
+        tries := 0
+        for tries < 10 {
+            if fs.Exists(valPath) && fs.Exists(dirPath) {
+                if fs.WriteAll(dirPath, "in").message == "" {
+                    break
+                }
+            }
+            usleep(5000)
+            tries = tries + 1
+        }
+    }
+    if !fs.Exists(valPath) {
+        return Pin{}, errors.New("sysfs gpio value attribute unavailable")
+    }
+    registerSysfsPin(sysfsRoot, sysfsNum)
+    return Pin{
+        number: bcmNumber,
+        mode: INPUT,
+        value: LOW,
+        hw: true,
+        backend: BACKEND_SYSFS,
+        lineFd: -1,
+        pull: PULL_OFF,
+        pullSet: false,
+        sysfsNum: sysfsNum,
+        sysfsRoot: sysfsRoot
+    }, errors.New("")
+}
+
 // Pin represents a single GPIO pin identified by its BCM number.
 //
-//   - number: the BCM GPIO number passed to PinFactory.
-//   - mode:   the current pin direction (INPUT, OUTPUT, or PWM_MODE).
-//   - value:  the last level written to (or read from) the pin.
-//   - hw:     true when backed by /sys/class/gpio/gpioN on a Linux board;
-//             false when running against the in-memory workstation fallback.
+//   - number:    the BCM GPIO number passed to PinFactory / OpenPin.
+//   - mode:      the current pin direction (INPUT, OUTPUT, or PWM_MODE).
+//   - value:     the last level written to (or duty cycle set on) the pin.
+//   - hw:        true when backed by a live Linux cdev line or sysfs pin;
+//                false when running against the in-memory workstation stub.
+//   - backend:   BACKEND_CDEV (/dev/gpiochipN v2), BACKEND_SYSFS, or BACKEND_STUB.
+//   - lineFd:    anonymous kernel line fd returned by GPIO_V2_GET_LINE_IOCTL.
+//   - pull:      configured pull bias (PULL_OFF, PULL_DOWN, PULL_UP).
+//   - pullSet:   true once SetPull has been explicitly called on this pin.
+//   - sysfsNum:  resolved global sysfs GPIO number (base + number) when on sysfs.
+//   - sysfsRoot: sysfs root path (e.g. "/sys/class/gpio") when on sysfs.
 pub struct Pin {
-    number: int  // the number
-    mode: int  // the mode
-    value: int  // the value
-    hw: bool  // whether sysfs hardware backend is active
+    number: int
+    mode: int
+    value: int
+    hw: bool
+    backend: int
+    lineFd: int
+    pull: int
+    pullSet: bool
+    sysfsNum: int
+    sysfsRoot: string
+
+    // reconfigureCdev applies self.mode, self.pull, and self.value to an open
+    // GPIO v2 line descriptor via GPIO_V2_LINE_SET_CONFIG_IOCTL. If a chip
+    // rejects bias flags with EOPNOTSUPP during direction changes, retries
+    // without bias flags so output/input switching still succeeds.
+    fn reconfigureCdev(self: *Pin) -> errors.Error {
+        if self.backend != BACKEND_CDEV || self.lineFd < 0 {
+            return errors.New("")
+        }
+        cfg := libc.calloc(GPIO_V2_LINE_CONFIG_SIZE, 1)
+        effMode := self.mode
+        if effMode != OUTPUT {
+            effMode = INPUT
+        }
+        PackV2LineConfig(cfg, effMode, self.pull, self.pullSet, self.value)
+        rc := ioctl(self.lineFd, GPIO_V2_LINE_SET_CONFIG_IOCTL, int64(cfg))
+        if rc < 0 && self.pullSet {
+            PackV2LineConfig(cfg, effMode, PULL_OFF, false, self.value)
+            rc = ioctl(self.lineFd, GPIO_V2_LINE_SET_CONFIG_IOCTL, int64(cfg))
+        }
+        libc.free(cfg)
+        if rc < 0 {
+            return errors.New("gpio v2 set_config ioctl failed")
+        }
+        return errors.New("")
+    }
 
     // SetOutput configures the pin as a digital output.
     pub fn SetOutput(self: *Pin) {
         self.mode = OUTPUT
-        if self.hw {
-            p := "/sys/class/gpio/gpio" + strconv.Itoa(self.number) + "/direction"
+        if self.backend == BACKEND_CDEV && self.lineFd >= 0 {
+            self.reconfigureCdev()
+        } else if self.backend == BACKEND_SYSFS || (self.hw && self.backend == 0) {
+            root := self.sysfsRoot
+            if str.Len(root) == 0 { root = "/sys/class/gpio" }
+            num := self.sysfsNum
+            if num < 0 { num = self.number }
+            p := root + "/gpio" + strconv.Itoa(num) + "/direction"
             fs.WriteAll(p, "out")
         }
     }
@@ -53,17 +589,43 @@ pub struct Pin {
     // SetInput configures the pin as a digital input.
     pub fn SetInput(self: *Pin) {
         self.mode = INPUT
-        if self.hw {
-            p := "/sys/class/gpio/gpio" + strconv.Itoa(self.number) + "/direction"
+        if self.backend == BACKEND_CDEV && self.lineFd >= 0 {
+            self.reconfigureCdev()
+        } else if self.backend == BACKEND_SYSFS || (self.hw && self.backend == 0) {
+            root := self.sysfsRoot
+            if str.Len(root) == 0 { root = "/sys/class/gpio" }
+            num := self.sysfsNum
+            if num < 0 { num = self.number }
+            p := root + "/gpio" + strconv.Itoa(num) + "/direction"
             fs.WriteAll(p, "in")
         }
     }
 
-    // Write drives the pin to the given level (LOW or HIGH).
+    // Write drives the pin to the given level (LOW or HIGH). On a GPIO v2
+    // character-device line not yet configured as OUTPUT, automatically
+    // switches direction to OUTPUT first so the kernel accepts SET_VALUES.
     pub fn Write(self: *Pin, val: int) {
         self.value = val
-        if self.hw {
-            p := "/sys/class/gpio/gpio" + strconv.Itoa(self.number) + "/value"
+        if self.backend == BACKEND_CDEV && self.lineFd >= 0 {
+            if self.mode != OUTPUT {
+                self.mode = OUTPUT
+                self.reconfigureCdev()
+                return
+            }
+            vals := libc.calloc(GPIO_V2_LINE_VALUES_SIZE, 1)
+            bits := int64(0)
+            if val != 0 {
+                bits = int64(1)
+            }
+            PackV2LineValues(vals, bits, int64(1))
+            ioctl(self.lineFd, GPIO_V2_LINE_SET_VALUES_IOCTL, int64(vals))
+            libc.free(vals)
+        } else if self.backend == BACKEND_SYSFS || (self.hw && self.backend == 0) {
+            root := self.sysfsRoot
+            if str.Len(root) == 0 { root = "/sys/class/gpio" }
+            num := self.sysfsNum
+            if num < 0 { num = self.number }
+            p := root + "/gpio" + strconv.Itoa(num) + "/value"
             if val != 0 {
                 fs.WriteAll(p, "1")
             } else {
@@ -74,8 +636,24 @@ pub struct Pin {
 
     // Read returns the current level of the pin (LOW or HIGH).
     pub fn Read(self: Pin) -> int {
-        if self.hw {
-            p := "/sys/class/gpio/gpio" + strconv.Itoa(self.number) + "/value"
+        if self.backend == BACKEND_CDEV && self.lineFd >= 0 {
+            vals := libc.calloc(GPIO_V2_LINE_VALUES_SIZE, 1)
+            PackV2LineValues(vals, int64(0), int64(1))
+            rc := ioctl(self.lineFd, GPIO_V2_LINE_GET_VALUES_IOCTL, int64(vals))
+            bits := unpackU64LE(vals, 0)
+            libc.free(vals)
+            if rc >= 0 {
+                if (bits & int64(1)) != int64(0) {
+                    return HIGH
+                }
+                return LOW
+            }
+        } else if self.backend == BACKEND_SYSFS || (self.hw && self.backend == 0) {
+            root := self.sysfsRoot
+            if str.Len(root) == 0 { root = "/sys/class/gpio" }
+            num := self.sysfsNum
+            if num < 0 { num = self.number }
+            p := root + "/gpio" + strconv.Itoa(num) + "/value"
             s, err := fs.ReadAll(p)
             if err.message == "" && str.Len(s) > 0 {
                 if s[0] == 49 { // '1'
@@ -87,24 +665,69 @@ pub struct Pin {
         return self.value
     }
 
-    // PWM sets the duty cycle (0..100) for hardware pulse-width modulation.
-    // When /sys/class/pwm/pwmchip0 is present on Linux, configures a 50 Hz
-    // (20,000,000 ns) frame and writes the corresponding duty_cycle in ns;
-    // otherwise records the clamped duty in self.value for simulation.
-    pub fn PWM(self: *Pin, duty: int) {
+    // PWMWithRoot configures hardware PWM under pwmRoot (e.g. "/sys/class/pwm")
+    // at 50 Hz (20,000,000 ns period) for duty in 0..100, selecting the right
+    // channel for both 2-channel Pi 1-4 (BCM2835/2711) and 4-channel Pi 5 (RP1)
+    // controllers. Records the clamped duty in self.value regardless.
+    pub fn PWMWithRoot(self: *Pin, duty: int, pwmRoot: string) -> errors.Error {
         d := duty
         if d < 0 { d = 0 }
         if d > 100 { d = 100 }
         self.value = d
-        if fs.Exists("/sys/class/pwm/pwmchip0") {
-            ch := "/sys/class/pwm/pwmchip0/pwm0"
-            if !fs.Exists(ch) {
-                fs.WriteAll("/sys/class/pwm/pwmchip0/export", "0")
+
+        bestChip := ""
+        bestNpwm := 0
+        for idx := 0; idx < 8; idx = idx + 1 {
+            cand := pwmRoot + "/pwmchip" + strconv.Itoa(idx)
+            if !fs.Exists(cand) {
+                continue
             }
-            fs.WriteAll(ch + "/period", "20000000")
-            fs.WriteAll(ch + "/duty_cycle", strconv.Itoa(d * 200000))
-            fs.WriteAll(ch + "/enable", "1")
+            npwm := 1
+            npwmRaw, nerr := fs.ReadAll(cand + "/npwm")
+            if nerr.message == "" {
+                parsed, pok := strconv.ParseInt(npwmRaw)
+                if pok && parsed > 0 {
+                    npwm = parsed
+                }
+            }
+            if str.Len(bestChip) == 0 || (npwm >= 4 && bestNpwm < 4) {
+                bestChip = cand
+                bestNpwm = npwm
+            }
         }
+        if str.Len(bestChip) == 0 {
+            return errors.New("no pwmchip found")
+        }
+        chIdx := PWMChannelForPin(self.number, bestNpwm)
+        ch := bestChip + "/pwm" + strconv.Itoa(chIdx)
+        if !fs.Exists(ch) {
+            werr := fs.WriteAll(bestChip + "/export", strconv.Itoa(chIdx))
+            if werr.message != "" {
+                return werr
+            }
+        }
+        // Reset duty_cycle to 0 before updating period so shrinking period
+        // below a previous duty_cycle never fails with EINVAL in sysfs PWM.
+        if fs.Exists(ch + "/duty_cycle") {
+            fs.WriteAll(ch + "/duty_cycle", "0")
+        }
+        perr := fs.WriteAll(ch + "/period", "20000000")
+        if perr.message != "" {
+            return perr
+        }
+        derr := fs.WriteAll(ch + "/duty_cycle", strconv.Itoa(d * 200000))
+        if derr.message != "" {
+            return derr
+        }
+        return fs.WriteAll(ch + "/enable", "1")
+    }
+
+    // PWM sets the duty cycle (0..100) for hardware pulse-width modulation.
+    // When /sys/class/pwm/pwmchipN is present on Linux, configures a 50 Hz
+    // (20,000,000 ns) frame on the matching channel and writes duty_cycle in
+    // ns; otherwise records the clamped duty in self.value for simulation.
+    pub fn PWM(self: *Pin, duty: int) {
+        self.PWMWithRoot(duty, "/sys/class/pwm")
     }
 
     // Number returns the BCM GPIO number of this pin.
@@ -115,6 +738,18 @@ pub struct Pin {
     // Mode returns the current pin direction (INPUT, OUTPUT, or PWM_MODE).
     pub fn Mode(self: Pin) -> int {
         return self.mode
+    }
+
+    // Pull returns the configured internal pull resistor setting
+    // (PULL_OFF, PULL_DOWN, or PULL_UP).
+    pub fn Pull(self: Pin) -> int {
+        return self.pull
+    }
+
+    // IsHardware reports whether this Pin is backed by real kernel GPIO
+    // hardware (character device or sysfs) rather than the workstation stub.
+    pub fn IsHardware(self: Pin) -> bool {
+        return self.hw
     }
 
     // SetMode sets the pin direction: INPUT, OUTPUT, or PWM_MODE.
@@ -128,47 +763,143 @@ pub struct Pin {
         }
     }
 
-    // SetPull configures the internal pull resistor: 0=off, 1=down, 2=up.
+    // SetPull configures the internal pull resistor: PULL_OFF (0),
+    // PULL_DOWN (1), or PULL_UP (2). On the Linux GPIO v2 character-device
+    // backend (Raspberry Pi 1-5), applies the bias immediately via
+    // GPIO_V2_LINE_SET_CONFIG_IOCTL.
     pub fn SetPull(self: *Pin, pull: int) {
-        // sysfs does not expose pull-resistor control; retained for API compatibility.
+        if pull == PULL_UP {
+            self.pull = PULL_UP
+        } else if pull == PULL_DOWN {
+            self.pull = PULL_DOWN
+        } else {
+            self.pull = PULL_OFF
+        }
+        self.pullSet = true
+        if self.backend == BACKEND_CDEV && self.lineFd >= 0 {
+            self.reconfigureCdev()
+        }
+    }
+
+    // Close releases the underlying GPIO line descriptor (or unexports a
+    // legacy sysfs pin). Idempotent.
+    pub fn Close(self: *Pin) -> errors.Error {
+        if self.backend == BACKEND_CDEV && self.lineFd >= 0 {
+            fd := self.lineFd
+            unregisterLineFd(fd)
+            Skink_close_fd(fd)
+            self.lineFd = -1
+            self.hw = false
+            self.backend = BACKEND_STUB
+        } else if self.backend == BACKEND_SYSFS {
+            root := self.sysfsRoot
+            if str.Len(root) == 0 { root = "/sys/class/gpio" }
+            num := self.sysfsNum
+            if num < 0 { num = self.number }
+            unregisterSysfsPin(root, num)
+            if fs.Exists(root + "/unexport") {
+                fs.WriteAll(root + "/unexport", strconv.Itoa(num))
+            }
+            self.hw = false
+            self.backend = BACKEND_STUB
+        }
+        return errors.New("")
     }
 }
 
-// Setup initializes the GPIO subsystem. Succeeds on both sysfs-equipped
-// Linux boards and workstation fallback environments.
+// Setup initializes the GPIO subsystem. Succeeds on Linux GPIO character-device
+// boards, legacy sysfs boards, and workstation fallback environments.
 pub fn Setup() -> errors.Error {
     return errors.New("")
 }
 
-// PinFactory creates a Pin by its BCM number. When /sys/class/gpio is
-// writable on the host, the pin is exported and backed by sysfs; otherwise
-// an in-memory pin is returned so code can run on any workstation.
-pub fn PinFactory(bcmNumber: int) -> Pin {
-    pinDir := "/sys/class/gpio/gpio" + strconv.Itoa(bcmNumber)
-    if fs.Exists("/sys/class/gpio/export") && !fs.Exists(pinDir) {
-        fs.WriteAll("/sys/class/gpio/export", strconv.Itoa(bcmNumber))
+// OpenPin opens a Raspberry Pi GPIO pin by BCM number, trying the Linux GPIO v2
+// character-device ABI (/dev/gpiochipN) first and legacy /sys/class/gpio second.
+// Unlike PinFactory, OpenPin returns an explicit error instead of falling back
+// to an in-memory stub when hardware is absent or inaccessible.
+pub fn OpenPin(bcmNumber: int) -> (Pin, errors.Error) {
+    if bcmNumber < 0 {
+        return Pin{}, errors.New("invalid negative GPIO pin number")
     }
-    hasHw := fs.Exists(pinDir + "/value")
-    return Pin{number: bcmNumber, mode: INPUT, value: LOW, hw: hasHw}
+    pin, cerr := findAndOpenPiCdev(bcmNumber)
+    if cerr.message == "" {
+        return pin, errors.New("")
+    }
+    spin, serr := openSysfsPin("/sys/class/gpio", bcmNumber)
+    if serr.message == "" {
+        return spin, errors.New("")
+    }
+    return Pin{number: bcmNumber, mode: INPUT, value: LOW, hw: false, backend: BACKEND_STUB, lineFd: -1, sysfsNum: -1}, cerr
 }
 
-// Pin direction constants used by SetInput/SetOutput and Mode.
-pub const INPUT = 0
-pub const OUTPUT = 1  // the output
-pub const PWM_MODE = 2  // the pwm mode
+// OpenPinOnChip opens lineOffset on an explicit /dev/gpiochip{chipNumber}
+// controller using the Linux GPIO v2 ABI. Works on any Linux SBC regardless of
+// chip label and returns an explicit error on failure.
+pub fn OpenPinOnChip(chipNumber: int, lineOffset: int) -> (Pin, errors.Error) {
+    if chipNumber < 0 || lineOffset < 0 {
+        return Pin{}, errors.New("invalid gpio chip or line offset")
+    }
+    path := "/dev/gpiochip" + strconv.Itoa(chipNumber)
+    cfd := openChipDevice(path)
+    if cfd < 0 {
+        return Pin{}, errors.New("cannot open " + path)
+    }
+    return requestLineFromChipFd(cfd, lineOffset, lineOffset)
+}
 
-// Cleanup releases GPIO resources. The stub backend is a no-op; on
-// wiringPi/pigpio it unexports pins and releases the backend.
+// PinFactoryOnChip opens lineOffset on /dev/gpiochip{chipNumber}, falling back
+// to an in-memory simulated Pin when the device node is absent or inaccessible.
+pub fn PinFactoryOnChip(chipNumber: int, lineOffset: int) -> Pin {
+    p, err := OpenPinOnChip(chipNumber, lineOffset)
+    if err.message == "" {
+        return p
+    }
+    return Pin{number: lineOffset, mode: INPUT, value: LOW, hw: false, backend: BACKEND_STUB, lineFd: -1, sysfsNum: -1}
+}
+
+// PinFactorySysfs creates a Pin backed by a specific sysfs GPIO directory
+// (resolving non-zero gpiochip bases such as 512 on Bookworm or 571 on Pi 5),
+// falling back to an in-memory Pin when sysfsRoot is unavailable.
+pub fn PinFactorySysfs(sysfsRoot: string, bcmNumber: int) -> Pin {
+    p, err := openSysfsPin(sysfsRoot, bcmNumber)
+    if err.message == "" {
+        return p
+    }
+    return Pin{number: bcmNumber, mode: INPUT, value: LOW, hw: false, backend: BACKEND_STUB, lineFd: -1, sysfsNum: -1}
+}
+
+// PinFactory creates a Pin by its BCM number. On a Raspberry Pi (Pi Zero/1-5),
+// automatically claims the line via /dev/gpiochipN (GPIO v2 ABI), falling back
+// to /sys/class/gpio (with base-offset discovery) on older kernels, or an
+// in-memory Pin on workstations without GPIO hardware.
+pub fn PinFactory(bcmNumber: int) -> Pin {
+    p, err := OpenPin(bcmNumber)
+    if err.message == "" {
+        return p
+    }
+    return Pin{number: bcmNumber, mode: INPUT, value: LOW, hw: false, backend: BACKEND_STUB, lineFd: -1, sysfsNum: -1}
+}
+
+// Cleanup releases all open hardware GPIO line descriptors and unexports any
+// legacy sysfs pins acquired during this process's lifetime.
 pub fn Cleanup() {
-    // no-op on the stub backend
+    for i := 0; i < len(activeLineFds); i = i + 1 {
+        if activeLineFds[i] >= 0 {
+            Skink_close_fd(activeLineFds[i])
+        }
+    }
+    var emptyFds []int
+    activeLineFds = emptyFds
+
+    for j := 0; j < len(activeSysfsNums); j = j + 1 {
+        root := activeSysfsRoots[j]
+        unexportPath := root + "/unexport"
+        if fs.Exists(unexportPath) {
+            fs.WriteAll(unexportPath, strconv.Itoa(activeSysfsNums[j]))
+        }
+    }
+    var emptyRoots []string
+    var emptyNums []int
+    activeSysfsRoots = emptyRoots
+    activeSysfsNums = emptyNums
 }
-
-// Pin level constants used by Write/Read.
-pub const LOW = 0
-pub const HIGH = 1  // the high
-
-// Pull resistor constants for future SetPull support.
-// On wiringPi these map to PUD_OFF/PUD_DOWN/PUD_UP via pullUpDnControl.
-pub const PULL_OFF = 0
-pub const PULL_DOWN = 1  // the pull down
-pub const PULL_UP = 2  // the pull up

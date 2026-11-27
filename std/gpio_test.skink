@@ -5,7 +5,10 @@
 //          modern ergonomics and a Go-inspired syntax.
 //
 // File:    std/gpio_test.skink
-// Purpose: Skink module for gpio test.
+// Purpose: Unit and regression tests for std/gpio covering Linux GPIO v2
+//          character-device ABI packing, Raspberry Pi 1-5 chip discovery,
+//          Bookworm/Pi 5 sysfs base-offset resolution, PWM channel mapping,
+//          pull-resistor flags, strict OpenPin errors, and workstation stubs.
 // Author:  Mark Oxley
 // Created: 2026
 //
@@ -23,16 +26,42 @@
 
 module gpio_test
 
-import "std/gpio"
 import "std/errors"
+import "std/fs"
+import "std/gpio"
+import "std/libc"
+import "std/runtime"
+import "std/str"
 import "testing"
 
-// TestPinFactory verifies Pin creation.
+extern fn Skink_mem_byte(ptr: string, idx: int64) -> int
+
+// readU32LE decodes a 32-bit little-endian integer from raw buffer buf at off.
+fn readU32LE(buf: string, off: int) -> int {
+    return Skink_mem_byte(buf, int64(off)) |
+           (Skink_mem_byte(buf, int64(off + 1)) << 8) |
+           (Skink_mem_byte(buf, int64(off + 2)) << 16) |
+           (Skink_mem_byte(buf, int64(off + 3)) << 24)
+}
+
+// readU64LE decodes a 64-bit little-endian integer from raw buffer buf at off.
+fn readU64LE(buf: string, off: int) -> int64 {
+    v := int64(0)
+    for i := 0; i < 8; i = i + 1 {
+        b := int64(Skink_mem_byte(buf, int64(off + i)))
+        shift := int64(i * 8)
+        v = v | (b << shift)
+    }
+    return v
+}
+
+// TestPinFactory verifies Pin creation in workstation fallback mode.
 pub fn TestPinFactory() {
     p := gpio.PinFactory(17)
     if p.Read() != 0 {
         Errorf("new pin should read LOW")
     }
+    p.Close()
 }
 
 // TestPinOutput verifies setting a pin to output and writing.
@@ -43,13 +72,17 @@ pub fn TestPinOutput() {
     if p.Read() != 1 {
         Errorf("pin should read HIGH after write")
     }
+    p.Close()
 }
 
 // TestPinInput verifies setting a pin to input.
 pub fn TestPinInput() {
     p := gpio.PinFactory(19)
     p.SetInput()
-    // No crash is success for stub
+    if p.Mode() != gpio.INPUT {
+        Errorf("pin mode should be INPUT")
+    }
+    p.Close()
 }
 
 // TestSetup verifies Setup returns no error.
@@ -60,19 +93,29 @@ pub fn TestSetup() {
     }
 }
 
-// TestConstants verifies GPIO constants are defined.
+// TestConstants verifies GPIO constants and 64-bit Linux v2 ioctl codes.
+// Guards against sign-extension of >= 0x80000000 ioctl numbers on 64-bit ARM/x86.
 pub fn TestConstants() {
-    if gpio.LOW != 0 {
-        Errorf("LOW should be 0")
+    if gpio.LOW != 0 || gpio.HIGH != 1 {
+        Errorf("LOW/HIGH mismatch")
     }
-    if gpio.HIGH != 1 {
-        Errorf("HIGH should be 1")
+    if gpio.INPUT != 0 || gpio.OUTPUT != 1 {
+        Errorf("INPUT/OUTPUT mismatch")
     }
-    if gpio.INPUT != 0 {
-        Errorf("INPUT should be 0")
+    if gpio.GPIO_GET_CHIPINFO_IOCTL != int64(0x8044b401) || gpio.GPIO_GET_CHIPINFO_IOCTL < int64(0) {
+        Errorf("GPIO_GET_CHIPINFO_IOCTL was sign-extended or wrong")
     }
-    if gpio.OUTPUT != 1 {
-        Errorf("OUTPUT should be 1")
+    if gpio.GPIO_V2_GET_LINE_IOCTL != int64(0xc250b407) || gpio.GPIO_V2_GET_LINE_IOCTL < int64(0) {
+        Errorf("GPIO_V2_GET_LINE_IOCTL was sign-extended or wrong")
+    }
+    if gpio.GPIO_V2_LINE_SET_CONFIG_IOCTL != int64(0xc110b40d) {
+        Errorf("GPIO_V2_LINE_SET_CONFIG_IOCTL mismatch")
+    }
+    if gpio.GPIO_V2_LINE_GET_VALUES_IOCTL != int64(0xc010b40e) {
+        Errorf("GPIO_V2_LINE_GET_VALUES_IOCTL mismatch")
+    }
+    if gpio.GPIO_V2_LINE_SET_VALUES_IOCTL != int64(0xc010b40f) {
+        Errorf("GPIO_V2_LINE_SET_VALUES_IOCTL mismatch")
     }
 }
 
@@ -90,5 +133,237 @@ pub fn TestPinPWMAndMode() {
     p.PWM(-10)
     if p.Read() != 0 {
         Errorf("PWM should clamp negative duty to 0")
+    }
+    p.Close()
+}
+
+// TestPiHeaderChipLabelFilter guards against misidentifying internal SoC or
+// workstation motherboard GPIO chips as the Raspberry Pi 40-pin header while
+// accepting Pi Zero/1-3 (bcm2835), Pi 4 (bcm2711), and Pi 5 (rp1).
+pub fn TestPiHeaderChipLabelFilter() {
+    testing.AssertTrue(gpio.IsPiHeaderChipLabel("pinctrl-rp1"), "Pi 5 RP1 header label")
+    testing.AssertTrue(gpio.IsPiHeaderChipLabel("pinctrl-bcm2711"), "Pi 4 header label")
+    testing.AssertTrue(gpio.IsPiHeaderChipLabel("pinctrl-bcm2835"), "Pi 1-3/Zero header label")
+    testing.AssertTrue(gpio.IsPiHeaderChipLabel("gpio-sim.0"), "kernel gpio-sim label")
+    testing.AssertTrue(!gpio.IsPiHeaderChipLabel("pinctrl-bcm2712"), "Pi 5 internal SoC chip must be skipped")
+    testing.AssertTrue(!gpio.IsPiHeaderChipLabel("raspberrypi-exp-gpio"), "Pi expander chip must be skipped")
+    testing.AssertTrue(!gpio.IsPiHeaderChipLabel("INT3450:00"), "x86 PCH chip must be skipped")
+    testing.AssertTrue(!gpio.IsPiHeaderChipLabel("pinctrl_amd"), "AMD workstation chip must be skipped")
+}
+
+// TestV2StructPacking verifies exact byte offsets of struct gpio_v2_line_request,
+// struct gpio_v2_line_config, and struct gpio_v2_line_values against <linux/gpio.h>.
+pub fn TestV2StructPacking() {
+    req := libc.calloc(gpio.GPIO_V2_LINE_REQ_SIZE, 1)
+    gpio.PackV2LineRequest(req, 17, gpio.GPIO_V2_LINE_FLAG_INPUT, "skink-gpio")
+    testing.AssertEqualInt(17, readU32LE(req, 0), "req.offsets[0] at offset 0")
+    testing.AssertEqualInt(115, Skink_mem_byte(req, int64(256)), "req.consumer[0] == 's' at offset 256")
+    if readU64LE(req, 288) != gpio.GPIO_V2_LINE_FLAG_INPUT {
+        Errorf("req.config.flags at offset 288 mismatch")
+    }
+    testing.AssertEqualInt(1, readU32LE(req, 560), "req.num_lines == 1 at offset 560")
+    libc.free(req)
+
+    cfg := libc.calloc(gpio.GPIO_V2_LINE_CONFIG_SIZE, 1)
+    gpio.PackV2LineConfig(cfg, gpio.OUTPUT, gpio.PULL_UP, true, 1)
+    wantFlags := gpio.GPIO_V2_LINE_FLAG_OUTPUT | gpio.GPIO_V2_LINE_FLAG_BIAS_PULL_UP
+    if readU64LE(cfg, 0) != wantFlags {
+        Errorf("cfg.flags should combine OUTPUT and BIAS_PULL_UP")
+    }
+    testing.AssertEqualInt(1, readU32LE(cfg, 8), "cfg.num_attrs == 1 at offset 8")
+    testing.AssertEqualInt(gpio.GPIO_V2_LINE_ATTR_ID_OUTPUT_VALUES, readU32LE(cfg, 32), "cfg.attrs[0].id at offset 32")
+    if readU64LE(cfg, 40) != int64(1) {
+        Errorf("cfg.attrs[0].values should be 1 at offset 40")
+    }
+    if readU64LE(cfg, 48) != int64(1) {
+        Errorf("cfg.attrs[0].mask should be 1 at offset 48")
+    }
+    libc.free(cfg)
+
+    vals := libc.calloc(gpio.GPIO_V2_LINE_VALUES_SIZE, 1)
+    gpio.PackV2LineValues(vals, int64(1), int64(1))
+    if readU64LE(vals, 0) != int64(1) || readU64LE(vals, 8) != int64(1) {
+        Errorf("gpio_v2_line_values bits/mask layout mismatch")
+    }
+    libc.free(vals)
+}
+
+// TestSetPullAndFlags verifies SetPull updates Pull() and maps PULL_OFF/DOWN/UP
+// to the Linux GPIO v2 bias flags (and omits bias flags before SetPull is called).
+pub fn TestSetPullAndFlags() {
+    if gpio.ComputeV2Flags(gpio.INPUT, gpio.PULL_OFF, false) != gpio.GPIO_V2_LINE_FLAG_INPUT {
+        Errorf("unset pull must not emit bias flags")
+    }
+    p := gpio.PinFactory(22)
+    p.SetPull(gpio.PULL_UP)
+    testing.AssertEqualInt(gpio.PULL_UP, p.Pull(), "Pull() after PULL_UP")
+    if gpio.ComputeV2Flags(p.Mode(), p.Pull(), true) != (gpio.GPIO_V2_LINE_FLAG_INPUT | gpio.GPIO_V2_LINE_FLAG_BIAS_PULL_UP) {
+        Errorf("PULL_UP flag bitmask mismatch")
+    }
+    p.SetPull(gpio.PULL_DOWN)
+    testing.AssertEqualInt(gpio.PULL_DOWN, p.Pull(), "Pull() after PULL_DOWN")
+    p.SetPull(gpio.PULL_OFF)
+    testing.AssertEqualInt(gpio.PULL_OFF, p.Pull(), "Pull() after PULL_OFF")
+    if gpio.ComputeV2Flags(gpio.INPUT, p.Pull(), true) != (gpio.GPIO_V2_LINE_FLAG_INPUT | gpio.GPIO_V2_LINE_FLAG_BIAS_DISABLED) {
+        Errorf("PULL_OFF explicit bias-disabled flag mismatch")
+    }
+    p.Close()
+}
+
+// TestSysfsBaseOffsetAndIO guards against the Bookworm/Pi 5 regression where
+// sysfs gpiochip base is 512 or 571 rather than 0, and verifies direction,
+// write, read, and Cleanup unexport against a mock sysfs hierarchy.
+pub fn TestSysfsBaseOffsetAndIO() {
+    if runtime.OS() == "windows" {
+        return
+    }
+    root := "/tmp/skink_gpio_sysfs_test"
+    // Clean any leftover files from an interrupted run.
+    fs.Remove(root + "/gpio588/value")
+    fs.Remove(root + "/gpio588/direction")
+    fs.Remove(root + "/gpio588")
+    fs.Remove(root + "/gpiochip571/label")
+    fs.Remove(root + "/gpiochip571/base")
+    fs.Remove(root + "/gpiochip571/ngpio")
+    fs.Remove(root + "/gpiochip571")
+    fs.Remove(root + "/gpiochip512/label")
+    fs.Remove(root + "/gpiochip512/base")
+    fs.Remove(root + "/gpiochip512/ngpio")
+    fs.Remove(root + "/gpiochip512")
+    fs.Remove(root + "/export")
+    fs.Remove(root + "/unexport")
+    fs.Remove(root)
+
+    fs.Mkdir(root)
+    // Simulate a Pi 5 with both an internal chip (512) and the RP1 header (571).
+    fs.Mkdir(root + "/gpiochip512")
+    fs.WriteAll(root + "/gpiochip512/label", "pinctrl-bcm2712\n")
+    fs.WriteAll(root + "/gpiochip512/base", "512\n")
+    fs.WriteAll(root + "/gpiochip512/ngpio", "32\n")
+
+    fs.Mkdir(root + "/gpiochip571")
+    fs.WriteAll(root + "/gpiochip571/label", "pinctrl-rp1\n")
+    fs.WriteAll(root + "/gpiochip571/base", "571\n")
+    fs.WriteAll(root + "/gpiochip571/ngpio", "54\n")
+
+    fs.WriteAll(root + "/export", "")
+    fs.WriteAll(root + "/unexport", "")
+    // Pre-populate gpio588 (571 + BCM 17 = 588) as kernel export would create.
+    fs.Mkdir(root + "/gpio588")
+    fs.WriteAll(root + "/gpio588/direction", "in\n")
+    fs.WriteAll(root + "/gpio588/value", "0\n")
+
+    resolved := gpio.ResolveSysfsLineNumber(root, 17)
+    testing.AssertEqualInt(588, resolved, "BCM 17 on RP1 base 571 should resolve to 588")
+
+    pin := gpio.PinFactorySysfs(root, 17)
+    testing.AssertTrue(pin.IsHardware(), "mock sysfs pin should report IsHardware() == true")
+    testing.AssertEqualInt(gpio.LOW, pin.Read(), "initial sysfs read LOW")
+
+    pin.SetOutput()
+    dirContent, _ := fs.ReadAll(root + "/gpio588/direction")
+    if !str.Equal(dirContent, "out") {
+        Errorf("SetOutput did not write 'out' to gpio588/direction")
+    }
+
+    pin.Write(gpio.HIGH)
+    testing.AssertEqualInt(gpio.HIGH, pin.Read(), "sysfs read HIGH after Write(HIGH)")
+
+    gpio.Cleanup()
+    unexported, _ := fs.ReadAll(root + "/unexport")
+    if !str.Equal(unexported, "588") {
+        Errorf("Cleanup should unexport resolved line 588, got: " + unexported)
+    }
+
+    fs.Remove(root + "/gpio588/value")
+    fs.Remove(root + "/gpio588/direction")
+    fs.Remove(root + "/gpio588")
+    fs.Remove(root + "/gpiochip571/label")
+    fs.Remove(root + "/gpiochip571/base")
+    fs.Remove(root + "/gpiochip571/ngpio")
+    fs.Remove(root + "/gpiochip571")
+    fs.Remove(root + "/gpiochip512/label")
+    fs.Remove(root + "/gpiochip512/base")
+    fs.Remove(root + "/gpiochip512/ngpio")
+    fs.Remove(root + "/gpiochip512")
+    fs.Remove(root + "/export")
+    fs.Remove(root + "/unexport")
+    fs.Remove(root)
+}
+
+// TestPWMPi4AndPi5ChannelMapping verifies hardware PWM channel selection and
+// sysfs sequencing across 2-channel (Pi 1-4) and 4-channel (Pi 5 RP1) chips.
+pub fn TestPWMPi4AndPi5ChannelMapping() {
+    testing.AssertEqualInt(0, gpio.PWMChannelForPin(12, 2), "Pi 4 BCM 12 -> pwm0")
+    testing.AssertEqualInt(0, gpio.PWMChannelForPin(18, 2), "Pi 4 BCM 18 -> pwm0")
+    testing.AssertEqualInt(1, gpio.PWMChannelForPin(13, 2), "Pi 4 BCM 13 -> pwm1")
+    testing.AssertEqualInt(1, gpio.PWMChannelForPin(19, 2), "Pi 4 BCM 19 -> pwm1")
+
+    testing.AssertEqualInt(0, gpio.PWMChannelForPin(12, 4), "Pi 5 BCM 12 -> pwm0")
+    testing.AssertEqualInt(1, gpio.PWMChannelForPin(13, 4), "Pi 5 BCM 13 -> pwm1")
+    testing.AssertEqualInt(2, gpio.PWMChannelForPin(18, 4), "Pi 5 BCM 18 -> pwm2")
+    testing.AssertEqualInt(3, gpio.PWMChannelForPin(19, 4), "Pi 5 BCM 19 -> pwm3")
+
+    if runtime.OS() == "windows" {
+        return
+    }
+    pwmRoot := "/tmp/skink_pwm_pi5_test"
+    fs.Remove(pwmRoot + "/pwmchip2/pwm2/enable")
+    fs.Remove(pwmRoot + "/pwmchip2/pwm2/duty_cycle")
+    fs.Remove(pwmRoot + "/pwmchip2/pwm2/period")
+    fs.Remove(pwmRoot + "/pwmchip2/pwm2")
+    fs.Remove(pwmRoot + "/pwmchip2/export")
+    fs.Remove(pwmRoot + "/pwmchip2/npwm")
+    fs.Remove(pwmRoot + "/pwmchip2")
+    fs.Remove(pwmRoot)
+
+    fs.Mkdir(pwmRoot)
+    fs.Mkdir(pwmRoot + "/pwmchip2")
+    fs.WriteAll(pwmRoot + "/pwmchip2/npwm", "4\n")
+    fs.WriteAll(pwmRoot + "/pwmchip2/export", "")
+    fs.Mkdir(pwmRoot + "/pwmchip2/pwm2")
+    fs.WriteAll(pwmRoot + "/pwmchip2/pwm2/period", "20000000")
+    fs.WriteAll(pwmRoot + "/pwmchip2/pwm2/duty_cycle", "0")
+    fs.WriteAll(pwmRoot + "/pwmchip2/pwm2/enable", "0")
+
+    p := gpio.PinFactory(18)
+    err := p.PWMWithRoot(25, pwmRoot)
+    if err.message != "" {
+        Errorf("PWMWithRoot failed: " + err.message)
+    }
+    dutyStr, _ := fs.ReadAll(pwmRoot + "/pwmchip2/pwm2/duty_cycle")
+    if !str.Equal(dutyStr, "5000000") {
+        Errorf("expected 25% of 20ms == 5000000 ns on Pi 5 pwm2, got: " + dutyStr)
+    }
+    enStr, _ := fs.ReadAll(pwmRoot + "/pwmchip2/pwm2/enable")
+    if !str.Equal(enStr, "1") {
+        Errorf("expected enable == 1")
+    }
+    p.Close()
+
+    fs.Remove(pwmRoot + "/pwmchip2/pwm2/enable")
+    fs.Remove(pwmRoot + "/pwmchip2/pwm2/duty_cycle")
+    fs.Remove(pwmRoot + "/pwmchip2/pwm2/period")
+    fs.Remove(pwmRoot + "/pwmchip2/pwm2")
+    fs.Remove(pwmRoot + "/pwmchip2/export")
+    fs.Remove(pwmRoot + "/pwmchip2/npwm")
+    fs.Remove(pwmRoot + "/pwmchip2")
+    fs.Remove(pwmRoot)
+}
+
+// TestOpenPinRejectsInvalidAndMissingChip verifies OpenPinOnChip reports an
+// explicit error when the requested gpiochip device node does not exist.
+pub fn TestOpenPinRejectsInvalidAndMissingChip() {
+    _, errNeg := gpio.OpenPin(-1)
+    if errNeg.message == "" {
+        Errorf("OpenPin(-1) must return an error")
+    }
+    p, errMissing := gpio.OpenPinOnChip(9999, 17)
+    if errMissing.message == "" {
+        p.Close()
+        Errorf("OpenPinOnChip(9999, 17) must return an error")
+    }
+    if p.IsHardware() {
+        Errorf("failed OpenPinOnChip must report IsHardware() == false")
     }
 }

@@ -5,7 +5,10 @@
 //          modern ergonomics and a Go-inspired syntax.
 //
 // File:    std/i2c_test.skink
-// Purpose: Skink module for i2c test.
+// Purpose: Unit and regression tests for std/i2c covering binary NUL-byte
+//          reads, uninitialized strlen avoidance in ReadReg, I2C_RDWR
+//          struct packing for repeated-START transfers, multi-byte/word
+//          register helpers, OpenStrict error reporting, and stub fallback.
 // Author:  Mark Oxley
 // Created: 2026
 //
@@ -23,12 +26,68 @@
 
 module i2c_test
 
+import "std/fs"
 import "std/i2c"
 import "std/libc"
+import "std/net"
+import "std/runtime"
 import "std/str"
 import "testing"
 
-// TestOpen verifies I2C bus creation.
+extern fn open(path: string, flags: int) -> int
+extern fn Skink_mem_write_byte(ptr: string, idx: int64, val: int)
+extern fn Skink_mem_byte(ptr: string, idx: int64) -> int
+
+// readU16LE decodes a 16-bit little-endian integer from raw buffer buf at off.
+fn readU16LE(buf: string, off: int) -> int {
+    return Skink_mem_byte(buf, int64(off)) | (Skink_mem_byte(buf, int64(off + 1)) << 8)
+}
+
+// readU32LE decodes a 32-bit little-endian integer from raw buffer buf at off.
+fn readU32LE(buf: string, off: int) -> int {
+    return Skink_mem_byte(buf, int64(off)) |
+           (Skink_mem_byte(buf, int64(off + 1)) << 8) |
+           (Skink_mem_byte(buf, int64(off + 2)) << 16) |
+           (Skink_mem_byte(buf, int64(off + 3)) << 24)
+}
+
+// readU64LE decodes a 64-bit little-endian integer from raw buffer buf at off.
+fn readU64LE(buf: string, off: int) -> int64 {
+    v := int64(0)
+    for i := 0; i < 8; i = i + 1 {
+        b := int64(Skink_mem_byte(buf, int64(off + i)))
+        shift := int64(i * 8)
+        v = v | (b << shift)
+    }
+    return v
+}
+
+// openLoopbackPair creates a connected TCP loopback socket pair (cli, peer, srv)
+// for exercising live hardware-fd I2C read/write/transfer code paths.
+fn openLoopbackPair(basePort: int) -> (net.Connection, net.Connection, net.Connection, bool) {
+    for attempt := 0; attempt < 10; attempt = attempt + 1 {
+        port := basePort + attempt
+        srv, lerr := net.Listen("127.0.0.1", port)
+        if lerr.message != "" {
+            continue
+        }
+        cli, cerr := net.Connect("127.0.0.1", port)
+        if cerr.message != "" {
+            srv.Close()
+            continue
+        }
+        peer, aerr := net.Accept(srv)
+        if aerr.message != "" {
+            cli.Close()
+            srv.Close()
+            continue
+        }
+        return cli, peer, srv, true
+    }
+    return net.Connection{}, net.Connection{}, net.Connection{}, false
+}
+
+// TestOpen verifies I2C bus creation in workstation fallback mode.
 pub fn TestOpen() {
     bus, err := i2c.Open(1, 0x48)
     if err.message != "" {
@@ -37,6 +96,7 @@ pub fn TestOpen() {
     if bus.fd == 0 {
         Errorf("Open should set non-zero fd")
     }
+    bus.Close()
 }
 
 // TestWrite verifies Bus.Write returns requested length.
@@ -49,7 +109,7 @@ pub fn TestWrite() {
     bus.Close()
 }
 
-// TestRead verifies Bus.Read returns data.
+// TestRead verifies Bus.Read returns writable data and tolerates optional libc.free.
 pub fn TestRead() {
     bus, _ := i2c.Open(1, 0x48)
     data, err := bus.Read(3)
@@ -74,7 +134,7 @@ pub fn TestWriteReg() {
     bus.Close()
 }
 
-// TestReadReg verifies register read.
+// TestReadReg verifies register read in stub mode.
 pub fn TestReadReg() {
     bus, _ := i2c.Open(1, 0x48)
     val, err := bus.ReadReg(0x00)
@@ -110,4 +170,193 @@ pub fn TestOpenInvalidAddr() {
     if err2.message == "" {
         Errorf("Open should reject negative bus number")
     }
+}
+
+// TestOpenStrictErrorsWhenBusMissing guards against silent stub fallback when
+// callers explicitly request hardware verification via OpenStrict.
+pub fn TestOpenStrictErrorsWhenBusMissing() {
+    bus, err := i2c.OpenStrict(9999, 0x48)
+    if err.message == "" {
+        bus.Close()
+        Errorf("OpenStrict(9999, 0x48) must return an error when /dev/i2c-9999 is absent")
+    }
+    if bus.IsHardware() {
+        Errorf("failed OpenStrict must report IsHardware() == false")
+    }
+}
+
+// TestPackRdwrWriteReadLayout verifies exact struct i2c_msg[2] and
+// struct i2c_rdwr_ioctl_data byte offsets against <linux/i2c.h> / <linux/i2c-dev.h>.
+pub fn TestPackRdwrWriteReadLayout() {
+    tx := libc.calloc(2, 1)
+    rx := libc.calloc(4, 1)
+    msgs := libc.calloc(32, 1)
+    rdwr := libc.calloc(16, 1)
+
+    i2c.PackRdwrWriteRead(0x68, tx, 1, rx, 3, msgs, rdwr)
+
+    // msgs[0]: write 1 byte to slave 0x68
+    testing.AssertEqualInt(0x68, readU16LE(msgs, 0), "msgs[0].addr")
+    testing.AssertEqualInt(0, readU16LE(msgs, 2), "msgs[0].flags == 0 (write)")
+    testing.AssertEqualInt(1, readU16LE(msgs, 4), "msgs[0].len == 1")
+    if readU64LE(msgs, 8) != int64(tx) {
+        Errorf("msgs[0].buf pointer mismatch")
+    }
+
+    // msgs[1]: repeated-START read of 3 bytes from slave 0x68
+    testing.AssertEqualInt(0x68, readU16LE(msgs, 16), "msgs[1].addr")
+    testing.AssertEqualInt(i2c.I2C_M_RD, readU16LE(msgs, 18), "msgs[1].flags == I2C_M_RD")
+    testing.AssertEqualInt(3, readU16LE(msgs, 20), "msgs[1].len == 3")
+    if readU64LE(msgs, 24) != int64(rx) {
+        Errorf("msgs[1].buf pointer mismatch")
+    }
+
+    // i2c_rdwr_ioctl_data wrapper
+    if readU64LE(rdwr, 0) != int64(msgs) {
+        Errorf("rdwr.msgs pointer mismatch")
+    }
+    testing.AssertEqualInt(2, readU32LE(rdwr, 8), "rdwr.nmsgs == 2")
+
+    libc.free(tx)
+    libc.free(rx)
+    libc.free(msgs)
+    libc.free(rdwr)
+}
+
+// TestReadBinaryNullBytes guards against the regression where Bus.Read
+// returned a raw libc.malloc string whose bounds check used strlen(),
+// panicking with out-of-bounds when binary I2C sensor data contained 0x00.
+pub fn TestReadBinaryNullBytes() {
+    if runtime.OS() == "windows" {
+        return
+    }
+    tmpPath := "/tmp/skink_i2c_null_bytes_test.bin"
+    fs.Remove(tmpPath)
+    f, ferr := fs.Open(tmpPath, "wb")
+    if ferr.message != "" {
+        Errorf("failed to create temp binary fixture")
+        return
+    }
+    f.WriteChar(0)
+    f.WriteChar(100)
+    f.WriteChar(0)
+    f.WriteChar(255)
+    f.Close()
+
+    fd := open(tmpPath, 0) // O_RDONLY = 0
+    if fd < 0 {
+        fs.Remove(tmpPath)
+        Errorf("open temp binary fixture failed")
+        return
+    }
+    bus := i2c.Bus{fd: fd, deviceAddr: 0x48, hw: true}
+    data, err := bus.Read(4)
+    bus.Close()
+    fs.Remove(tmpPath)
+    if err.message != "" {
+        Errorf("Bus.Read on hardware fd should not error")
+        return
+    }
+    if int(uint8(data[0])) != 0 || int(uint8(data[1])) != 100 || int(uint8(data[2])) != 0 || int(uint8(data[3])) != 255 {
+        Errorf("Bus.Read corrupted or truncated binary bytes past 0x00")
+    }
+}
+
+// TestReadRegHardwareFd guards against the regression where Bus.ReadReg
+// indexed a non-NUL-terminated 2-byte malloc buffer via buf[0], causing
+// Skink_str_len -> strlen() to read uninitialized/out-of-bounds heap memory.
+pub fn TestReadRegHardwareFd() {
+    if runtime.OS() == "windows" {
+        return
+    }
+    cli, peer, srv, ok := openLoopbackPair(39740)
+    if !ok {
+        Errorf("failed to create loopback socket pair")
+        return
+    }
+    reply := libc.calloc(2, 1)
+    Skink_mem_write_byte(reply, int64(0), 0xAB)
+    peer.SendAll(reply, 1)
+    libc.free(reply)
+
+    bus := i2c.Bus{fd: cli.fd, deviceAddr: 0x48, hw: true}
+    val, rerr := bus.ReadReg(0x3B)
+    if rerr.message != "" {
+        Errorf("ReadReg on live fd failed: " + rerr.message)
+    }
+    testing.AssertEqualInt(0xAB, val, "ReadReg expected 0xAB")
+
+    gotReg, _ := peer.Recv(1)
+    if str.Len(gotReg) != 1 || Skink_mem_byte(gotReg, int64(0)) != 0x3B {
+        Errorf("ReadReg did not write register address 0x3B")
+    }
+
+    bus.Close()
+    peer.Close()
+    srv.Close()
+}
+
+// TestBurstAndWordRegisterOps verifies ReadBytes, WriteBytes, ReadRegBytes,
+// WriteRegBytes, ReadRegWord, and WriteRegWord over a live hardware-backed fd
+// including embedded 0x00 bytes.
+pub fn TestBurstAndWordRegisterOps() {
+    if runtime.OS() == "windows" {
+        return
+    }
+    cli, peer, srv, ok := openLoopbackPair(39760)
+    if !ok {
+        Errorf("failed to create loopback socket pair")
+        return
+    }
+    bus := i2c.Bus{fd: cli.fd, deviceAddr: 0x40, hw: true}
+
+    // WriteRegWord(0x05, 0x1200) -> wire bytes [0x05, 0x00, 0x12] (embedded NUL!)
+    werr := bus.WriteRegWord(0x05, 0x1200)
+    if werr.message != "" {
+        Errorf("WriteRegWord failed: " + werr.message)
+    }
+    wire := libc.calloc(4, 1)
+    got1, _ := peer.Recv(3)
+    if Skink_mem_byte(got1, int64(0)) != 0x05 || Skink_mem_byte(got1, int64(1)) != 0x00 || Skink_mem_byte(got1, int64(2)) != 0x12 {
+        Errorf("WriteRegWord wire encoding mismatch")
+    }
+    libc.free(wire)
+
+    // Pre-stage 2 bytes [0x34, 0x12] for ReadRegWord(0x02) -> 0x1234
+    wordReply := libc.calloc(3, 1)
+    Skink_mem_write_byte(wordReply, int64(0), 0x34)
+    Skink_mem_write_byte(wordReply, int64(1), 0x12)
+    peer.SendAll(wordReply, 2)
+    libc.free(wordReply)
+
+    wordVal, rwerr := bus.ReadRegWord(0x02)
+    if rwerr.message != "" {
+        Errorf("ReadRegWord failed: " + rwerr.message)
+    }
+    testing.AssertEqualInt(0x1234, wordVal, "ReadRegWord little-endian decode")
+    regSel, _ := peer.Recv(1)
+    testing.AssertEqualInt(0x02, Skink_mem_byte(regSel, int64(0)), "ReadRegWord register select")
+
+    // Pre-stage 4 bytes [0x00, 0x7F, 0x00, 0x80] for ReadBytes(4)
+    burstReply := libc.calloc(5, 1)
+    Skink_mem_write_byte(burstReply, int64(0), 0x00)
+    Skink_mem_write_byte(burstReply, int64(1), 0x7F)
+    Skink_mem_write_byte(burstReply, int64(2), 0x00)
+    Skink_mem_write_byte(burstReply, int64(3), 0x80)
+    peer.SendAll(burstReply, 4)
+    libc.free(burstReply)
+
+    rxSlice, berr := bus.ReadBytes(4)
+    if berr.message != "" {
+        Errorf("ReadBytes failed: " + berr.message)
+    }
+    testing.AssertEqualInt(4, len(rxSlice), "ReadBytes length")
+    testing.AssertEqualInt(0x00, int(rxSlice[0]), "rxSlice[0]")
+    testing.AssertEqualInt(0x7F, int(rxSlice[1]), "rxSlice[1]")
+    testing.AssertEqualInt(0x00, int(rxSlice[2]), "rxSlice[2]")
+    testing.AssertEqualInt(0x80, int(rxSlice[3]), "rxSlice[3]")
+
+    bus.Close()
+    peer.Close()
+    srv.Close()
 }
